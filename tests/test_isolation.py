@@ -1807,3 +1807,19 @@ def test_ollama_context_length_targets_cloud_url_for_cloud_users(tmp_path, monke
     assert out == 1_048_576
     assert "ollama.com" in seen["url"], f"cloud user must query ollama.com, got {seen['url']}"
     assert seen["headers"].get("Authorization") == "Bearer test-cloud-key"
+
+
+def test_run_usage_output_override_uses_run_totals():
+    """The context-label tooltip's 'Last turn output' must use the run's
+    aggregated totals when a live run is available, and fall back to the
+    last-response extraction otherwise."""
+    from types import SimpleNamespace
+
+    from pydantic_ai.usage import RunUsage
+
+    from grc_agent.chat_sidebar import _run_usage_output_override
+
+    run = SimpleNamespace(usage=RunUsage(output_tokens=13, details={"reasoning_tokens": 5}))
+    assert _run_usage_output_override(run, 9, 0) == (13, 5)
+    assert _run_usage_output_override(None, 9, 0) == (9, 0)
+    assert _run_usage_output_override(SimpleNamespace(usage=None), 9, 0) == (9, 0)

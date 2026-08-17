@@ -687,6 +687,12 @@ def test_chatsidebar_run_agent_turn_produces_trace_row(tmp_path):
     # Run id should be a real UUID from pydantic-ai
     assert t["run_id"] is not None and len(t["run_id"]) > 10
 
+    # The tok/s status-line rate must be computed from the real turn: visible
+    # output tokens over measured generation time (both > 0 for a real stream).
+    rate = getattr(sidebar, "_last_turn_rate", None)
+    assert rate is not None and rate > 0, f"expected a positive tok/s rate, got {rate!r}"
+    assert t["output_tokens"] > 0, "the trace row must carry the turn's output tokens"
+
 
 def test_chatsidebar_run_agent_turn_error_produces_trace_with_error(tmp_path):
     """When _run_agent_turn catches an exception, the trace row must have

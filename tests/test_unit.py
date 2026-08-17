@@ -2656,6 +2656,14 @@ def test_context_label_updates_from_active_run_usage():
     resp = ModelResponse(parts=[], usage=usage)
     run_mock = MagicMock()
     run_mock.all_messages.return_value = [resp]
+    # The run's own aggregated usage is authoritative for the per-turn
+    # output/reasoning totals (a bare MagicMock would leak MagicMock objects
+    # into the label's format strings).
+    from pydantic_ai.usage import RunUsage
+
+    run_mock.usage = RunUsage(
+        input_tokens=14500, output_tokens=1200, details={"reasoning_tokens": 800}
+    )
     sidebar._active_run = run_mock
 
     sidebar._update_context_label()

@@ -418,6 +418,13 @@ def test_save_turn_trace_persists_full_row(tmp_path):
         run_id = "run-abc"
         conversation_id = "conv-xyz"
 
+        @property
+        def usage(self):
+            # The run's own aggregated usage — the authoritative per-turn
+            # totals (finalize reads output/reasoning/total from here, not
+            # from the messages' last response).
+            return _FakeUsage()
+
         def all_messages(self):
             return [
                 ModelRequest(parts=[UserPromptPart(content="p")], instructions="be helpful"),
@@ -666,3 +673,82 @@ def test_v0_to_v1_migration_survives_crash_after_alter(tmp_path, monkeypatch):
             "idempotent backfill must recover the first_message even after "
             "a crash between ALTER (auto-committed) and backfill (rolled back)"
         )
+
+
+def test_trace_finalize_uses_run_aggregated_usage_not_last_response():
+    """Per-turn output/reasoning/total must come from the run's own aggregated
+    usage (pydantic-ai sums every request in THIS run). The old extraction
+    took the LAST ModelResponse's usage, which undercounts multi-request
+    turns — and all_messages() includes prior turns' responses, so summing
+    those would leak across turns. Verified live: a tool-calling turn's
+    run.usage.output_tokens equals the sum of both responses, while
+    all_messages() also contains the previous turn's response."""
+    from types import SimpleNamespace
+
+    from pydantic_ai.messages import (
+        ModelRequest,
+        ModelResponse,
+        RequestUsage,
+        TextPart,
+        UserPromptPart,
+    )
+    from pydantic_ai.usage import RunUsage
+
+    from grc_agent.trace import TraceRecorder
+
+    # all_messages() includes a PRIOR turn's response (4 output tokens) plus
+    # this turn's two responses (4 + 9 = 13). The run's own usage is 13.
+    prior_turn_response = ModelResponse(
+        parts=[TextPart(content="prior")], usage=RequestUsage(input_tokens=10, output_tokens=4)
+    )
+    this_turn_responses = [
+        ModelResponse(
+            parts=[TextPart(content="first")], usage=RequestUsage(input_tokens=20, output_tokens=4)
+        ),
+        ModelResponse(
+            parts=[TextPart(content="final")], usage=RequestUsage(input_tokens=30, output_tokens=9)
+        ),
+    ]
+    messages = [
+        ModelRequest(parts=[UserPromptPart(content="prior prompt")]),
+        prior_turn_response,
+        ModelRequest(parts=[UserPromptPart(content="this turn")]),
+        *this_turn_responses,
+    ]
+
+    run = SimpleNamespace(
+        run_id="run-1",
+        conversation_id="conv-1",
+        usage=RunUsage(
+            input_tokens=50, output_tokens=13, details={"reasoning_tokens": 5}
+        ),
+        all_messages=lambda: messages,
+        result=SimpleNamespace(output="final"),
+    )
+
+    rec = TraceRecorder(
+        session_id=None, provider="p", model="m", base_url="b", user_prompt="u", origin_page_path=None
+    )
+    row = rec.finalize(run)
+
+    assert row["output_tokens"] == 13, "must be the run's total, not the last response's 9"
+    assert row["reasoning_tokens"] == 5, "reasoning must come from run.usage.details"
+    assert row["total_tokens"] == 63, "must be the run's total (50+13), not conversation-wide"
+    # input_tokens keeps the last-response semantic: the context size at the
+    # end of the turn (what the sidebar's context label displays).
+    assert row["input_tokens"] == 30
+    assert row["run_id"] == "run-1"
+    assert row["conversation_id"] == "conv-1"
+
+
+def test_trace_finalize_without_run_records_zero_usage():
+    from grc_agent.trace import TraceRecorder
+
+    rec = TraceRecorder(
+        session_id=None, provider="p", model="m", base_url="b", user_prompt="u", origin_page_path=None
+    )
+    row = rec.finalize(run=None)
+    assert row["output_tokens"] == 0
+    assert row["reasoning_tokens"] == 0
+    assert row["total_tokens"] == 0
+    assert row["input_tokens"] == 0

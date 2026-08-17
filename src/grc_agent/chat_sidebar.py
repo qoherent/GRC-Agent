@@ -237,6 +237,12 @@ def _openrouter_context_length(model: str) -> int | None:
 def _tokens_per_second(output_tokens: int | None, duration_ms: int | None) -> float | None:
     """Generation rate for the last turn, or None when it cannot be measured.
 
+    `output_tokens` is the turn's VISIBLE output (total minus reasoning) and
+    `duration_ms` is the time the model was actually generating (tool-call
+    time excluded, measured per model request in _stream_request) — so the
+    number is the rate the user watched text stream, not tokens per
+    wall-clock turn second.
+
     Returns None rather than 0 for a turn that produced no tokens or took no
     measurable time — showing "0 tok/s" would read as a stalled backend.
     """
@@ -366,6 +372,7 @@ class _StreamCtx:
         "tools",
         "full_raw_text",
         "last_flush",
+        "generation_ms",
     )
 
     def __init__(self, box: Gtk.Box) -> None:
@@ -385,6 +392,10 @@ class _StreamCtx:
         self.tools: dict[str, Gtk.Expander] = {}
         self.full_raw_text = ""
         self.last_flush = 0.0
+        # Wall time the model spent generating this turn (summed per model
+        # request in _stream_request). Tool-call execution happens between
+        # requests and is deliberately excluded — it is not generation.
+        self.generation_ms = 0.0
 
 
 class _ChatTextView(Gtk.ScrolledWindow):
@@ -464,6 +475,23 @@ def _collect_token_usage(msgs) -> tuple[int, int, int, int]:
             last_reasoning = reasoning
         total += getattr(u, "total_tokens", 0) or 0
     return last_input, last_output, last_reasoning, total
+
+
+def _run_usage_output_override(
+    run: Any, last_output: int, last_reasoning: int
+) -> tuple[int, int]:
+    """Replace last-response-only output/reasoning with the run's aggregated
+    totals when a live run is available (see _update_context_label)."""
+    if run is None:
+        return last_output, last_reasoning
+    u = getattr(run, "usage", None)
+    if u is None:
+        return last_output, last_reasoning
+    details = getattr(u, "details", None) or {}
+    return (
+        getattr(u, "output_tokens", 0) or 0,
+        details.get("reasoning_tokens", 0) or 0,
+    )
 
 
 class ChatSidebar(Gtk.Box):
@@ -722,6 +750,15 @@ class ChatSidebar(Gtk.Box):
             last_reasoning_tokens,
             total_session_tokens,
         ) = _collect_token_usage(msgs)
+        # The run's own aggregated usage is the authoritative per-turn total:
+        # all_messages() includes prior turns' responses, and the
+        # last-response-only extraction undercounts multi-request turns. The
+        # context label's main number (last_input_tokens) keeps the
+        # last-response semantic — it is the context size at the end of the
+        # turn.
+        last_output_tokens, last_reasoning_tokens = _run_usage_output_override(
+            getattr(self, "_active_run", None), last_output_tokens, last_reasoning_tokens
+        )
 
         active_provider = getattr(self, "_active_provider", "") or ""
         active_model = getattr(self, "_active_model", "") or ""
@@ -1338,6 +1375,7 @@ class ChatSidebar(Gtk.Box):
     async def _stream_request(
         self, ctx: _StreamCtx, node, run, recorder: TraceRecorder | None = None
     ) -> None:
+        t0 = time.monotonic()
         async with node.stream(run.ctx) as stream:
             async for event in stream:
                 if isinstance(event, PartStartEvent):
@@ -1346,6 +1384,10 @@ class ChatSidebar(Gtk.Box):
                     self._on_part_delta(ctx, event)
                 if recorder is not None:
                     recorder.on_event(event)
+        # The stream's wall time is this model request's generation time
+        # (first-token latency included); tool-call time happens between
+        # requests and is excluded from the tok/s denominator.
+        ctx.generation_ms += (time.monotonic() - t0) * 1000
         # Force a final flush so the last throttled chunk is painted before the
         # node hands control back (and before any markdown re-render).
         self._flush_streaming(ctx, force=True)
@@ -2180,12 +2222,19 @@ class ChatSidebar(Gtk.Box):
             if recorder is not None:
                 try:
                     row = recorder.finalize(active_run, turn_exc)
-                    # Generation rate for the status line. Taken from the trace
-                    # row rather than timed separately, so the number shown and
-                    # the number persisted can never disagree.
-                    self._last_turn_rate = _tokens_per_second(
-                        row.get("output_tokens"), row.get("duration_ms")
+                    # Generation rate for the status line. Visible output
+                    # tokens (turn total minus hidden reasoning) over the
+                    # time the model was actually generating (tool-call time
+                    # excluded) — the rate the user watched text stream, not
+                    # tokens per wall-clock turn second. Taken from the trace
+                    # row + the stream timing rather than timed separately, so
+                    # the number shown and the number persisted can never
+                    # disagree.
+                    visible_output = max(
+                        0, (row.get("output_tokens") or 0) - (row.get("reasoning_tokens") or 0)
                     )
+                    gen_ms = getattr(ctx, "generation_ms", 0) or 0
+                    self._last_turn_rate = _tokens_per_second(visible_output, gen_ms)
                     if turn_exc is None:
                         await self._save_trace(row)
                     else:

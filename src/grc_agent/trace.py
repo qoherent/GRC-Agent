@@ -109,16 +109,18 @@ def _format_exc(exc: BaseException | None) -> str | None:
     return f"{type(exc).__name__}: {exc}"
 
 
-def _extract_usage_and_prompt_hash(messages: list[Any]) -> tuple[int, int, int, int, str]:
-    """Walk a message list once and return
-    (input_tokens, output_tokens, reasoning_tokens, total_tokens, system_prompt_hash).
+def _extract_input_and_prompt_hash(messages: list[Any]) -> tuple[int, str]:
+    """Walk a message list once and return (input_tokens, system_prompt_hash).
 
-    The last ModelResponse's usage is taken as the per-turn usage (mirrors
-    chat_sidebar._collect_token_usage); total_tokens accumulates across all
-    ModelResponses in the turn. system_prompt_hash is sha256 of the first
-    ModelRequest.instructions found.
+    input_tokens is the LAST ModelResponse's input — the context size at the
+    end of the turn, which is what the sidebar's context label displays.
+    Per-turn output/reasoning/total come from the run's own aggregated usage
+    instead (see TraceRecorder.finalize): all_messages() includes prior
+    turns' responses, so summing them here would leak across turns, and the
+    last-response-only output undercounts multi-request turns.
+    system_prompt_hash is sha256 of the first ModelRequest.instructions found.
     """
-    input_tokens = output_tokens = reasoning_tokens = total_tokens = 0
+    input_tokens = 0
     system_prompt_hash = ""
     for m in messages:
         mcls = m.__class__.__name__
@@ -127,20 +129,11 @@ def _extract_usage_and_prompt_hash(messages: list[Any]) -> tuple[int, int, int, 
             if not u:
                 continue
             input_tokens = getattr(u, "input_tokens", 0) or 0
-            output_tokens = getattr(u, "output_tokens", 0) or 0
-            reasoning = 0
-            details = getattr(u, "details", None)
-            if isinstance(details, dict):
-                reasoning = details.get("reasoning_tokens", 0) or 0
-            elif hasattr(u, "reasoning_tokens"):
-                reasoning = getattr(u, "reasoning_tokens", 0) or 0
-            reasoning_tokens = reasoning
-            total_tokens += getattr(u, "total_tokens", 0) or 0
         elif mcls == "ModelRequest" and not system_prompt_hash:
             instr = getattr(m, "instructions", None)
             if instr:
                 system_prompt_hash = hashlib.sha256(instr.encode("utf-8")).hexdigest()
-    return input_tokens, output_tokens, reasoning_tokens, total_tokens, system_prompt_hash
+    return input_tokens, system_prompt_hash
 
 
 class TraceRecorder:
@@ -229,9 +222,23 @@ class TraceRecorder:
             except Exception:
                 messages = []
 
-        input_tokens, output_tokens, reasoning_tokens, total_tokens, system_prompt_hash = (
-            _extract_usage_and_prompt_hash(messages)
-        )
+        input_tokens, system_prompt_hash = _extract_input_and_prompt_hash(messages)
+
+        # Per-turn output/reasoning/total come from the run's own aggregated
+        # usage — pydantic-ai sums every request in THIS run (verified: a
+        # tool-calling turn's run.usage.output_tokens equals the sum of both
+        # responses, while all_messages() also contains prior turns' responses
+        # and the last-response-only extraction undercounts). input_tokens
+        # keeps the last-response semantic above: it is the context size at
+        # the end of the turn, which is what the sidebar's context label shows.
+        output_tokens = reasoning_tokens = total_tokens = 0
+        if run is not None:
+            usage = getattr(run, "usage", None)
+            if usage is not None:
+                output_tokens = getattr(usage, "output_tokens", 0) or 0
+                total_tokens = getattr(usage, "total_tokens", 0) or 0
+                details = getattr(usage, "details", None) or {}
+                reasoning_tokens = details.get("reasoning_tokens", 0) or 0
 
         final_output = ""
         result = getattr(run, "result", None) if run is not None else None
