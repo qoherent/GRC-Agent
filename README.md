@@ -110,9 +110,10 @@ interpreter — a uv-managed build, or a `pyenv`/`conda` shim earlier on your
 `PATH` — will fail to `import gnuradio` even with `--system-site-packages`.
 
 ### 3. Setup LLM Backend
-Two unified chat providers, switchable anytime from the app's Settings dialog:
+Three chat providers, switchable anytime from the app's Settings dialog:
 1. **Ollama** (Local daemon or Ollama Cloud)
 2. **OpenAI-Compatible** (OpenRouter, llama.cpp, vLLM, LM Studio, OpenAI, Groq, etc.)
+3. **ChatGPT Plus/Pro (Codex)** — OAuth sign-in, no API key (see Option C below)
 
 The active provider, model name, base URL, and API keys persist in `.env` and apply immediately on Save (no restart needed).
 

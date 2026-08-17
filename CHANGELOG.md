@@ -7,7 +7,7 @@ Versioning starts fresh at `0.1.0` for the current native GTK3 architecture —
 earlier `v1.0.0`/`v2.0.0` tags belonged to an unrelated, since-rewritten
 web-dashboard codebase and are not part of this history.
 
-## [Unreleased]
+## [0.2.0] - 2026-08-17
 
 ### Added
 - `save_block` tool: exports an existing Embedded Python Block (`epy_block`) instance into GNU Radio's native hier-block library (`~/.grc_gnuradio`) as a standalone, reusable catalog block — available to `change_graph` in this flowgraph or any other. Not an out-of-tree (OOT) module; the current flowgraph's own `epy_block` instance is left untouched.

@@ -35,7 +35,7 @@ Every block the agent mentions becomes a clickable tag in chat. Click it — the
 Run your flowgraph from GRC's toolbar. If it fails, the agent is **automatically notified** with the return code, reads the full log via `get_run_log`, diagnoses the failure, and proposes a fix — then it edits the graph and re-validates. The whole loop runs with zero manual copy-paste.
 
 ### 🔄 Multiple Providers, Live-Swappable
-Choose **Ollama** (local, free), **Ollama Cloud**, **OpenRouter**, or any OpenAI-compatible endpoint from the Settings dialog. Switch mid-session; changes apply immediately with no restart, and chat history is preserved.
+Choose **Ollama** (local or cloud), any **OpenAI-compatible** endpoint (OpenRouter, llama.cpp, vLLM, …), or **ChatGPT Plus/Pro (Codex)** with OAuth sign-in from the Settings dialog. Switch mid-session; changes apply immediately with no restart, and chat history is preserved.
 
 ---
 
