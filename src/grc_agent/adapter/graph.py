@@ -826,7 +826,7 @@ def change_graph(  # noqa: C901
     remove_connections: list[str] | None = None,
     force: bool = False,
 ) -> dict[str, Any]:
-    from grc_agent.adapter.layout import _compute_ranks, _find_block_placement
+    from grc_agent.adapter.layout import _compute_ranks, compute_full_layout
     from grc_agent.adapter.snapshots import _prune_old_backups, push_undo_snapshot
 
     add_blocks = _sanitize_data(add_blocks)
@@ -941,46 +941,12 @@ def change_graph(  # noqa: C901
             # all, so no code path — native or otherwise — can know a
             # block's true footprint headlessly.
             #
-            # Placement strategy: for each new block, find a target point
-            # near its connected neighbors (from add_connections in the same
-            # batch), or the graph's centroid if it has no connections.
-            # Then spiral-search outward on a grid to find the nearest
-            # non-overlapping slot. This fills empty space instead of always
-            # extending to the right, and keeps connected blocks near each
-            # other so wires stay short. Must never need agent or user
-            # input: the agent's own context has block coordinates filtered
-            # out entirely, so positioning has to be fully self-contained.
-            occupied: list[tuple[float, float]] = []
-            block_coords: dict[str, tuple[float, float]] = {}
-            for b in flow_graph.blocks:
-                coord = b.states.get("coordinate")
-                if isinstance(coord, (list, tuple)) and len(coord) == 2:
-                    c = (float(coord[0]), float(coord[1]))
-                    occupied.append(c)
-                    block_coords[b.name] = c
-
-            # Pre-parse add_connections to build a neighbor map so blocks
-            # connecting to each other (or to existing blocks) get placed
-            # near their neighbors.
-            neighbor_map: dict[str, set[str]] = {}
-            if add_connections:
-                for conn_str in add_connections:
-                    p = parse_conn(conn_str)
-                    if p:
-                        neighbor_map.setdefault(p["src_block"], set()).add(p["dst_block"])
-                        neighbor_map.setdefault(p["dst_block"], set()).add(p["src_block"])
-
-            # Compute graph bounding box for centroid fallback
-            if occupied:
-                bbox = (
-                    min(c[0] for c in occupied),
-                    min(c[1] for c in occupied),
-                    max(c[0] for c in occupied),
-                    max(c[1] for c in occupied),
-                )
-            else:
-                bbox = ()
-
+            # Placement strategy: every block (existing and new) is
+            # relaid-out from scratch after this batch's blocks are created
+            # — see compute_full_layout below, called once after the loop.
+            # Must never need agent or user input: the agent's own context
+            # has block coordinates filtered out entirely, so positioning
+            # has to be fully self-contained.
             ranks = _compute_ranks(flow_graph, new_block_names, add_connections)
 
             # Sort add_blocks topologically by rank so upstream blocks (sources)
@@ -1017,12 +983,6 @@ def change_graph(  # noqa: C901
                     )
                     continue
 
-                placement = _find_block_placement(
-                    instance_name, occupied, neighbor_map, block_coords, bbox, ranks
-                )
-                occupied.append(placement)
-                block_coords[instance_name] = placement
-                block.states["coordinate"] = list(placement)
                 block.params["id"].set_value(str(instance_name))
 
                 for k, v in (item.get("params") or {}).items():
@@ -1045,6 +1005,19 @@ def change_graph(  # noqa: C901
                                 "message": f"Failed to set state {item['state']!r} on block {instance_name!r}: {e}",
                             }
                         )
+
+            # Relayout every block in the flowgraph from scratch (not just
+            # the ones just added) — variable/options/import/snippet blocks
+            # pack into a header band at the top, everything else flows
+            # below via rank-ordered placement. Runs only here, gated on
+            # add_blocks being non-empty — change_graph is the only caller
+            # of compute_full_layout, and manual/GUI edits never call
+            # change_graph, so this can't run outside an agent-driven edit.
+            full_positions = compute_full_layout(flow_graph, new_block_names, add_connections, ranks=ranks)
+            for b in flow_graph.blocks:
+                pos = full_positions.get(b.name)
+                if pos is not None:
+                    b.states["coordinate"] = list(pos)
 
         # Phase 4: update_params
         if update_params:

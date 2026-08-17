@@ -44,7 +44,7 @@ The application merges the GNU Radio Companion desktop canvas with the AI sideba
 
 ## Genius Tool Design
 
-The agent interacts with the flowgraph through five highly specialized tools:
+The agent interacts with the flowgraph through six highly specialized tools:
 
 ### 1. Context-Efficient Graph Inspection (`inspect_graph`)
 
@@ -76,17 +76,21 @@ Graph editing executes a batch of updates in a strict 7-phase transactional sequ
 
 1. **`remove_connections`**: Drops specified connections.
 2. **`remove_blocks`**: Deletes block instances from the graph.
-3. **`add_blocks`**: Instantiates new blocks, placing them using a grid-spaced spiral collision-avoidance search algorithm.
+3. **`add_blocks`**: Instantiates new blocks, then relays out the *entire* flowgraph via the header-band/flow-band algorithm described below.
 4. **`update_params`**: Updates block parameters (e.g. sample rates, thresholds).
 5. **`auto_resolve_types`**: Dynamically propagates type selections (`dtype`) for parameters set to `"auto"` based on neighboring ports.
 6. **`update_states`**: Configures block execution states (enabled, disabled, or bypass).
 7. **`add_connections`**: Wires ports together to re-establish the DSP signal chain.
 
-#### Grid-Spaced Spiral Coordinate Resolution
-Since the LLM lacks spatial awareness, block positioning is resolved programmatically. Coordinates are snapped to grid boundaries (`BLOCK_FOOTPRINT_W=300`, `BLOCK_FOOTPRINT_H=220`, and `BLOCK_SPACING=60`), searching outward in concentric Chebyshev rings near connected neighbors to prevent overlaps on the visual canvas.
+#### Header-Band / Flow-Band Full Relayout
+Since the LLM lacks spatial awareness, block positioning is resolved programmatically — and, whenever a batch adds at least one block, the *whole* flowgraph (not just the new block) is relaid out from scratch. Every block is classified into a header band (variables, the options block, imports, snippets — packed left-to-right in fixed-width rows, alphabetically sorted, the options block always pinned first) or a flow band (everything else, laid out left-to-right by topological rank via `grandalf`, one grid cell per block, with a barycenter heuristic ordering same-rank blocks by their upstream position). Coordinates snap to a shared grid (`BLOCK_FOOTPRINT_W=300`, `BLOCK_FOOTPRINT_H=220`, `BLOCK_SPACING=60`) so overlap detection stays consistent across both bands. This only ever runs from `change_graph`'s own mutation — a user's manual canvas edits are never touched by it.
 
 #### Self-Correction & Native Validation
 At the end of a transaction, GNU Radio's native validation compiles and validates the new state. If validation fails, changes are rolled back, the prior state is restored, and a `ModelRetry` exception containing the exact compiler feedback is raised, enabling self-correction for up to 3 attempts.
+
+### 6. Reusable Block Library (`save_block`)
+
+Exports an existing Embedded Python Block (`epy_block`) instance's source into GNU Radio's own native hier-block library (`~/.grc_gnuradio`) as a standalone, reusable catalog block — available to `change_graph` in this flowgraph or any other, without recreating the same logic from scratch each time. This is distinct from an out-of-tree (OOT) module (`gr-modtool`, a separate, heavier build toolchain the agent still has no access to); it's GNU Radio's own lighter mechanism for a loose, reusable block file. The current flowgraph's own `epy_block` instance is left untouched — the exported block is a new, separately-named catalog entry for future use only. Validation never calls GNU Radio's own `Platform.build_library()` on a disposable instance (that would corrupt the shared, process-wide block registry — see `AGENTS.md`); instead it builds and instantiates the candidate block class directly via `Platform.new_block_class()`, a pure function with no such side effect.
 
 ---
 
@@ -133,7 +137,7 @@ This replaces the old Yes/No "fix it?" bubble — the agent now reads the log as
 
 ## Integration Scenarios Benchmark
 
-The integration test suite executes 13 distinct scenarios mapping real-world editing workflows. All scenarios pass successfully across both local and cloud LLM backends:
+The integration test suite executes 14 distinct scenarios mapping real-world editing workflows. The first 13 pass across both local and cloud LLM backends; `25_save_epy_block_to_library` is Ollama Cloud-only so far (this project's standard live-test backend — see the Test Gate in `AGENTS.md`):
 
 | Scenario Name | qwen3.6:35b (Ollama Local) | deepseek-v4-flash (Ollama Cloud) | Verification Objective |
 | :--- | :---: | :---: | :--- |
@@ -150,3 +154,4 @@ The integration test suite executes 13 distinct scenarios mapping real-world edi
 | `21_type_conversion_and_conjugate` | Pass | Pass | Converts signal types and applies conjugate operations across connected blocks. |
 | `22_fm_rx_filter_squelch` | Pass | Pass | Inserts a low-pass filter and simple squelch block inline inside an FM receiver chain. |
 | `24_generate_python_preview` | Pass | Pass | Previews the generated Python source of the active flowgraph via `generate_python`. |
+| `25_save_epy_block_to_library` | Not yet run | Pass | Writes a new Embedded Python Block, wires it in, then exports it via `save_block` into an isolated hier-block library dir. |

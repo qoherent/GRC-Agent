@@ -69,10 +69,10 @@ flowchart TB
 | `chat_sidebar.py` | Native GTK chat UI. Streaming via `agent.iter()` + `run.next()`, settings dialog with live-swap, provider badge, auto-scroll tracking, Send/Stop button. |
 | `native_canvas.py` | GRC `MainWindow` signal-wiring: dynamic graph resolution from `window.current_page`, notebook tab tracking, manual-edit disk-sync, agent-edit redraw, pan. |
 | `exec_monitor.py` | Detects flowgraph execution failures from GRC's console message bus; auto-notifies the agent with the return code (agent reads the full log via `get_run_log`). |
-| `agent_factory.py` | Builds the interactive `Agent` from saved settings (live-swappable). Includes preflight connection check and `ModelRequestLogger`. |
+| `agent_factory.py` | Builds the interactive `Agent` from saved settings (live-swappable). Includes preflight connection check, `ModelRequestLogger`, and tiered context compaction (`pydantic-ai-harness`). |
 | `db.py` | SQLite chat-session persistence (save/load/delete, recent-sessions list). |
 | `adapter/` | Sole `gnuradio` importer. Flowgraph load/save, `change_graph`, param filtering, RAG (vector search with an SQLite FTS5 lexical fallback) with cached embed client, codegen. |
-| `agent.py` | PydanticAI tools (`inspect_graph`, `query_knowledge`, `generate_python`, `change_graph`, `get_run_log`), capabilities, scenario harness. |
+| `agent.py` | PydanticAI tools (`inspect_graph`, `query_knowledge`, `generate_python`, `change_graph`, `get_run_log`, `save_block`), capabilities, scenario harness. |
 | `settings.py` | Persisted preferences (provider, models, API keys) in `.env` via `python-dotenv`. |
 | `ingest.py` | Builds the catalog/docs vector databases on first use. |
 
@@ -185,6 +185,4 @@ uv run ruff check                             # lint
 
 - [`AGENTS.md`](AGENTS.md) — architecture, engineering rules, and live-verified design decisions.
 - [`docs/technical_overview.md`](docs/technical_overview.md) — a deeper architecture writeup with diagrams and benchmarks.
-- [`docs/efficiency_audit.md`](docs/efficiency_audit.md) — performance/efficiency-focused audit: what's fixed, what's deferred and why.
-- [`docs/harness_tutorial_audit.md`](docs/harness_tutorial_audit.md) — capability audit against every GNU Radio wiki tutorial in the docs corpus: what the harness can and can't do, and why.
 - [`LICENSE`](LICENSE) / [`NOTICE.md`](NOTICE.md) — AGPL-3.0-licensed; the bundled GNU Radio docs corpus is CC BY-SA 3.0.

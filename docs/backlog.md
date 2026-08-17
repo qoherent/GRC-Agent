@@ -19,7 +19,8 @@ Users want the agent to handle the entire lifecycle of custom Out-of-Tree (OOT) 
 4. **Compilation & Installation**: Orchestrating building (`cmake`, `make`) and installation workflows so GRC can discover the new block.
 
 #### Current Workaround / State
-* **Integration is supported**: Any block that is already installed locally is successfully discovered via GNU Radio's block catalog and can be added/configured/wired using [`change_graph`](../src/grc_agent/agent.py#L450).
+* **Integration is supported**: Any block that is already installed locally is successfully discovered via GNU Radio's block catalog and can be added/configured/wired using [`change_graph`](../src/grc_agent/agent.py#L557).
+* **Reusable-block persistence is now supported, but this is not OOT**: [`save_block`](../src/grc_agent/adapter/block_library.py) exports a working Embedded Python Block into GNU Radio's own native hier-block library (`~/.grc_gnuradio`), so it becomes a reusable catalog block for future flowgraphs — closing a narrow slice of this gap (packaging already-working Python logic for reuse). It does not scaffold, generate, or compile a real OOT module; there is still no `gr-modtool` scaffolding, no C++ support, and no build/install orchestration.
 * **Development is not supported**: GRC-Agent is currently confined to the flowgraph layout and configuration layer. It lacks tools to interact with codebases outside the flowgraph or run compiler/system commands.
 
 ---

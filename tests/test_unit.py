@@ -8,11 +8,13 @@ from pathlib import Path
 import pytest
 
 from grc_agent.adapter import (
-    BLOCK_FOOTPRINT_W,
-    BLOCK_SPACING,
+    GRID_H,
+    GRID_W,
     _compute_ranks,
-    _find_block_placement,
+    _order_flow_band,
+    _pack_header_band,
     _rects_overlap,
+    _validate_block_definition,
     change_graph,
     generate_flowgraph_py,
     inspect_graph,
@@ -21,6 +23,7 @@ from grc_agent.adapter import (
     preview_flowgraph_py,
     query_catalog,
     query_docs,
+    save_block_to_library,
     set_param,
 )
 from grc_agent.agent import inspect_graph_func
@@ -164,12 +167,11 @@ def test_change_graph_unsaved_flowgraph():
 
 
 def test_change_graph_add_block_no_overlap_with_existing(temp_dial_tone):
+    # change_graph relays out the WHOLE graph on every add_blocks call (see
+    # compute_full_layout), not just the new block — so "existing" blocks'
+    # coordinates change too. Assert non-overlap across every block's
+    # POST-call coordinate, not against a pre-call snapshot.
     fg = load_flow_graph(str(temp_dial_tone))
-    existing_coords = [
-        tuple(b.states["coordinate"])
-        for b in fg.blocks
-        if isinstance(b.states.get("coordinate"), (list, tuple))
-    ]
     res = change_graph(
         fg,
         add_blocks=[
@@ -182,8 +184,14 @@ def test_change_graph_add_block_no_overlap_with_existing(temp_dial_tone):
         force=True,
     )
     assert res["ok"] is True
-    new_coord = tuple(fg.get_block("my_throttle").states["coordinate"])
-    assert not any(_rects_overlap(*new_coord, *other) for other in existing_coords)
+    coords = [
+        tuple(b.states["coordinate"])
+        for b in fg.blocks
+        if isinstance(b.states.get("coordinate"), (list, tuple))
+    ]
+    for i, a in enumerate(coords):
+        for b in coords[i + 1 :]:
+            assert not _rects_overlap(*a, *b)
 
 
 def test_change_graph_add_blocks_no_visual_overlap_for_busy_block(temp_empty):
@@ -250,8 +258,10 @@ def test_change_graph_add_blocks_batch_no_overlap(temp_empty):
 def test_change_graph_add_blocks_batch_no_overlap_large(temp_empty):
     # Regression test: adding a large batch of blocks used to stack them all in
     # one endlessly-tall column (old column-layout) or place later ones on top
-    # of earlier ones (pre-AABB-check). The spiral placement now guarantees that
-    # no two blocks in a batch overlap, regardless of batch size.
+    # of earlier ones (pre-AABB-check). Under compute_full_layout, these 12
+    # disconnected blocks_null_sink instances all share grandalf rank 0 (no
+    # connections between them), so they land in one column, multiple rows —
+    # still guaranteed unique and non-overlapping regardless of batch size.
     fg = load_flow_graph(str(temp_empty))
     count = 12  # deliberately large enough to force multi-row and multi-column placement
     res = change_graph(
@@ -317,28 +327,317 @@ def test_compute_ranks_reflects_topology(temp_dial_tone):
     assert ranks["audio_sink"] == 2
 
 
-def test_find_block_placement_anchors_by_rank_distance_not_fixed_one_hop():
-    # Regression for the greedy placement's core flaw: it used to assume
-    # every connected neighbor is exactly one grid step away, regardless of
-    # actual topological distance. A block with two neighbors 2 and 1 ranks
-    # behind it (a fan-in from a source and from something already one hop
-    # downstream) must anchor proportionally further right than a naive
-    # "average neighbor x + one grid step" would place it.
-    grid_w = BLOCK_FOOTPRINT_W + BLOCK_SPACING
-    neighbor_map = {"new_block": {"far_source", "near_upstream"}}
-    block_coords = {"far_source": (0.0, 0.0), "near_upstream": (grid_w, 0.0)}
-    ranks = {"far_source": 0, "near_upstream": 1, "new_block": 3}
+# ==========================================
+# compute_full_layout / header-band relayout tests
+# ==========================================
 
-    naive_target_x = (block_coords["far_source"][0] + block_coords["near_upstream"][0]) / 2 + grid_w
+_DIAL_TONE_FLOW_BLOCKS = {
+    "analog_noise_source_x_0",
+    "analog_sig_source_x_0",
+    "analog_sig_source_x_1",
+    "blocks_add_xx",
+    "audio_sink",
+    "freq_sink_0",
+    "lpf_0",
+    "time_sink_0",
+    "waterfall_sink_0",
+}
 
-    x, _y = _find_block_placement("new_block", [], neighbor_map, block_coords, (), ranks)
-    # far_source is 3 ranks behind (anchor: 0 + 3*grid_w), near_upstream is
-    # 2 ranks behind (anchor: grid_w + 2*grid_w) -> average is 3.5*grid_w,
-    # well past the naive fixed-one-hop target of 1.5*grid_w.
-    assert x > naive_target_x + grid_w, (
-        f"expected rank-distance-aware placement well past the naive target "
-        f"({naive_target_x}), got x={x}"
+
+def test_change_graph_new_variable_lands_in_header_band_not_centroid(temp_dial_tone):
+    # Direct regression test for the reported bug: a new variable block used
+    # to land at the graph's bounding-box centroid (mid signal-flow), since
+    # variables never appear in add_connections and so always had
+    # neighbor_coords == []. It must now land in the header band, strictly
+    # above every signal-flow block.
+    fg = load_flow_graph(str(temp_dial_tone))
+    res = change_graph(
+        fg,
+        add_blocks=[{"block_id": "variable", "instance_name": "new_var", "params": {"value": "1.0"}}],
     )
+    assert res["ok"] is True
+    new_y = fg.get_block("new_var").states["coordinate"][1]
+    flow_min_y = min(fg.get_block(n).states["coordinate"][1] for n in _DIAL_TONE_FLOW_BLOCKS)
+    assert new_y < flow_min_y
+
+
+def test_change_graph_new_variable_alphabetically_packed_among_existing_variables(temp_dial_tone):
+    # Existing variables sort: ampl, freq_350, freq_440, noise, samp_rate.
+    # avg_level sorts between ampl and freq_350 -> header order becomes:
+    # options, ampl, avg_level, freq_350, freq_440, noise, samp_rate (7
+    # blocks, 6 cols/row -> one row, since flow band needs only 4 columns).
+    fg = load_flow_graph(str(temp_dial_tone))
+    res = change_graph(
+        fg,
+        add_blocks=[{"block_id": "variable", "instance_name": "avg_level", "params": {"value": "1.0"}}],
+    )
+    assert res["ok"] is True
+
+    def coord(name):
+        return tuple(fg.get_block(name).states["coordinate"])
+
+    assert coord("ampl") == (1 * GRID_W, 12.0)
+    assert coord("avg_level") == (2 * GRID_W, 12.0)
+    assert coord("freq_350") == (3 * GRID_W, 12.0)
+    assert coord("freq_440") == (4 * GRID_W, 12.0)
+    assert coord("noise") == (5 * GRID_W, 12.0)
+    assert coord("samp_rate") == (0.0, 12.0 + GRID_H)
+
+
+def test_change_graph_options_block_pinned_first_in_header_band(temp_dial_tone):
+    # "aaa_first" sorts alphabetically before every existing variable, but
+    # options must still occupy column 0 regardless.
+    fg = load_flow_graph(str(temp_dial_tone))
+    res = change_graph(
+        fg,
+        add_blocks=[{"block_id": "variable", "instance_name": "aaa_first", "params": {"value": "1.0"}}],
+    )
+    assert res["ok"] is True
+    options_block = next(b for b in fg.blocks if b.key == "options")
+    assert tuple(options_block.states["coordinate"]) == (0.0, 12.0)
+    assert tuple(fg.get_block("aaa_first").states["coordinate"]) == (1 * GRID_W, 12.0)
+
+
+def test_change_graph_full_relayout_preserves_flow_band_rank_order(temp_dial_tone):
+    fg = load_flow_graph(str(temp_dial_tone))
+    res = change_graph(
+        fg,
+        add_blocks=[{"block_id": "variable", "instance_name": "new_var", "params": {"value": "1.0"}}],
+    )
+    assert res["ok"] is True
+
+    def x(name):
+        return fg.get_block(name).states["coordinate"][0]
+
+    assert x("analog_sig_source_x_0") < x("blocks_add_xx") < x("audio_sink")
+    assert x("blocks_add_xx") < x("lpf_0") < x("waterfall_sink_0")
+
+
+def test_change_graph_full_relayout_no_overlap_for_all_blocks(temp_dial_tone):
+    fg = load_flow_graph(str(temp_dial_tone))
+    res = change_graph(
+        fg,
+        add_blocks=[
+            {"block_id": "variable", "instance_name": "new_var", "params": {"value": "1.0"}},
+            {
+                "block_id": "blocks_null_sink",
+                "instance_name": "extra_sink",
+                "params": {"type": "float"},
+            },
+        ],
+        force=True,
+    )
+    assert res["ok"] is True
+    coords = [
+        tuple(b.states["coordinate"])
+        for b in fg.blocks
+        if isinstance(b.states.get("coordinate"), (list, tuple))
+    ]
+    for i, a in enumerate(coords):
+        for b in coords[i + 1 :]:
+            assert not _rects_overlap(*a, *b)
+
+
+def test_change_graph_header_band_wraps_when_many_variables(temp_empty):
+    fg = load_flow_graph(str(temp_empty))
+    count = 14
+    res = change_graph(
+        fg,
+        add_blocks=[
+            {"block_id": "variable", "instance_name": f"v_{i:02d}", "params": {"value": "1.0"}}
+            for i in range(count)
+        ],
+    )
+    assert res["ok"] is True
+    coords = [tuple(fg.get_block(f"v_{i:02d}").states["coordinate"]) for i in range(count)]
+    assert len(set(coords)) == count
+    for i, a in enumerate(coords):
+        for b in coords[i + 1 :]:
+            assert not _rects_overlap(*a, *b)
+    # 16 header blocks total (options + samp_rate + 14 new) at 6 cols/row -> 3 rows.
+    all_header_ys = {
+        fg.get_block(n).states["coordinate"][1] for n in ["samp_rate", *[f"v_{i:02d}" for i in range(count)]]
+    }
+    assert len(all_header_ys) == 3
+
+
+def test_change_graph_disconnected_flow_components_share_rank_columns_without_overlap(temp_empty):
+    fg = load_flow_graph(str(temp_empty))
+    res = change_graph(
+        fg,
+        add_blocks=[
+            {"block_id": "blocks_null_source", "instance_name": "src_a", "params": {"type": "float"}},
+            {"block_id": "blocks_null_sink", "instance_name": "sink_a", "params": {"type": "float"}},
+            {"block_id": "blocks_null_source", "instance_name": "src_b", "params": {"type": "float"}},
+            {"block_id": "blocks_null_sink", "instance_name": "sink_b", "params": {"type": "float"}},
+        ],
+        add_connections=["src_a:0->sink_a:0", "src_b:0->sink_b:0"],
+        force=True,
+    )
+    assert res["ok"] is True
+    coords = {
+        n: tuple(fg.get_block(n).states["coordinate"]) for n in ["src_a", "sink_a", "src_b", "sink_b"]
+    }
+    # Both sources are independent rank-0 components -> same column, different rows.
+    assert coords["src_a"][0] == coords["src_b"][0]
+    assert coords["src_a"][1] != coords["src_b"][1]
+    values = list(coords.values())
+    for i, a in enumerate(values):
+        for b in values[i + 1 :]:
+            assert not _rects_overlap(*a, *b)
+
+
+def test_change_graph_remove_only_does_not_relayout_or_move_anything(temp_dial_tone):
+    # Relayout is gated purely on non-empty add_blocks (graph.py's Phase 3) —
+    # a remove_blocks-only call must leave every remaining block's coordinate
+    # byte-identical, not just "still non-overlapping".
+    fg = load_flow_graph(str(temp_dial_tone))
+    before = {
+        b.name: tuple(b.states["coordinate"])
+        for b in fg.blocks
+        if b.name != "analog_noise_source_x_0"
+    }
+    res = change_graph(fg, remove_blocks=["analog_noise_source_x_0"], force=True)
+    assert res["ok"] is True
+    after = {b.name: tuple(b.states["coordinate"]) for b in fg.blocks}
+    assert after == before
+
+
+def test_change_graph_remove_and_add_in_same_batch_relays_out_post_removal_state(temp_dial_tone):
+    # remove_blocks + add_blocks in the same call is exactly the scenario
+    # most likely to expose a stale-coordinate bug: the relayout must use
+    # the POST-removal set of blocks, not a snapshot that still includes the
+    # just-removed one.
+    fg = load_flow_graph(str(temp_dial_tone))
+    res = change_graph(
+        fg,
+        remove_blocks=["waterfall_sink_0"],
+        add_blocks=[{"block_id": "variable", "instance_name": "new_var", "params": {"value": "1.0"}}],
+        force=True,
+    )
+    assert res["ok"] is True
+    names = {b.name for b in fg.blocks}
+    assert "waterfall_sink_0" not in names
+    assert "new_var" in names
+
+    coords = [
+        tuple(b.states["coordinate"])
+        for b in fg.blocks
+        if isinstance(b.states.get("coordinate"), (list, tuple))
+    ]
+    assert len(coords) == len(names)  # every remaining block got a real coordinate
+    for i, a in enumerate(coords):
+        for b in coords[i + 1 :]:
+            assert not _rects_overlap(*a, *b)
+
+
+def test_change_graph_rejected_add_blocks_batch_does_not_leak_relayout(temp_dial_tone):
+    # A batch that fails entirely (here: a duplicate instance name) rolls
+    # back via flow_graph.import_data(initial_data) -- the full relayout
+    # computed during Phase 3 must not survive that rollback. Captures every
+    # coordinate before the call and asserts byte-identical after a failure,
+    # the same invariant test_change_graph_remove_only_does_not_relayout_or_
+    # move_anything checks for a remove-only call.
+    fg = load_flow_graph(str(temp_dial_tone))
+    before = {b.name: tuple(b.states["coordinate"]) for b in fg.blocks}
+    res = change_graph(
+        fg,
+        add_blocks=[
+            {"block_id": "variable", "instance_name": "audio_sink", "params": {"value": "1.0"}}
+        ],
+    )
+    assert res["ok"] is False
+    assert any(e.get("code") == "duplicate_block_name" for e in res.get("errors", []))
+    after = {b.name: tuple(b.states["coordinate"]) for b in fg.blocks}
+    assert after == before
+
+
+def test_change_graph_flow_band_never_starts_above_a_wrapped_header_band(temp_empty):
+    # Dedicated boundary assertion (not just incidental all-pairs overlap):
+    # force the header band to wrap to 2 rows, add one flow-band block in
+    # the SAME call, and assert its y sits at or below the real computed
+    # header-band bottom edge -- not just "doesn't overlap by luck".
+    fg = load_flow_graph(str(temp_empty))
+    # temp_empty already has 2 header blocks (options, samp_rate); adding 5
+    # more variables makes 7 -> ceil(7/6) = 2 header rows at _DEFAULT_HEADER_COLS=6.
+    res = change_graph(
+        fg,
+        add_blocks=[
+            *(
+                {"block_id": "variable", "instance_name": f"v_{i}", "params": {"value": "1.0"}}
+                for i in range(5)
+            ),
+            {"block_id": "blocks_null_sink", "instance_name": "flow_block", "params": {"type": "float"}},
+        ],
+        force=True,
+    )
+    assert res["ok"] is True
+    options_name = next(b.name for b in fg.blocks if b.key == "options")
+    header_names = [options_name, "samp_rate", *[f"v_{i}" for i in range(5)]]
+    header_ys = {fg.get_block(n).states["coordinate"][1] for n in header_names}
+    assert len(header_ys) == 2, f"expected the header band to wrap to 2 rows, got {header_ys}"
+
+    header_bottom_edge = 12.0 + 2 * GRID_H
+    flow_y = fg.get_block("flow_block").states["coordinate"][1]
+    assert flow_y >= header_bottom_edge
+
+
+def test_pack_header_band_options_pinned_and_alphabetical():
+    from types import SimpleNamespace
+
+    def var_block(name):
+        return SimpleNamespace(
+            name=name,
+            is_variable=True,
+            is_import=False,
+            is_snippet=False,
+            is_virtual_or_pad=False,
+            active_sources=(),
+            active_sinks=(),
+            key="variable",
+        )
+
+    def options_block(name):
+        return SimpleNamespace(
+            name=name,
+            is_variable=False,
+            is_import=False,
+            is_snippet=False,
+            is_virtual_or_pad=False,
+            active_sources=(),
+            active_sinks=(),
+            key="options",
+        )
+
+    blocks = [var_block("zeta"), options_block("options"), var_block("alpha"), var_block("mid")]
+    positions = _pack_header_band(blocks, cols=6)
+
+    assert positions["options"] == (0.0, 12.0)
+    assert positions["alpha"] == (1 * GRID_W, 12.0)
+    assert positions["mid"] == (2 * GRID_W, 12.0)
+    assert positions["zeta"] == (3 * GRID_W, 12.0)
+
+
+def test_order_flow_band_barycenter_orders_by_upstream_position():
+    from types import SimpleNamespace
+
+    def blk(name):
+        return SimpleNamespace(name=name)
+
+    # rank0: three sources, unresolved (no predecessors) -> alphabetical: s_a, s_b, s_c -> rows 0,1,2.
+    # rank1, given in an adversarial (non-barycenter) order: "high" anchors to
+    # s_c (row 2), "low" anchors to s_a (row 0), "mid" anchors to BOTH s_a and
+    # s_c (barycenter (0+2)/2 = 1) -> must land strictly between low and high.
+    flow_blocks = [blk("s_a"), blk("s_b"), blk("s_c"), blk("high"), blk("low"), blk("mid")]
+    ranks = {"s_a": 0, "s_b": 0, "s_c": 0, "high": 1, "low": 1, "mid": 1}
+    predecessors = {"high": {"s_c"}, "low": {"s_a"}, "mid": {"s_a", "s_c"}}
+
+    positions = _order_flow_band(flow_blocks, ranks, predecessors, y_origin=0.0)
+
+    assert positions["high"][0] == positions["low"][0] == positions["mid"][0] == 1 * GRID_W
+    assert positions["low"][1] == 0 * GRID_H
+    assert positions["mid"][1] == 1 * GRID_H
+    assert positions["high"][1] == 2 * GRID_H
 
 
 def test_change_graph_remove_block(temp_dial_tone):
@@ -970,6 +1269,77 @@ def test_generate_python_func_passes_through_k_and_wraps_valueerror(monkeypatch)
     monkeypatch.setattr("grc_agent.agent.preview_flowgraph_py", raising_preview_flowgraph_py)
     try:
         asyncio.run(generate_python_func(ctx))
+        raise AssertionError("expected ModelRetry")
+    except ModelRetry as exc:
+        assert "boom" in str(exc)
+
+
+def test_save_block_func_uses_deps_save_block_when_present():
+    """Live-app path: ctx.deps.save_block() (NativeFlowgraphProxy) is called
+    directly rather than the lower-level save_block_to_library — mirrors
+    change_graph_func's notify_edit hasattr-branching convention. This is
+    the one branch that was never exercised by any test before (only the
+    fallback, via save_block_to_library called directly, was covered)."""
+    import asyncio
+    import json
+    from types import SimpleNamespace
+
+    from grc_agent.agent import save_block_func
+
+    seen_calls = []
+
+    async def fake_save_block(
+        instance_name, block_id=None, label=None, category=None, overwrite=False
+    ):
+        seen_calls.append((instance_name, block_id, label, category, overwrite))
+        return {"ok": True, "block_id": block_id or instance_name}
+
+    ctx = SimpleNamespace(deps=SimpleNamespace(save_block=fake_save_block))
+    result = asyncio.run(save_block_func(ctx, "my_epy", block_id="my_saved_block"))
+    assert seen_calls == [("my_epy", "my_saved_block", None, None, False)]
+    assert json.loads(result)["ok"] is True
+
+
+def test_save_block_func_falls_back_to_save_block_to_library_without_deps_save_block(monkeypatch):
+    """Scenario-harness path: raw FlowGraph deps (no save_block method) ->
+    calls the lower-level save_block_to_library directly under
+    _with_state_lock, same as change_graph_func's own fallback."""
+    import asyncio
+    from types import SimpleNamespace
+
+    from grc_agent.agent import save_block_func
+
+    seen_calls = []
+
+    def fake_save_block_to_library(
+        flow_graph, instance_name, block_id=None, label=None, category=None, overwrite=False
+    ):
+        seen_calls.append((flow_graph, instance_name, block_id, label, category, overwrite))
+        return {"ok": True, "block_id": block_id or instance_name}
+
+    monkeypatch.setattr("grc_agent.agent.save_block_to_library", fake_save_block_to_library)
+    ctx = SimpleNamespace(deps=object())
+    asyncio.run(save_block_func(ctx, "my_epy", block_id="my_saved_block"))
+    assert seen_calls == [(ctx.deps, "my_epy", "my_saved_block", None, None, False)]
+
+
+def test_save_block_func_raises_model_retry_on_failure(monkeypatch):
+    """The ModelRetry-on-failure branch (agent.py) was never exercised for
+    save_block_func specifically before."""
+    import asyncio
+    from types import SimpleNamespace
+
+    from pydantic_ai import ModelRetry
+
+    from grc_agent.agent import save_block_func
+
+    def failing_save_block_to_library(flow_graph, instance_name, **kwargs):  # noqa: ARG001
+        return {"ok": False, "error_type": "block_id_collision", "errors": ["boom"]}
+
+    monkeypatch.setattr("grc_agent.agent.save_block_to_library", failing_save_block_to_library)
+    ctx = SimpleNamespace(deps=object())
+    try:
+        asyncio.run(save_block_func(ctx, "my_epy"))
         raise AssertionError("expected ModelRetry")
     except ModelRetry as exc:
         assert "boom" in str(exc)
@@ -3149,24 +3519,6 @@ def test_execution_error_monitor_modified_since_last_run_note():
     assert "note" not in log3
 
 
-def test_downstream_block_placement_never_placed_left():
-    """Downstream blocks must be placed to the right of their upstream providers."""
-    from grc_agent.adapter.layout import _find_block_placement
-
-    block_coords = {"source_0": (200.0, 100.0)}
-    # Occupy the exact target slot (560.0, 100.0)
-    occupied = [(200.0, 100.0), (560.0, 100.0)]
-    neighbor_map = {"sink_0": {"source_0"}}
-    ranks = {"source_0": 0, "sink_0": 1}
-
-    placement = _find_block_placement(
-        "sink_0", occupied, neighbor_map, block_coords, (200.0, 100.0, 560.0, 100.0), ranks
-    )
-
-    # Must be placed at or to the right of source_0 + footprint (>= 560.0)
-    assert placement[0] >= 560.0, f"Expected X >= 560.0, got {placement[0]}"
-
-
 def test_context_label_updates_with_pydantic_ai_usage():
     """Context label must extract token usage natively from Pydantic AI ModelResponse.usage."""
     from pydantic_ai.messages import (
@@ -3977,6 +4329,112 @@ def test_scroll_to_block():
     assert cm.scroll_to_block("missing") is False
 
 
+def test_scroll_to_relaid_out_graph_targets_new_blocks_post_relayout_corner():
+    """compute_full_layout can move EVERY block, not just new ones — but the
+    new blocks' POST-relayout coordinates are exactly where the action is, so
+    the reframe must target their corner (not the whole graph's top-left,
+    which is often empty header-band space on a wide graph)."""
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from grc_agent.native_canvas import NativeCanvasManager
+
+    old_block = SimpleNamespace(name="old_1", states={"coordinate": [900, 900]})
+    new_block = SimpleNamespace(name="new_1", states={"coordinate": [50, 50]})
+    fg = SimpleNamespace(blocks=[old_block, new_block], get_extents=lambda: (0, 0, 1000, 1000))
+
+    adj_h = MagicMock()
+    adj_h.get_upper.return_value = 500
+    adj_h.get_lower.return_value = 0
+    adj_h.get_page_size.return_value = 200
+
+    adj_v = MagicMock()
+    adj_v.get_upper.return_value = 500
+    adj_v.get_lower.return_value = 0
+    adj_v.get_page_size.return_value = 200
+
+    sw = MagicMock()
+    sw.get_hadjustment.return_value = adj_h
+    sw.get_vadjustment.return_value = adj_v
+
+    da = SimpleNamespace(zoom_factor=1.0)
+    cm = NativeCanvasManager.__new__(NativeCanvasManager)
+    page = SimpleNamespace(flow_graph=fg, drawing_area=da)
+    cm.window = SimpleNamespace(current_page=page)
+    cm._get_scrolled_window = lambda *_a: sw
+
+    cm._scroll_to_relaid_out_graph(fg, old_names={"old_1"})
+
+    # New block's post-relayout corner (50, 50) -- NOT the whole-graph
+    # top-left (0, 0), nor the old block's corner (900, 900).
+    adj_h.set_value.assert_called_once_with(50.0)
+    adj_v.set_value.assert_called_once_with(50.0)
+
+
+def test_scroll_to_relaid_out_graph_falls_back_to_whole_bbox_when_new_blocks_have_no_coords():
+    """Defensive fallback: if the new blocks somehow carry no coordinates,
+    reframe to the whole graph's bbox instead of crashing or no-op'ing."""
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from grc_agent.native_canvas import NativeCanvasManager
+
+    old_block = SimpleNamespace(name="old_1", states={"coordinate": [900, 900]})
+    new_block = SimpleNamespace(name="new_1", states={})
+    fg = SimpleNamespace(blocks=[old_block, new_block], get_extents=lambda: (0, 0, 1000, 1000))
+
+    adj_h = MagicMock()
+    adj_h.get_upper.return_value = 500
+    adj_h.get_lower.return_value = 0
+    adj_h.get_page_size.return_value = 200
+
+    adj_v = MagicMock()
+    adj_v.get_upper.return_value = 500
+    adj_v.get_lower.return_value = 0
+    adj_v.get_page_size.return_value = 200
+
+    sw = MagicMock()
+    sw.get_hadjustment.return_value = adj_h
+    sw.get_vadjustment.return_value = adj_v
+
+    da = SimpleNamespace(zoom_factor=1.0)
+    cm = NativeCanvasManager.__new__(NativeCanvasManager)
+    page = SimpleNamespace(flow_graph=fg, drawing_area=da)
+    cm.window = SimpleNamespace(current_page=page)
+    cm._get_scrolled_window = lambda *_a: sw
+
+    cm._scroll_to_relaid_out_graph(fg, old_names={"old_1"})
+
+    # No new-block coordinates -> whole-graph bbox top-left (0, 0).
+    adj_h.set_value.assert_called_once_with(0.0)
+    adj_v.set_value.assert_called_once_with(0.0)
+
+
+def test_scroll_to_relaid_out_graph_noop_when_no_new_blocks():
+    """update_params/remove_blocks/etc.-only edits never run Phase 3's
+    relayout, so no new block names appear -- must stay a no-op, exactly like
+    the old _scroll_to_new_blocks did."""
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from grc_agent.native_canvas import NativeCanvasManager
+
+    block = SimpleNamespace(name="only_1", states={"coordinate": [50, 50]})
+    fg = SimpleNamespace(blocks=[block], get_extents=lambda: (0, 0, 1000, 1000))
+
+    sw = MagicMock()
+    da = SimpleNamespace(zoom_factor=1.0)
+    cm = NativeCanvasManager.__new__(NativeCanvasManager)
+    page = SimpleNamespace(flow_graph=fg, drawing_area=da)
+    cm.window = SimpleNamespace(current_page=page)
+    cm._get_scrolled_window = lambda *_a: sw
+
+    cm._scroll_to_relaid_out_graph(fg, old_names={"only_1"})
+
+    sw.get_hadjustment.assert_not_called()
+    sw.get_vadjustment.assert_not_called()
+
+
 def test_change_graph_invalid_sink_port_returns_add_connection_failed(temp_dial_tone):
     """Connecting to a non-existent sink port must return add_connection_failed
     with clear port/block detail — NOT crash Phase 7 with an UnboundLocalError
@@ -4034,4 +4492,354 @@ def test_clean_message_history_for_new_turn():
     ]
     cleaned = _clean_message_history_for_new_turn(msgs)
     assert len(cleaned) == 2
+
+
+# ==========================================
+# save_block / block_library Unit Tests
+# ==========================================
+
+
+@pytest.fixture
+def temp_hier_block_lib_dir(tmp_path):
+    """Redirects GNU Radio's Config.hier_block_lib_dir to a fresh tmp dir for
+    the test, then restores it and rebuilds the real get_platform()
+    singleton. Platform.block_classes is a single ChainMap shared by EVERY
+    Platform instance (a Platform CLASS attribute) -- leaving the singleton
+    pointed at a now-deleted tmp dir would silently corrupt every later
+    test's view of get_platform().blocks."""
+    from gnuradio.grc.core.Config import Config
+
+    from grc_agent.adapter.graph import get_platform
+
+    lib_dir = tmp_path / "grc_gnuradio"
+    lib_dir.mkdir()
+    original = Config.hier_block_lib_dir
+    Config.hier_block_lib_dir = str(lib_dir)
+    try:
+        yield lib_dir
+    finally:
+        Config.hier_block_lib_dir = original
+        get_platform().build_library()
+
+
+# A minimal Embedded Python Block with one param and one float in/out port —
+# rich enough to exercise param/port round-tripping through save_block
+# without needing any wiring to stay valid.
+_SCALE_EPY_SOURCE = (
+    "import numpy as np\n"
+    "from gnuradio import gr\n\n"
+    "class blk(gr.sync_block):\n"
+    "    def __init__(self, scale=2.0):\n"
+    "        gr.sync_block.__init__(self, name='Scale Block', "
+    "in_sig=[np.float32], out_sig=[np.float32])\n"
+    "        self.scale = scale\n\n"
+    "    def work(self, input_items, output_items):\n"
+    "        output_items[0][:] = input_items[0] * self.scale\n"
+    "        return len(output_items[0])\n"
+)
+
+
+def _add_scale_epy_block(fg, instance_name="my_epy"):
+    return change_graph(
+        fg,
+        add_blocks=[
+            {
+                "block_id": "epy_block",
+                "instance_name": instance_name,
+                "params": {"_source_code": _SCALE_EPY_SOURCE},
+            }
+        ],
+        force=True,
+    )
+
+
+def test_save_block_round_trip_and_reuse_in_second_flowgraph(temp_empty, temp_hier_block_lib_dir):
+    from grc_agent.adapter.graph import get_platform
+
+    fg = load_flow_graph(str(temp_empty))
+    assert _add_scale_epy_block(fg)["ok"] is True
+
+    result = save_block_to_library(fg, "my_epy", block_id="test_saved_scale_block")
+    assert result["ok"] is True
+    assert result["block_id"] == "test_saved_scale_block"
+    assert result["params"] == ["scale"]
+    assert result["inputs"] == ["0"]
+    assert result["outputs"] == ["0"]
+    yml_path = Path(result["saved_to"]["block_yml"])
+    py_path = Path(result["saved_to"]["py"])
+    assert yml_path.exists()
+    assert py_path.exists()
+    assert yml_path.parent == temp_hier_block_lib_dir
+
+    platform = get_platform()
+    assert "test_saved_scale_block" in platform.blocks
+
+    fg2 = platform.make_flow_graph()
+    fg2.grc_file_path = ""
+    fg2.options_block.params["id"].set_value("reuse_fg")
+    res2 = change_graph(
+        fg2,
+        add_blocks=[
+            {
+                "block_id": "test_saved_scale_block",
+                "instance_name": "reused",
+                "params": {"scale": "5.0"},
+            }
+        ],
+        force=True,
+    )
+    assert res2["ok"] is True
+    snap = inspect_graph(fg2)
+    reused = next(b for b in snap["graph"]["blocks"] if b["instance_name"] == "reused")
+    assert reused["params"]["scale"] == "5.0"
+    assert reused["inputs"] == [{"port_id": "0", "dtype": "float"}]
+    assert reused["outputs"] == [{"port_id": "0", "dtype": "float"}]
+
+
+def test_save_block_generated_codegen_imports_the_saved_module_correctly(
+    temp_empty,
+    temp_hier_block_lib_dir,  # noqa: ARG001
+):
+    # The manual smoke-test verification during development (never a pytest
+    # test until now) confirmed that a flowgraph using a saved block gets
+    # both the sys.path.append(...~/.grc_gnuradio...) hack AND the correct
+    # "import <block_id> as <block_id>  # grc-generated hier_block" line in
+    # its generated source. This is the actual, load-bearing mechanism that
+    # makes the saved block importable at all (see block_library.py's
+    # _render_block_yml docstring) -- a regression here would be silent
+    # without a real codegen check, since change_graph/inspect_graph alone
+    # never render or execute any Python source.
+    fg = load_flow_graph(str(temp_empty))
+    _add_scale_epy_block(fg)
+    result = save_block_to_library(fg, "my_epy", block_id="test_codegen_saved_block")
+    assert result["ok"] is True
+
+    from grc_agent.adapter.graph import get_platform
+
+    platform = get_platform()
+    fg2 = platform.make_flow_graph()
+    fg2.grc_file_path = ""
+    fg2.options_block.params["id"].set_value("codegen_reuse_fg")
+    res2 = change_graph(
+        fg2,
+        add_blocks=[
+            {"block_id": "blocks_null_source", "instance_name": "src0", "params": {"type": "float"}},
+            {
+                "block_id": "test_codegen_saved_block",
+                "instance_name": "reused",
+                "params": {"scale": "5.0"},
+            },
+            {"block_id": "blocks_null_sink", "instance_name": "sink0", "params": {"type": "float"}},
+        ],
+        add_connections=["src0:0->reused:0", "reused:0->sink0:0"],
+    )
+    assert res2["ok"] is True
+
+    preview = preview_flowgraph_py(fg2)
+    main_script = preview["files"][-1]["source"]
+    assert "sys.path.append(os.environ.get('GRC_HIER_PATH'" in main_script
+    assert (
+        "import test_codegen_saved_block as test_codegen_saved_block  "
+        "# grc-generated hier_block" in main_script
+    )
+
+
+def test_save_block_does_not_mutate_original_epy_instance(temp_empty, temp_hier_block_lib_dir):  # noqa: ARG001
+    fg = load_flow_graph(str(temp_empty))
+    _add_scale_epy_block(fg)
+    before = fg.get_block("my_epy").params["_source_code"].get_value()
+
+    result = save_block_to_library(fg, "my_epy", block_id="test_scope_boundary_block")
+    assert result["ok"] is True
+
+    after_block = fg.get_block("my_epy")
+    assert after_block.key == "epy_block"
+    assert after_block.params["_source_code"].get_value() == before
+
+
+def test_save_block_rejects_non_epy_block(temp_dial_tone, temp_hier_block_lib_dir):  # noqa: ARG001
+    fg = load_flow_graph(str(temp_dial_tone))
+    result = save_block_to_library(fg, "audio_sink", block_id="whatever_block_id")
+    assert result["ok"] is False
+    assert result["error_type"] == "not_an_epy_block"
+
+
+def test_save_block_rejects_missing_instance(temp_empty, temp_hier_block_lib_dir):  # noqa: ARG001
+    fg = load_flow_graph(str(temp_empty))
+    result = save_block_to_library(fg, "does_not_exist")
+    assert result["ok"] is False
+    assert result["error_type"] == "block_not_found"
+
+
+def test_save_block_rejects_invalid_identifier(temp_empty, temp_hier_block_lib_dir):  # noqa: ARG001
+    fg = load_flow_graph(str(temp_empty))
+    _add_scale_epy_block(fg)
+    result = save_block_to_library(fg, "my_epy", block_id="not a valid id")
+    assert result["ok"] is False
+    assert result["error_type"] == "invalid_block_id"
+
+
+def test_save_block_rejects_collision_with_stock_block_even_with_overwrite(
+    temp_empty,
+    temp_hier_block_lib_dir,  # noqa: ARG001
+):
+    fg = load_flow_graph(str(temp_empty))
+    _add_scale_epy_block(fg)
+    result = save_block_to_library(fg, "my_epy", block_id="blocks_null_sink", overwrite=True)
+    assert result["ok"] is False
+    assert result["error_type"] == "block_id_collision"
+
+
+def test_save_block_overwrite_gates_a_previously_saved_block_id(temp_empty, temp_hier_block_lib_dir):  # noqa: ARG001
+    fg = load_flow_graph(str(temp_empty))
+    _add_scale_epy_block(fg)
+
+    first = save_block_to_library(fg, "my_epy", block_id="test_overwrite_block")
+    assert first["ok"] is True
+
+    second = save_block_to_library(fg, "my_epy", block_id="test_overwrite_block", overwrite=False)
+    assert second["ok"] is False
+    assert second["error_type"] == "block_id_collision"
+
+    third = save_block_to_library(
+        fg, "my_epy", block_id="test_overwrite_block", label="Renamed", overwrite=True
+    )
+    assert third["ok"] is True
+    assert third["label"] == "Renamed"
+
+
+def test_validate_block_definition_never_corrupts_shared_platform_registry():
+    # Regression test for the core safety bug this feature's validation
+    # design had to route around: Platform.block_classes is a single
+    # ChainMap shared by EVERY Platform instance (a Platform CLASS
+    # attribute) -- calling build_library() on any instance, even a
+    # brand-new one, clears and rebuilds that ONE shared registry for the
+    # WHOLE PROCESS. _validate_block_definition must never call
+    # build_library() at all, on any Platform.
+    import collections
+
+    from grc_agent.adapter.graph import get_platform
+
+    platform = get_platform()
+    assert "options" in platform.blocks
+    assert "blocks_null_sink" in platform.blocks
+
+    good = collections.OrderedDict(
+        [
+            ("id", "validate_only_ok"),
+            ("label", "Validate Only OK"),
+            ("category", "[Custom]"),
+            ("parameters", []),
+            ("inputs", []),
+            ("outputs", []),
+            (
+                "templates",
+                collections.OrderedDict([("imports", ""), ("make", ""), ("callbacks", [])]),
+            ),
+            ("documentation", ""),
+            ("grc_source", ""),
+            ("file_format", 1),
+        ]
+    )
+    assert _validate_block_definition(good)["ok"] is True
+
+    broken = collections.OrderedDict(good)
+    broken["id"] = "validate_only_broken"
+    broken["inputs"] = [
+        collections.OrderedDict([("id", "0"), ("dtype", "float")]),
+        collections.OrderedDict([("id", "0"), ("dtype", "float")]),
+    ]
+    result = _validate_block_definition(broken)
+    assert result["ok"] is False
+
+    assert "options" in platform.blocks
+    assert "blocks_null_sink" in platform.blocks
+    assert "validate_only_ok" not in platform.blocks
+    assert "validate_only_broken" not in platform.blocks
+
+
+def test_save_block_invalidates_rag_corpus_caches(temp_empty, temp_hier_block_lib_dir):  # noqa: ARG001
+    from grc_agent.adapter import rag
+
+    fg = load_flow_graph(str(temp_empty))
+    _add_scale_epy_block(fg)
+
+    rag._CORPUS_VERSION_CACHE["catalog"] = "stale-version"
+    rag._FRESHNESS_CACHE["catalog"] = ("stale-path", "stale-model")
+
+    result = save_block_to_library(fg, "my_epy", block_id="test_cache_invalidation_block")
+    assert result["ok"] is True
+    assert "catalog" not in rag._CORPUS_VERSION_CACHE
+    assert "catalog" not in rag._FRESHNESS_CACHE
+
+
+def test_native_canvas_manager_reload_block_library_calls_native_refresh_chain():
+    """save_block's live-refresh path mirrors GRC's own native RELOAD_BLOCKS
+    action: build_library() then repopulate the block-tree panel, then
+    redraw open canvases. Uses mocks (matching this file's existing
+    NativeCanvasManager test convention, e.g. test_scroll_to_block) rather
+    than a real BlockTreeWindow/MainWindow, since constructing GNU Radio's
+    real GUI package tree standalone hits a reproducible circular-import
+    ordering issue outside the app's own controlled startup sequence."""
+    from unittest.mock import MagicMock
+
+    from grc_agent.native_canvas import NativeCanvasManager
+
+    cm = NativeCanvasManager.__new__(NativeCanvasManager)
+    cm.platform = MagicMock()
+    cm.window = MagicMock()
+
+    cm.reload_block_library()
+
+    cm.platform.build_library.assert_called_once()
+    cm.window.btwin.repopulate.assert_called_once()
+    cm.window.update_pages.assert_called_once()
+
+
+def test_native_flowgraph_proxy_save_block_calls_reload_only_on_success(monkeypatch):
+    """Exercises NativeFlowgraphProxy.save_block() end-to-end (never tested
+    before this pass): must call save_block_to_library with the resolved
+    target flowgraph and args, then call NativeCanvasManager.
+    reload_block_library() only when the result is ok=True -- also confirms
+    save_block_to_library is called WITHOUT a gui_platform kwarg (removed
+    after this test's own design surfaced that it made every successful
+    live save_block call rebuild the block registry twice)."""
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from grc_agent.native_canvas import NativeFlowgraphProxy
+
+    fake_fg = SimpleNamespace(name="fake_fg")
+    cm = MagicMock()
+    cm.current_flow_graph = fake_fg
+
+    proxy = NativeFlowgraphProxy(cm)
+    seen_calls = []
+
+    def fake_save_block_to_library(flow_graph, instance_name, **kwargs):
+        seen_calls.append((flow_graph, instance_name, kwargs))
+        return {"ok": True, "block_id": instance_name}
+
+    monkeypatch.setattr(
+        "grc_agent.adapter.block_library.save_block_to_library", fake_save_block_to_library
+    )
+    result = asyncio.run(proxy.save_block("my_epy", block_id="saved_id"))
+    assert result["ok"] is True
+    assert seen_calls == [
+        (fake_fg, "my_epy", {"block_id": "saved_id", "label": None, "category": None, "overwrite": False})
+    ]
+    cm.reload_block_library.assert_called_once()
+
+    cm.reload_block_library.reset_mock()
+
+    def failing_save_block_to_library(flow_graph, instance_name, **kwargs):  # noqa: ARG001
+        return {"ok": False, "error_type": "block_id_collision", "errors": ["boom"]}
+
+    monkeypatch.setattr(
+        "grc_agent.adapter.block_library.save_block_to_library", failing_save_block_to_library
+    )
+    result2 = asyncio.run(proxy.save_block("my_epy"))
+    assert result2["ok"] is False
+    cm.reload_block_library.assert_not_called()
 

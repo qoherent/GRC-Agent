@@ -45,6 +45,7 @@ dependencies = [
     "gbulb>=0.6.6",
     "markdown-it-py>=3.0.0",
     "ddgs>=9.0",
+    "pydantic-ai-harness>=0.21.0",
 ]
 
 [project.optional-dependencies]

@@ -599,7 +599,7 @@ wheels = [
 
 [[package]]
 name = "grc-agent"
-version = "0.1.4"
+version = "0.1.5"
 source = { editable = "." }
 dependencies = [
     { name = "beautifulsoup4" },
@@ -611,6 +611,7 @@ dependencies = [
     { name = "openai" },
     { name = "pydantic" },
     { name = "pydantic-ai", extra = ["web-fetch"] },
+    { name = "pydantic-ai-harness" },
     { name = "pydantic-graph" },
     { name = "python-dotenv" },
     { name = "sqlite-vec" },
@@ -638,6 +639,7 @@ requires-dist = [
     { name = "playwright", marker = "extra == 'dev'", specifier = ">=1.48" },
     { name = "pydantic", specifier = ">=2.0" },
     { name = "pydantic-ai", extras = ["web-fetch"], specifier = ">=2.7.0,<3" },
+    { name = "pydantic-ai-harness", specifier = ">=0.21.0" },
     { name = "pydantic-graph", specifier = ">=2.7.0,<3" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0.0" },
     { name = "python-dotenv", specifier = ">=1.0" },
@@ -1537,6 +1539,20 @@ wheels = [
 [package.optional-dependencies]
 web-fetch = [
     { name = "pydantic-ai-slim", extra = ["web-fetch"] },
+]
+
+[[package]]
+name = "pydantic-ai-harness"
+version = "0.21.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "genai-prices" },
+    { name = "httpx" },
+    { name = "pydantic-ai-slim" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/57/91/637f34cfb65b9b1a627dc3e4500dff0740c3bd1d369259d40fa11d87e157/pydantic_ai_harness-0.21.0.tar.gz", hash = "sha256:5eb429d47977913ccec3e74e48479a6207863efebff9fa9afc4b20e52b01e44a", size = 2189073, upload-time = "2026-08-15T03:12:54.135Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/6b/c1/dd669f17415da4d233581cbac8809ea1c2c3078d113289b96103362cdadc/pydantic_ai_harness-0.21.0-py3-none-any.whl", hash = "sha256:61c1facec51849adc2680569b5abe337e98836ad0e2adc8f79954d01aaa706e6", size = 632221, upload-time = "2026-08-15T03:12:52.466Z" },
 ]
 
 [[package]]

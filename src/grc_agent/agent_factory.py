@@ -11,6 +11,11 @@ from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.providers.ollama import OllamaProvider
 from pydantic_ai.providers.openai import OpenAIProvider
 from pydantic_ai.retries import AsyncTenacityTransport, RetryConfig
+from pydantic_ai_harness.compaction import (
+    ClearToolResults,
+    SlidingWindowCompaction,
+    TieredCompaction,
+)
 from tenacity import retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from grc_agent.agent import (
@@ -120,6 +125,46 @@ class ModelRequestLogger(AbstractCapability[Any]):
         return request_context
 
 
+def _build_compaction_capability(cfg: dict) -> TieredCompaction:
+    """Build a tiered context compaction capability tailored to the active provider.
+
+    Evicts bulky older tool return contents (e.g. inspect_graph 10k JSONs, generate_python previews)
+    when approaching the context budget, keeping the last 2 tool return pairs and dialogue history intact.
+    """
+    provider = cfg.get("provider", "ollama")
+    base_url = cfg.get("ollama_base_url", "") if provider == "ollama" else cfg.get("openai_compatible_base_url", "")
+    # One uniform rule: any plain-HTTP endpoint is a self-hosted server
+    # (every cloud provider — ollama.com, openrouter.ai — is https). This
+    # covers localhost, 127.0.0.1, LAN IPs, and custom http endpoints alike,
+    # and errs conservative: premature compaction is a mild cost, while
+    # treating a small-window local model as cloud would overflow its context.
+    is_local = base_url.startswith("http://")
+
+    # Target threshold: 24,000 tokens for 32k local models (~75% context), 96,000 for cloud models.
+    default_target = 24_000 if is_local else 96_000
+    env_override = get_env_value("GRC_COMPACTION_TARGET_TOKENS") or os.environ.get("GRC_COMPACTION_TARGET_TOKENS")
+    try:
+        target_tokens = int(env_override) if env_override else default_target
+    except (ValueError, TypeError):
+        target_tokens = default_target
+
+    return TieredCompaction(
+        tiers=[
+            ClearToolResults(
+                max_tokens=1,
+                keep_pairs=2,
+                placeholder="[Flowgraph tool output cleared to conserve context window]",
+            ),
+            SlidingWindowCompaction(
+                max_tokens=1,
+                keep_messages=20,
+                preserve_first_user_message=True,
+            ),
+        ],
+        target_tokens=target_tokens,
+    )
+
+
 def build_agent_from_cfg(cfg: dict) -> tuple[Agent, str | None]:
     """Construct a fresh Agent from an already-loaded settings dict.
 
@@ -156,6 +201,7 @@ def build_agent_from_cfg(cfg: dict) -> tuple[Agent, str | None]:
         capabilities=[
             StopGracefully(),
             ModelRequestLogger(),
+            _build_compaction_capability(cfg),
             web_search_cap,
             web_fetch_cap,
         ],

@@ -40,6 +40,7 @@ from grc_agent.adapter import (
     preview_flowgraph_py,
     query_catalog,
     query_docs,
+    save_block_to_library,
 )
 from grc_agent.prompts import build_system_prompt
 
@@ -348,6 +349,32 @@ SCENARIOS = [
         ),
         "expect": {"mode": "read"},
     },
+    {
+        "name": "25_save_epy_block_to_library",
+        "fixture": "tests/data/empty.grc",
+        "prompt": (
+            "Inspect the flowgraph — right now it's empty except for the"
+            " samp_rate variable. Write a small Embedded Python Block from"
+            " scratch, call it `scale_by_three`: a gr.sync_block subclass"
+            " named `blk` that takes one float input stream, multiplies"
+            " every sample by a constant `scale` parameter (default 3.0),"
+            " and produces one float output stream. Add a signal source"
+            " called `sig` (type float, freq 1000, amp 1.0, using"
+            " samp_rate) and a null sink called `null_sink` (type float)."
+            " Wire the source into your new epy block, and the epy block"
+            " into the sink. Inspect to confirm the chain is valid. Then"
+            " use the save_block tool to export `scale_by_three` into the"
+            " reusable block library under the block_id"
+            " `agent_test_scale_multiplier` — if a block with that id"
+            " already exists from a previous run, pass overwrite=True to"
+            " replace it."
+        ),
+        "expect": {
+            "blocks_present": ["scale_by_three", "sig", "null_sink"],
+            "valid": True,
+            "tools_called": ["save_block"],
+        },
+    },
 ]
 
 
@@ -636,6 +663,58 @@ async def get_run_log_func(ctx: RunContext[Any]) -> str:
     return json.dumps(data)
 
 
+async def save_block_func(
+    ctx: RunContext[Any],
+    instance_name: str,
+    block_id: str | None = None,
+    label: str | None = None,
+    category: str | None = None,
+    overwrite: bool = False,
+) -> str:
+    """Save an existing Embedded Python Block (epy_block) instance into GNU Radio's native hier-block library so it becomes a reusable catalog block for future flowgraphs.
+
+    Does NOT modify the current flowgraph's own epy_block instance — it keeps using
+    its own local inline source, unaffected. The saved block is a new, separately
+    named catalog entry available for future change_graph calls (in this flowgraph
+    or any other) once this call succeeds. This is not an out-of-tree (OOT) module —
+    it's GNU Radio's lighter hier-block library mechanism (~/.grc_gnuradio); say so
+    if asked, rather than calling it OOT.
+
+    Args:
+        instance_name: The epy_block instance in the current flowgraph to export.
+        block_id: Desired catalog block id. Defaults to instance_name. Must be a
+            valid Python identifier — it becomes both the catalog id and the saved
+            module's filename.
+        label: Human-readable block-tree label. Defaults to a title-cased block_id.
+        category: GRC category path. Defaults to "[Custom]".
+        overwrite: Set True to replace a block_id this tool previously saved. Never
+            allowed to overwrite a stock or foreign block regardless of this flag.
+    """
+    if hasattr(ctx.deps, "save_block"):
+        res = await ctx.deps.save_block(
+            instance_name,
+            block_id=block_id,
+            label=label,
+            category=category,
+            overwrite=overwrite,
+        )
+    else:
+        res = await _with_state_lock(
+            ctx,
+            lambda: save_block_to_library(
+                ctx.deps,
+                instance_name,
+                block_id=block_id,
+                label=label,
+                category=category,
+                overwrite=overwrite,
+            ),
+        )
+    if not res.get("ok"):
+        raise ModelRetry(f"Failed to save block. Errors: {res.get('errors') or '(no detail)'}")
+    return json.dumps(res)
+
+
 def grc_tools() -> list[Tool[Any]]:
     inspect_tool = Tool(
         inspect_graph_func,
@@ -678,7 +757,22 @@ def grc_tools() -> list[Tool[Any]]:
         require_parameter_descriptions=True,
     )
 
-    return [inspect_tool, query_tool, generate_python_tool, change_tool, run_log_tool]
+    save_block_tool = Tool(
+        save_block_func,
+        name="save_block",
+        docstring_format="google",
+        require_parameter_descriptions=True,
+    )
+    save_block_tool.max_retries = 3
+
+    return [
+        inspect_tool,
+        query_tool,
+        generate_python_tool,
+        change_tool,
+        run_log_tool,
+        save_block_tool,
+    ]
 
 
 async def validate_flowgraph_state(ctx: RunContext[Any], output: str) -> str:
@@ -723,6 +817,29 @@ async def validate_flowgraph_state(ctx: RunContext[Any], output: str) -> str:
     return output
 
 
+# Tool names that satisfy a mode == "read" scenario's expectation. Also the
+# default input to the generic tool-usage check below — one uniform helper
+# backs both, rather than a hand-picked heuristic special-cased per scenario.
+_READ_TOOLS = ("query_knowledge", "inspect_graph", "generate_python")
+
+
+def _any_tool_called(run_result, tool_names) -> bool:
+    """True if any ToolCallPart in the run's real message history used one
+    of the given tool names. Backs both the mode == "read" check and any
+    scenario's explicit `tools_called` expectation — a single reusable
+    tool-usage check instead of a one-off hardcoded for a specific scenario."""
+    if not run_result:
+        return False
+    from pydantic_ai.messages import ToolCallPart
+
+    for msg in run_result.all_messages():
+        if hasattr(msg, "parts") and any(
+            isinstance(p, ToolCallPart) and p.tool_name in tool_names for p in msg.parts
+        ):
+            return True
+    return False
+
+
 def check_expect(fixture_path, expect, run_result=None):  # noqa: C901
     fg = load_flow_graph(str(fixture_path))
     snap = inspect_graph(fg)["graph"]
@@ -735,18 +852,7 @@ def check_expect(fixture_path, expect, run_result=None):  # noqa: C901
     mode = expect.get("mode", "edit")
 
     if mode == "read":
-        has_read_tool = False
-        if run_result:
-            from pydantic_ai.messages import ToolCallPart
-
-            for msg in run_result.all_messages():
-                if hasattr(msg, "parts") and any(
-                    isinstance(p, ToolCallPart)
-                    and p.tool_name in ("query_knowledge", "inspect_graph", "generate_python")
-                    for p in msg.parts
-                ):
-                    has_read_tool = True
-        if not has_read_tool:
+        if not _any_tool_called(run_result, _READ_TOOLS):
             fail_reasons.append("no read tool used")
         if not run_result or not run_result.output:
             fail_reasons.append("empty answer")
@@ -779,6 +885,15 @@ def check_expect(fixture_path, expect, run_result=None):  # noqa: C901
                     numeric_match = False
                 if not numeric_match:
                     fail_reasons.append(f"param {inst}.{k}={actual.get(k)!r} expected {v!r}")
+
+    # Applies regardless of mode: any scenario can require one or more
+    # specific named tools to have actually been called during the run (e.g.
+    # save_block, which doesn't mutate the flowgraph itself so nothing above
+    # would otherwise notice whether it ran) — one uniform check reusable by
+    # any scenario, not a hand-picked one-off for a single case.
+    for tool_name in expect.get("tools_called") or []:
+        if not _any_tool_called(run_result, (tool_name,)):
+            fail_reasons.append(f"tool {tool_name!r} was never called")
 
     return {"pass": not fail_reasons, "reasons": fail_reasons, "valid": valid}
 

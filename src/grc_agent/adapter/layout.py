@@ -31,16 +31,25 @@ BLOCK_FOOTPRINT_W = 300
 BLOCK_FOOTPRINT_H = 220
 BLOCK_SPACING = 60
 
-# Default placement when there are no neighbors and no existing bounding box
-# (an empty canvas). Matches GRC's own default new-block coordinates.
-_DEFAULT_PLACE_X = 200.0
+# One grid step in each axis — a block's footprint plus the spacing gap.
+# Used by the full-relayout grid in compute_full_layout/_order_flow_band.
+GRID_W = BLOCK_FOOTPRINT_W + BLOCK_SPACING
+GRID_H = BLOCK_FOOTPRINT_H + BLOCK_SPACING
+
+# Default placement for the header band's top-left corner (an empty
+# canvas). Matches GRC's own default new-block coordinates.
 _DEFAULT_PLACE_Y = 12.0
 
-# Maximum ring-search radius for the collision-avoidance spiral. Each ring is
-# one grid step (BLOCK_FOOTPRINT + BLOCK_SPACING), so 60 rings covers a very
-# large canvas — if no slot is found by then, the graph is so dense that the
-# linear fallback (place to the right of everything) is more legible anyway.
-_MAX_SEARCH_RINGS = 60
+# Floor on header-band column count so a handful of variables in an otherwise
+# shallow flowgraph still pack into one wide strip (matching every hand-
+# authored fixture in this repo, e.g. tests/data/dial_tone.grc) instead of
+# stacking into a tall, narrow column.
+_DEFAULT_HEADER_COLS = 6
+
+# classify_role() outcomes that belong in the header band: all zero-port,
+# always-short block roles. is_virtual_or_pad blocks are excluded — they are
+# genuinely wired (real ports) and belong in the signal-flow band.
+_HEADER_ROLES = frozenset({"variable", "options", "import", "snippet"})
 
 
 def _rects_overlap(ax: float, ay: float, bx: float, by: float) -> bool:
@@ -104,92 +113,136 @@ def _compute_ranks(  # noqa: C901
     return ranks
 
 
-def _find_block_placement(  # noqa: C901
-    new_block_name: str,
-    occupied: list[tuple[float, float]],
-    neighbor_map: dict[str, set[str]],
-    block_coords: dict[str, tuple[float, float]],
-    bbox: tuple[float, float, float, float],
+def _pack_header_band(header_blocks: list[Any], cols: int) -> dict[str, tuple[float, float]]:
+    """Deterministically packs header-role blocks (variables/options/import/
+    snippet) left-to-right into `cols`-wide rows. The flowgraph's singleton
+    options block is always pinned first (col 0, row 0) — matching the
+    convention already visible in this repo's own fixtures (e.g.
+    tests/data/dial_tone.grc hand-places options leftmost). Everything else
+    is sorted alphabetically by instance name (b.name): it's the one
+    identifier every block in this set always has (unlike GUI label, which
+    plain `variable` blocks don't reliably carry), it's already unique
+    (change_graph rejects duplicate instance names), and it's exactly the
+    identifier the agent already reasons about via inspect_graph.
+
+    Row spacing uses the same GRID_H as the flow band, not a smaller
+    dedicated header-row constant — a smaller constant was tried and
+    rejected: `_rects_overlap` (the one collision oracle every placement
+    path and every overlap test in this codebase shares) always checks
+    against the conservative BLOCK_FOOTPRINT_H, regardless of a block's
+    actual role, so two header rows spaced any closer than GRID_H register
+    as a false overlap against that shared oracle. Matching GRID_H keeps
+    exactly one collision assumption for the whole canvas, consistent with
+    BLOCK_FOOTPRINT_H's own comment above ("a single generously-sized
+    constant is the more honest fix")."""
+    from grc_agent.adapter.graph import classify_role
+
+    options = [b for b in header_blocks if classify_role(b) == "options"]
+    rest = sorted(
+        (b for b in header_blocks if classify_role(b) != "options"),
+        key=lambda b: b.name,
+    )
+    ordered = options + rest
+
+    positions: dict[str, tuple[float, float]] = {}
+    for i, b in enumerate(ordered):
+        row, col = divmod(i, cols)
+        positions[b.name] = (col * GRID_W, _DEFAULT_PLACE_Y + row * GRID_H)
+    return positions
+
+
+def _order_flow_band(
+    flow_blocks: list[Any],
+    ranks: dict[str, int],
+    predecessors: dict[str, set[str]],
+    y_origin: float,
+) -> dict[str, tuple[float, float]]:
+    """Groups flow-band blocks by grandalf rank (column = rank * GRID_W),
+    and orders each rank's blocks vertically by a one-pass barycenter over
+    already-placed lower-rank predecessors, falling back to alphabetical
+    order for blocks with no resolvable upstream predecessor. This is a
+    from-scratch grid assignment — every flow-band block gets a unique
+    (rank, row) cell, so no collision search is needed (unlike the old
+    per-new-block spiral search this replaced, which solved a different
+    problem: finding a gap in an already-fixed layout when only one new
+    block moved).
+
+    Deliberately a simple bespoke heuristic rather than grandalf's own
+    SugiyamaLayout.draw()/Layer.order() crossing-minimizer — that machinery
+    is unused and unverified in this codebase today (only .grx[v].rank is
+    read anywhere). Upgrading this function's internals to a real crossing-
+    minimizer is a self-contained follow-up if visual quality isn't good
+    enough in practice.
+
+    Two disconnected components can legitimately share a rank number
+    (grandalf ranks each connected component independently from its own
+    rank 0 — see _compute_ranks/test_compute_ranks_reflects_topology): they
+    land in the same column but different rows, never overlapping."""
+    by_rank: dict[int, list[Any]] = {}
+    for b in flow_blocks:
+        by_rank.setdefault(ranks.get(b.name, 0), []).append(b)
+
+    positions: dict[str, tuple[float, float]] = {}
+    row_index: dict[str, int] = {}
+    for rank in sorted(by_rank):
+        resolved: list[tuple[float, str, Any]] = []
+        unresolved: list[Any] = []
+        for b in by_rank[rank]:
+            preds = [row_index[p] for p in predecessors.get(b.name, ()) if p in row_index]
+            if preds:
+                resolved.append((sum(preds) / len(preds), b.name, b))
+            else:
+                unresolved.append(b)
+        resolved.sort(key=lambda t: (t[0], t[1]))
+        unresolved.sort(key=lambda b: b.name)
+        ordered = [b for _, _, b in resolved] + unresolved
+
+        for i, b in enumerate(ordered):
+            positions[b.name] = (rank * GRID_W, y_origin + i * GRID_H)
+            row_index[b.name] = i
+    return positions
+
+
+def compute_full_layout(
+    flow_graph: Any,
+    new_block_names: set[str],
+    add_connections: list[str] | None,
     ranks: dict[str, int] | None = None,
-) -> tuple[float, float]:
-    """Find a non-overlapping position for a new block.
+) -> dict[str, tuple[float, float]]:
+    """Recomputes every block's (x, y) from scratch. `flow_graph.blocks` is
+    partitioned by classify_role into a header band (variable/options/
+    import/snippet — the zero-port, always-short roles) and a flow band
+    (everything else, including virtual_source/virtual_sink/pad_source/
+    pad_sink, which are genuinely wired). Called once per change_graph batch
+    that adds at least one block (see graph.py's add_blocks phase) — never
+    from the manual-edit path, since nothing there calls change_graph.
 
-    Prioritizes placement near connected neighbors (from the same batch's
-    add_connections), anchored by each neighbor's grandalf-computed rank
-    distance (see _compute_ranks). Never places a downstream block to the left
-    of its upstream providers, maintaining a clean left-to-right signal flow.
-    """
-    grid_w = BLOCK_FOOTPRINT_W + BLOCK_SPACING
-    grid_h = BLOCK_FOOTPRINT_H + BLOCK_SPACING
+    `ranks`, if provided, is reused as-is: change_graph already computes it
+    once for add_blocks_sorted, and recomputing it here would be a second,
+    redundant grandalf pass over the same inputs."""
+    from grc_agent.adapter.graph import classify_role, parse_conn
 
-    # 1. Find connected neighbors' coordinates and min_allowed_x for downstream blocks
-    neighbor_coords = []
-    my_rank = (ranks or {}).get(new_block_name)
-    min_allowed_x = 0.0
+    if ranks is None:
+        ranks = _compute_ranks(flow_graph, new_block_names, add_connections)
 
-    for other in neighbor_map.get(new_block_name, ()):
-        if other not in block_coords:
-            continue
-        ox, oy = block_coords[other]
-        other_rank = (ranks or {}).get(other)
-        if my_rank is not None and other_rank is not None:
-            rank_diff = my_rank - other_rank
-            neighbor_coords.append((ox + rank_diff * grid_w, oy))
-            if rank_diff > 0:
-                # 'other' is upstream of us — we must stay at or to the right of (ox + grid_w)
-                min_allowed_x = max(min_allowed_x, ox + grid_w)
-        else:
-            neighbor_coords.append((ox + grid_w, oy))
+    header_blocks: list[Any] = []
+    flow_blocks: list[Any] = []
+    for b in flow_graph.blocks:
+        (header_blocks if classify_role(b) in _HEADER_ROLES else flow_blocks).append(b)
 
-    # 2. Compute target point
-    if neighbor_coords:
-        target_x = sum(c[0] for c in neighbor_coords) / len(neighbor_coords)
-        target_y = sum(c[1] for c in neighbor_coords) / len(neighbor_coords)
-    elif bbox:
-        # No connections — place at graph centroid to fill empty space
-        target_x = (bbox[0] + bbox[2]) / 2
-        target_y = (bbox[1] + bbox[3]) / 2
-    else:
-        target_x = _DEFAULT_PLACE_X
-        target_y = _DEFAULT_PLACE_Y
+    predecessors: dict[str, set[str]] = {}
+    for c in flow_graph.connections:
+        predecessors.setdefault(c.sink_block.name, set()).add(c.source_block.name)
+    for conn_str in add_connections or []:
+        p = parse_conn(conn_str)
+        if p:
+            predecessors.setdefault(p["dst_block"], set()).add(p["src_block"])
 
-    # Ensure target_x respects min_allowed_x
-    target_x = max(target_x, min_allowed_x)
+    flow_max_rank = max((ranks.get(b.name, 0) for b in flow_blocks), default=-1)
+    cols = max(flow_max_rank + 1, _DEFAULT_HEADER_COLS)
 
-    # 3. Snap target to grid
-    gx = max(min_allowed_x, round(target_x / grid_w) * grid_w)
-    gy = max(0.0, round(target_y / grid_h) * grid_h)
-
-    # Check target position first
-    if gx >= 0 and gy >= 0 and not any(_rects_overlap(gx, gy, ox, oy) for ox, oy in occupied):
-        return (gx, gy)
-
-    # 4. Directionally prioritized grid search:
-    #    Test same-column vertical offsets first (dx=0), then forward downstream (dx>0),
-    #    and backwards (dx<0) only if allowed by min_allowed_x.
-    dx_sequence = [0]
-    for d in range(1, _MAX_SEARCH_RINGS):
-        dx_sequence.append(d)
-        dx_sequence.append(-d)
-
-    dy_sequence = [0]
-    for d in range(1, _MAX_SEARCH_RINGS):
-        dy_sequence.append(d)
-        dy_sequence.append(-d)
-
-    for ring in range(1, _MAX_SEARCH_RINGS):
-        for dx in dx_sequence:
-            for dy in dy_sequence:
-                if max(abs(dx), abs(dy)) != ring:
-                    continue
-                cx = gx + dx * grid_w
-                cy = gy + dy * grid_h
-                if cx < min_allowed_x or cy < 0:
-                    continue
-                if not any(_rects_overlap(cx, cy, ox, oy) for ox, oy in occupied):
-                    return (cx, cy)
-
-    # 5. Fallback: place to the right of everything
-    fallback_x = max(o[0] for o in occupied) + grid_w if occupied else _DEFAULT_PLACE_X
-    fallback_x = max(fallback_x, min_allowed_x)
-    return (fallback_x, gy)
+    positions = _pack_header_band(header_blocks, cols)
+    num_header_rows = -(-len(header_blocks) // cols) if header_blocks else 0
+    flow_y_origin = _DEFAULT_PLACE_Y + num_header_rows * GRID_H
+    positions.update(_order_flow_band(flow_blocks, ranks, predecessors, flow_y_origin))
+    return positions

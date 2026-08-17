@@ -814,7 +814,27 @@ def test_grc_tools_includes_generate_python():
         "generate_python",
         "change_graph",
         "get_run_log",
+        "save_block",
     }
+
+
+def test_system_prompt_names_every_real_tool():
+    """The prompt's own explicit allowed-tools sentence (prompts.py) must
+    name every tool grc_tools() actually registers, plus the two
+    capability-backed tools (web_search/web_fetch, native or fallback,
+    never registered via grc_tools()). No existing test in this repo
+    checked prompt CONTENT before — this is deliberately a first precedent
+    (following test_grc_tools_includes_generate_python's exact-set-style
+    check) so a new/removed/renamed tool can never silently drift out of
+    sync with what the model is told it's allowed to call."""
+    from grc_agent.prompts import build_system_prompt
+
+    prompt = build_system_prompt()
+    real_tool_names = {tool.name for tool in grc_tools()}
+    capability_tool_names = {"web_search", "web_fetch"}
+
+    for name in real_tool_names | capability_tool_names:
+        assert name in prompt, f"{name!r} is a real tool but missing from the system prompt"
 
 
 def test_build_agent_from_cfg_produces_correct_model_type_per_provider(tmp_path, monkeypatch):

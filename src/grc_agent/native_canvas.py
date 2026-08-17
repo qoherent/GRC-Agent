@@ -96,6 +96,29 @@ class NativeFlowgraphProxy:
             monitor.notify_graph_modified()
         return {"ok": True}
 
+    async def save_block(
+        self,
+        instance_name: str,
+        block_id: str | None = None,
+        label: str | None = None,
+        category: str | None = None,
+        overwrite: bool = False,
+    ) -> dict:
+        from grc_agent.adapter.block_library import save_block_to_library
+
+        cm = object.__getattribute__(self, "_canvas_manager")
+        result = save_block_to_library(
+            self._get_target(),
+            instance_name,
+            block_id=block_id,
+            label=label,
+            category=category,
+            overwrite=overwrite,
+        )
+        if result.get("ok"):
+            cm.reload_block_library()
+        return result
+
 
 class NativeCanvasManager:
     """Manages the flowgraph canvas inside GRC's MainWindow. All
@@ -195,7 +218,7 @@ class NativeCanvasManager:
         old_names = self._last_block_names
         self.drawing_area._update_after_zoom = True
         self.drawing_area.queue_draw()
-        self._scroll_to_new_blocks(fg, old_names)
+        self._scroll_to_relaid_out_graph(fg, old_names)
         self.last_synced_export_hash = flow_graph_content_hash(fg)
         if self.path:
             self.last_disk_hash = _sha256_file(self.path)
@@ -277,6 +300,24 @@ class NativeCanvasManager:
             # signal. Surface it through the sidebar's status bar.
             if self.on_sync_failed:
                 self.on_sync_failed(f"Failed to save your edit: {e}")
+
+    def reload_block_library(self) -> None:
+        """Refresh the live block registry + visible block-tree panel after
+        save_block writes a new .block.yml/.py into the hier-block library.
+        Mirrors GRC's own native "Reload Blocks" action (RELOAD_BLOCKS in
+        gnuradio.grc.gui.Application): build_library() then repopulate the
+        block-tree widget, then redraw open canvases. Uses self.platform
+        (the GUI Platform backing this running app's live MainWindow) —
+        NOT the headless get_platform() singleton, which is a separate
+        instance and would leave the visible panel stale."""
+        try:
+            self.platform.build_library()
+            if hasattr(self.window, "btwin"):
+                self.window.btwin.repopulate()
+            if hasattr(self.window, "update_pages"):
+                self.window.update_pages()
+        except Exception as e:
+            _log.warning("Failed to reload block library: %s", e)
 
     def toggle_blocks_panel(self) -> bool:
         if not self.app:
@@ -379,25 +420,38 @@ class NativeCanvasManager:
             _log.warning("Failed to draw block highlight overlay: %s", e)
         return False
 
-    def _scroll_to_new_blocks(self, flow_graph: Any, old_names: set[str]) -> None:
+    def _scroll_to_relaid_out_graph(self, flow_graph: Any, old_names: set[str]) -> None:
+        """change_graph's add_blocks phase relays out the WHOLE graph, not
+        just the new blocks (see adapter/layout.py's compute_full_layout) —
+        so the scroll target is the new blocks' POST-relayout positions (the
+        actual "what changed" location), not a pre-relayout snapshot. Falls
+        back to the whole graph's bounding box only if the new blocks
+        somehow carry no coordinates. Same trigger gate as before (some
+        block name wasn't present before this edit) — that's exactly
+        "did Phase 3 run", which is exactly "did a relayout happen"."""
         try:
-            new_coords = [
-                tuple(b.states["coordinate"])
-                for b in flow_graph.blocks
-                if b.name not in old_names and isinstance(b.states.get("coordinate"), (list, tuple))
-            ]
-            if not new_coords:
+            new_names = {b.name for b in flow_graph.blocks} - old_names
+            if not new_names:
                 return
             scrolled_window = self._get_scrolled_window()
             if scrolled_window is None:
                 return
             zoom = self.drawing_area.zoom_factor
-            content_w, content_h = flow_graph.get_extents()[2:]
-            min_x = min(c[0] for c in new_coords) * zoom
-            min_y = min(c[1] for c in new_coords) * zoom
+            x_min, y_min, x_max, y_max = flow_graph.get_extents()
+            new_coords = [
+                tuple(b.states["coordinate"])
+                for b in flow_graph.blocks
+                if b.name in new_names and isinstance(b.states.get("coordinate"), (list, tuple))
+            ]
+            if new_coords:
+                min_x = min(c[0] for c in new_coords) * zoom
+                min_y = min(c[1] for c in new_coords) * zoom
+            else:
+                min_x = x_min * zoom
+                min_y = y_min * zoom
             for adjustment, content_extent, target in (
-                (scrolled_window.get_hadjustment(), content_w * zoom + 100, min_x),
-                (scrolled_window.get_vadjustment(), content_h * zoom + 100, min_y),
+                (scrolled_window.get_hadjustment(), x_max * zoom + 100, min_x),
+                (scrolled_window.get_vadjustment(), y_max * zoom + 100, min_y),
             ):
                 if adjustment is None:
                     continue
@@ -407,7 +461,7 @@ class NativeCanvasManager:
                 )
                 adjustment.set_value(max(adjustment.get_lower(), min(target, upper_bound)))
         except Exception as e:
-            _log.warning("Failed to scroll to newly-added blocks: %s", e)
+            _log.warning("Failed to reframe relaid-out graph: %s", e)
 
     def setup_signal_handlers(self) -> None:
         notebook = self.window.notebook

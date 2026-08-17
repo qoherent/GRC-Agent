@@ -9,6 +9,23 @@ web-dashboard codebase and are not part of this history.
 
 ## [Unreleased]
 
+### Added
+- `save_block` tool: exports an existing Embedded Python Block (`epy_block`) instance into GNU Radio's native hier-block library (`~/.grc_gnuradio`) as a standalone, reusable catalog block — available to `change_graph` in this flowgraph or any other. Not an out-of-tree (OOT) module; the current flowgraph's own `epy_block` instance is left untouched.
+- Tiered context compaction via `pydantic-ai-harness`'s `TieredCompaction` capability: when a conversation approaches the context budget, bulky older tool-return contents (e.g. `inspect_graph` JSON payloads, `generate_python` previews) are cleared to a short placeholder first — keeping the last 2 tool-call/return pairs intact — and only if that isn't enough does a sliding window trim the oldest dialogue (preserving the first user message). Target threshold defaults to 24k tokens for local Ollama models (~75% of a 32k window) and 96k for cloud providers, overridable via `GRC_COMPACTION_TARGET_TOKENS`. Per-turn reasoning traces in `turn_traces` are unaffected — they record the full uncompacted events in memory.
+- System prompt now teaches a native runtime-verification strategy: wire a diagnostic block (`blocks_probe_rate` → `blocks_message_debug`, or a signal-magnitude probe) into a flowgraph before asking the user to run it, then read `get_run_log` — since a zero exit code doesn't guarantee correct output.
+- System prompt now nudges the agent to consult `query_knowledge` (catalog domain) for casual/symptom-described requests (e.g. "remove the gaps", "make it smoother") before concluding no fix exists.
+
+### Changed
+- New dependency: `pydantic-ai-harness>=0.21.0` (tiered context compaction capability).
+- `change_graph`'s `add_blocks` phase now relays out the *entire* flowgraph from scratch on every batch that adds a block, not just the new block: variables/options/imports/snippets pack into an alphabetically-sorted header band (options pinned first), everything else flows below via rank-ordered placement. Fixes new variables landing mid-signal-path (they never had wire-connection neighbors to anchor from). Only ever triggered by `change_graph`; manual canvas edits are untouched.
+- Integration scenario harness (`agent.py`'s `check_expect`) gained a mode-agnostic `tools_called` expectation field, generalized from the previous hardcoded read-tool-name check, so any scenario can assert a specific tool was actually invoked by the model.
+
+### Fixed
+- `save_block_to_library` no longer accepts a `gui_platform` parameter that rebuilt the GNU Radio block registry a second, redundant time on every successful live save — `NativeFlowgraphProxy.save_block()` already calls `NativeCanvasManager.reload_block_library()` afterward, which rebuilds it (and refreshes the visible block panel) on its own.
+
+### Removed
+- `_find_block_placement`, the old per-new-block spiral-search placement function, deleted outright now that `compute_full_layout` replaced its only caller.
+
 ## [0.1.5] - 2026-08-15
 
 ### Added

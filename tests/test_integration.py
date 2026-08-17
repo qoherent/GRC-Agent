@@ -132,6 +132,15 @@ SELECTED_SCENARIOS = [
     "21_type_conversion_and_conjugate",
     "22_fm_rx_filter_squelch",
     "24_generate_python_preview",
+    # "25_save_epy_block_to_library" is deliberately NOT in this generic
+    # list: unlike every other scenario (confined to fresh_agent()'s
+    # tempfile.mkdtemp()-copied .grc fixture, rmtree'd after), save_block
+    # writes real files to Config.hier_block_lib_dir (~/.grc_gnuradio by
+    # default) — a genuine external side effect this generic runner has no
+    # isolation for. It gets its own dedicated test below (matching
+    # test_scenario_generate_python_writes_nothing_to_disk's precedent for
+    # a tool whose disk behavior itself needs asserting), which redirects
+    # Config.hier_block_lib_dir to a temp dir for its duration.
 ]
 
 
@@ -297,6 +306,89 @@ def test_scenario_generate_python_writes_nothing_to_disk(backend):
         assert before == after, (
             f"generate_python must never write to disk — new entries: {after - before}"
         )
+
+        verdict = check_expect(fixture_path, sc["expect"], run_result=res)
+
+        output_dir = Path("tests/output")
+        output_dir.mkdir(parents=True, exist_ok=True)
+        md_log = render_scenario_markdown(sc, grc_before, res, verdict)
+        (output_dir / f"{sc['name']}_{backend}.md").write_text(md_log, encoding="utf-8")
+
+        assert verdict["pass"] is True, (
+            f"Scenario expectation check failed ({backend}). Reasons: {verdict['reasons']}"
+        )
+    finally:
+        shutil.rmtree(tmp_dir)
+
+
+@contextlib.contextmanager
+def _isolated_hier_block_lib_dir(tmp_path):
+    """Redirects GNU Radio's Config.hier_block_lib_dir to a fresh tmp dir
+    for the duration of the block, then restores it and rebuilds the real
+    get_platform() singleton. Mirrors tests/test_unit.py's
+    temp_hier_block_lib_dir fixture: Platform.block_classes is a single
+    ChainMap shared by every headless Platform instance (a Platform CLASS
+    attribute) — leaving the singleton's registry pointed at a
+    now-deleted tmp dir would silently corrupt every later test's view of
+    get_platform().blocks.
+    """
+    from gnuradio.grc.core.Config import Config
+
+    from grc_agent.adapter.graph import get_platform
+
+    lib_dir = tmp_path / "grc_gnuradio"
+    lib_dir.mkdir()
+    original = Config.hier_block_lib_dir
+    Config.hier_block_lib_dir = str(lib_dir)
+    try:
+        yield lib_dir
+    finally:
+        Config.hier_block_lib_dir = original
+        get_platform().build_library()
+
+
+@pytest.mark.parametrize("backend", _AVAILABLE_BACKENDS)
+def test_scenario_save_block_writes_to_isolated_hier_dir(backend, tmp_path):
+    """Dedicated verification for the save_block tool, run through the full
+    live-agent loop (tests/test_unit.py already covers save_block_to_library
+    in isolation). Every other scenario is confined to fresh_agent()'s
+    tempfile.mkdtemp()-copied .grc fixture — save_block is the first tool
+    with a genuine external side effect (writing into GNU Radio's hier-block
+    library), so this redirects Config.hier_block_lib_dir to a temp dir for
+    the run's duration instead of writing into whoever's real
+    ~/.grc_gnuradio actually runs this suite.
+    """
+    sc = next(s for s in SCENARIOS if s["name"] == "25_save_epy_block_to_library")
+    grc_before = Path(sc["fixture"]).read_text(encoding="utf-8")
+    fg, fixture_path, tmp_dir = fresh_agent(sc["fixture"])
+
+    try:
+        with _isolated_hier_block_lib_dir(tmp_path) as lib_dir:
+            model = _build_model_for_backend(backend)
+            agent = Agent(
+                model,
+                deps_type=Any,
+                output_type=[GrcAgentResponse, str],
+                name=f"grc_scenario_test_agent_{backend}_save_block",
+                instructions=build_system_prompt("pai-experiment-test"),
+                tools=grc_tools(),
+                capabilities=[StopGracefully(), web_search_cap, web_fetch_cap],
+                model_settings=ModelSettings(extra_body={"think": True}),
+                retries={"tools": 3, "output": 3},
+            )
+            agent.output_validator(validate_flowgraph_state)
+
+            res = agent.run_sync(sc["prompt"], deps=fg)
+
+            calls = _find_tool_calls(res, "save_block")
+            assert calls, "agent never called save_block"
+            assert calls[-1].get("ok") is True, f"save_block call failed: {calls[-1]}"
+
+            saved_yml = Path(calls[-1]["saved_to"]["block_yml"])
+            assert saved_yml.parent == lib_dir, (
+                f"save_block wrote outside the isolated tmp dir: {saved_yml}"
+            )
+            assert saved_yml.exists()
 
         verdict = check_expect(fixture_path, sc["expect"], run_result=res)
 
