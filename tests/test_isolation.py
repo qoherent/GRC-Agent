@@ -968,23 +968,23 @@ def test_live_swap_rebuilds_agent_with_new_provider(tmp_path, monkeypatch):
     asyncio.run(_run())
 
 
-def test_preflight_connection_returns_none_on_success_and_error_on_failure():
-    """preflight_connection must return None on a reachable endpoint and a
-    descriptive error string on any failure."""
-    from grc_agent.agent_factory import preflight_connection
+def test_probe_backend_returns_none_on_success_and_error_on_failure():
+    """probe_backend must return (None, None) on a reachable endpoint and a
+    descriptive reachability error string on any failure."""
+    from grc_agent.agent_factory import probe_backend
 
     api_key = os.environ.get("OPENROUTER_API_KEY")
     if api_key:
         # Real success path — exercises the actual endpoint.
-        err = preflight_connection("openrouter", api_key, timeout=10.0)
+        err, warn = probe_backend("openrouter", api_key, "", "", timeout=10.0)
         assert err is None, f"expected None for a valid OpenRouter key, got: {err!r}"
 
     # Deterministic failure: missing key for OpenRouter must return a non-empty error string.
-    err = preflight_connection("openrouter", "", timeout=10.0)
+    err, _w = probe_backend("openrouter", "", "", "", timeout=10.0)
     assert isinstance(err, str) and err, "missing openrouter key must produce a non-empty error"
 
     # Deterministic failure: missing key for Ollama Cloud must return a non-empty error string.
-    err = preflight_connection("ollama_cloud", "", timeout=10.0)
+    err, _w = probe_backend("ollama_cloud", "", "", "", timeout=10.0)
     assert isinstance(err, str) and err, "missing ollama cloud key must produce a non-empty error"
 
 
@@ -1421,21 +1421,21 @@ def test_codex_preflight_reports_signed_out_without_a_network_call(tmp_path, mon
     check is whether a usable credential exists."""
     import httpx
 
-    from grc_agent.agent_factory import preflight_connection
+    from grc_agent.agent_factory import probe_backend
     from grc_agent.providers.openai_codex import credentials as creds
 
     monkeypatch.setenv("GRC_AGENT_CODEX_AUTH", str(tmp_path / "auth.json"))
 
     def explode(*a, **k):  # noqa: ARG001
-        raise AssertionError("preflight must not hit the network for openai_codex")
+        raise AssertionError("probe must not hit the network for openai_codex")
 
     monkeypatch.setattr(httpx, "get", explode)
 
-    err = preflight_connection("openai_codex")
+    err, warn = probe_backend("openai_codex", "", "", "")
     assert err and "Not signed in" in err
 
     creds.save(creds.Credential(access=_fake_jwt("a"), refresh="r", expires=9e12, account_id="a"))
-    assert preflight_connection("openai_codex") is None
+    assert probe_backend("openai_codex", "", "", "") == (None, None)
 
 
 def test_codex_callback_listens_on_both_loopback_families():

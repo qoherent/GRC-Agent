@@ -160,7 +160,10 @@ provider-adaptive `WebSearch`/`WebFetch` capabilities.
 ## Test Gate
 
 ```bash
-uv run pytest tests/test_unit.py              # fast, no LLM; needs a display (xvfb-run)
+uv run pytest tests/ --ignore=tests/test_integration.py --ignore=tests/test_button_integration.py  # fast, no LLM (clustered unit suite, split from the former test_unit.py)
+# or per cluster: tests/test_adapter_graph.py · test_layout.py · test_adapter_rag.py ·
+#   test_block_library.py · test_chat_sidebar.py · test_db_sessions.py ·
+#   test_native_canvas.py · test_desktop_app.py · test_agent_factory.py
 uv run pytest tests/test_session_traces.py    # fast, no LLM, no display — session/step-store DB
 uv run pytest tests/test_session_traces_advanced.py # fast, no LLM (TestModel); needs a display (xvfb-run) for ChatSidebar integration
 uv run pytest tests/test_exec_monitor.py      # fast, no LLM, no display
@@ -170,8 +173,13 @@ uv run pytest tests/test_integration.py       # live model scenarios, Ollama Clo
 uv run ruff check
 ```
 
-`test_unit.py`/`test_isolation.py` touch live network (lite.duckduckgo.com search,
-Ollama embeddings/chat for RAG) — they are not fully hermetic. `test_isolation.py`
+The clustered unit files share fixtures/helpers via `tests/conftest.py`
+(flowgraph fixtures, epy sources, probe `_FakeResponse`, session seeders) —
+do not re-split them per test. The sidebar/dialog/canvas tests build real GTK
+widget trees and need a display (`xvfb-run`); the graph/layout/db/exec tests do not.
+
+`test_isolation.py` and the live-network tests (lite.duckduckgo.com search,
+Ollama embeddings/chat for RAG) are not fully hermetic. `test_isolation.py`
 needs no GUI/display server; `test_unit.py` builds real GTK widget trees and needs
 one (`xvfb-run`). `test_session_traces.py` is fully hermetic (each test redirects
 `GRC_AGENT_ENV` to a fresh tmp path). `test_session_traces_advanced.py` uses

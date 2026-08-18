@@ -430,25 +430,3 @@ def probe_backend(
         "It may be a typo, or the backend may need to download it first — "
         "which can look like a hung chat.",
     )
-
-
-def preflight_connection(
-    provider: str,
-    api_key: str = "",
-    *,
-    base_url: str = "",
-    timeout: float = 5.0,
-) -> str | None:
-    """Cheap sync reachability check against the configured provider's
-    `GET /models`-equivalent. Returns None on success, an error string on any
-    failure (connection refused, bad status, missing key, etc.).
-
-    Sync intentionally — runs from the GTK Save handler and from startup
-    (which is itself sync up to the unified loop's run_forever()). Bounded at
-    `timeout` so a hung host fails fast instead of blocking the UI.
-
-    Takes provider + api_key explicitly so the Save handler can validate a
-    NEW config BEFORE writing it to .env (no save/restore dance), while
-    startup resolves them from the already-loaded cfg/env.
-    """
-    return probe_backend(provider, api_key, base_url, model="", timeout=timeout)[0]

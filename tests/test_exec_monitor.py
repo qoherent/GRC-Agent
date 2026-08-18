@@ -352,3 +352,31 @@ def test_runtime_error_resets_between_runs():
         monitor.handle_message(ch)
     monitor.handle_message("\n>>> Done\n")
     assert len(errors) == 1  # still only one from the first run
+
+
+def test_execution_error_monitor_modified_since_last_run_note():
+    """When notify_graph_modified is called, get_last_run_log includes a note
+    warning the model that the log reflects the run BEFORE its recent edits."""
+    from grc_agent.exec_monitor import ExecutionErrorMonitor
+
+    mon = ExecutionErrorMonitor(on_error=lambda *_: None)
+    mon.handle_message("Executing: /tmp/test.py\n")
+    mon.handle_message("\n>>> Done (return code 1)\n")
+
+    log1 = mon.get_last_run_log()
+    assert log1 is not None
+    assert log1["return_code"] == 1
+    assert "note" not in log1
+
+    mon.notify_graph_modified()
+    log2 = mon.get_last_run_log()
+    assert log2 is not None
+    assert "note" in log2
+    assert "modified in memory" in log2["note"]
+
+    # Starting a new run resets the note flag
+    mon.handle_message("Executing: /tmp/test.py\n")
+    mon.handle_message("\n>>> Done (return code 0)\n")
+    log3 = mon.get_last_run_log()
+    assert log3 is not None
+    assert "note" not in log3

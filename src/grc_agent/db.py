@@ -488,15 +488,6 @@ def _prune_in(conn: sqlite3.Connection, keep: int = _MAX_SESSIONS) -> None:
     conn.commit()
 
 
-def prune_sessions(keep: int = _MAX_SESSIONS) -> None:
-    """Evict the oldest sessions beyond ``keep``. Standalone entry point that
-    opens its own connection; ``save_session`` prunes within its own connection
-    to avoid a second open."""
-    init_db()
-    with _conn() as conn:
-        _prune_in(conn, keep)
-
-
 def save_session(
     session_id: int | None, grc_file_path: str, messages: list[ModelMessage]
 ) -> int | None:

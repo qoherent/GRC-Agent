@@ -102,19 +102,7 @@ _SCROLL_STICK_THRESHOLD = 80
 _STREAM_FLUSH_INTERVAL = 0.033
 
 
-_MAX_THINKING_DISPLAY_CHARS = 4000
 _MAX_TOOL_DISPLAY_CHARS = 8000
-
-
-def _format_thinking_display(text: str, max_chars: int = _MAX_THINKING_DISPLAY_CHARS) -> str:
-    """Format thinking text for Gtk.Label display. Massive thinking output (e.g. 50k+
-    chars from deep reasoning models) forces Pango line wrapping to recalculate over the
-    entire string, freezing GTK layout and spiking CPU. Truncating display text to a
-    bounded window keeps Pango line-wrapping sub-millisecond without affecting full raw text."""
-    if len(text) <= max_chars:
-        return text
-    half = max_chars // 2
-    return f"{text[:half]}\n\n... [thinking truncated for display ({len(text)} chars total)] ...\n\n{text[-half:]}"
 
 
 def _format_tool_display(text: str, max_chars: int = _MAX_TOOL_DISPLAY_CHARS) -> str:
@@ -2048,9 +2036,6 @@ class ChatSidebar(Gtk.Box):
                 self._dispatch_send()
                 return True
         return False
-
-    def _on_entry_activate(self, _entry: Gtk.Entry) -> None:
-        self._dispatch_send()
 
     def _on_send_clicked(self, _btn: Gtk.Button) -> None:
         if self._busy:

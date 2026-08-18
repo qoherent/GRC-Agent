@@ -308,11 +308,12 @@ def test_delete_all_sessions_cascades_step_rows():
 
 
 def test_prune_sessions_takes_step_rows_along():
-    from grc_agent.db import get_step_store, prune_sessions
+    from grc_agent.db import _conn, _prune_in, get_step_store
 
     store = get_step_store()
     sid, _runs = _run_one_turn(store)
-    prune_sessions(keep=0)
+    with _conn() as conn:
+        _prune_in(conn, keep=0)
     import asyncio
 
     assert asyncio.run(store.list_runs(conversation_id=f"session-{sid}")) == []

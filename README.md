@@ -216,7 +216,7 @@ auto-detects the active graph from GRC's notebook tabs.
 
 ### Run the tests
 ```bash
-uv run pytest tests/test_unit.py              # fast, no LLM
+uv run pytest tests/ --ignore=tests/test_integration.py --ignore=tests/test_button_integration.py  # fast, no LLM
 uv run pytest tests/test_isolation.py         # settings/model isolation, no LLM
 uv run pytest tests/test_button_integration.py # tool integration, Ollama Cloud
 uv run pytest tests/test_integration.py       # live model, ~15-20 min
