@@ -136,12 +136,17 @@ so the vector index either covers the whole corpus or does not exist.
 > recursively. [...] As such, do not use API such as `GLib.MainLoop.run` or
 > `Gtk.Dialog.run`.
 
-While such a dialog is open, asyncio callbacks do not dispatch — an in-flight
-agent turn stalls until the user dismisses it. This is **pre-existing and
+While such a dialog is open, asyncio callbacks do not dispatch — an in-flight agent turn stalls until the user dismisses it. This is **pre-existing and
 unchanged** by the `gi.events` migration (`gbulb` has the same constraint), and
 it is bounded: the dialogs are modal and short-lived, so the stall is only ever
 as long as the user takes to click. `desktop_app.py`'s `_fatal_dialog` is not
 affected — it runs before the loop starts.
+
+The modal surface has been shrinking deliberately: the "Model not in backend's
+list" Save-path popup (introduced with the `probe_backend` hung-chat guard) was
+removed again in `0df48ec` and replaced with a status-bar warning, because the
+mismatch is a diagnostic, not a decision — only `_confirm_unreachable` still
+uses `.run()`.
 
 **Proposed fix**: replace `.run()` with the `response` signal plus an
 `asyncio.Future`, so the dialog is awaited rather than pumped.
