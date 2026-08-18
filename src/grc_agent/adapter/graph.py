@@ -1036,7 +1036,9 @@ def change_graph(  # noqa: C901
             # add_blocks being non-empty — change_graph is the only caller
             # of compute_full_layout, and manual/GUI edits never call
             # change_graph, so this can't run outside an agent-driven edit.
-            full_positions = compute_full_layout(flow_graph, new_block_names, add_connections, ranks=ranks)
+            full_positions = compute_full_layout(
+                flow_graph, new_block_names, add_connections, ranks=ranks
+            )
             for b in flow_graph.blocks:
                 pos = full_positions.get(b.name)
                 if pos is not None:

@@ -500,9 +500,7 @@ def _collect_token_usage(msgs) -> tuple[int, int, int, int]:
     return last_input, last_output, last_reasoning, total
 
 
-def _run_usage_output_override(
-    run: Any, last_output: int, last_reasoning: int
-) -> tuple[int, int]:
+def _run_usage_output_override(run: Any, last_output: int, last_reasoning: int) -> tuple[int, int]:
     """Replace last-response-only output/reasoning with the run's aggregated
     totals when a live run is available (see _update_context_label)."""
     if run is None:
@@ -1441,9 +1439,7 @@ class ChatSidebar(Gtk.Box):
                 widget = self._make_final_summary_widget(*summary)
                 ctx.box.pack_start(widget, False, False, 0)
                 widget.show_all()
-                ctx.full_raw_text += (
-                    f"<Summary>\n{summary[0]}\n{summary[1]}\n</Summary>\n"
-                )
+                ctx.full_raw_text += f"<Summary>\n{summary[0]}\n{summary[1]}\n</Summary>\n"
                 self._update_copy_text(ctx.box, ctx.full_raw_text)
                 return
             exp = self._make_tool_expander(part.tool_name or "?")
@@ -2383,7 +2379,7 @@ class ChatSidebar(Gtk.Box):
         which is acceptable for a user-initiated action and lets tests assert
         on the persisted state immediately after the dialog's APPLY response.
         """
-        from .agent_factory import preflight_connection
+        from .agent_factory import probe_backend
 
         if not model:
             self.set_status("Settings not saved — model name is required.", error=True)
@@ -2395,22 +2391,25 @@ class ChatSidebar(Gtk.Box):
 
         provider_label = _PROVIDER_LABELS.get(provider, provider)
 
-        # 1. Pre-flight reachability BEFORE writing to .env (no save/restore
-        #    dance if it fails). Bounded at 5s inside preflight_connection.
+        # 1. ONE bounded probe answers both questions: can we reach the
+        #    backend, and does it serve this model? A missing tag on a local
+        #    daemon means a silent multi-GB pull that reads as a hung chat —
+        #    surface it, but never block on it: the status bar warns, the
+        #    save proceeds, and the live-swap still happens.
         self.set_status(f"Checking {provider_label}\u2026")
-        preflight_err = preflight_connection(provider, key_val, base_url=base_url)
-        if preflight_err and not self._confirm_unreachable(
-            provider, preflight_err, toplevel, base_url=base_url
+        reach_err, model_warn = probe_backend(provider, key_val, base_url, model)
+        if reach_err and not self._confirm_unreachable(
+            provider, reach_err, toplevel, base_url=base_url
         ):
             self.set_status("Settings not saved — provider unreachable.", error=True)
             return
+        if model_warn:
+            self.set_status(model_warn, error=True)
 
         # 2. Persist to .env synchronously — tests assert on load_settings()
         #    immediately after emitting the response signal.
         try:
-            self._persist_settings(
-                provider, model, key_var, key_val, base_url, embed_backend
-            )
+            self._persist_settings(provider, model, key_var, key_val, base_url, embed_backend)
         except Exception as e:
             _log.exception("Failed to save settings")
             self.set_status(f"Settings not saved ({e}).", error=True)
@@ -2420,8 +2419,11 @@ class ChatSidebar(Gtk.Box):
         #    gbulb loop stays responsive during model construction (which
         #    spins up an httpx client and pydantic-ai Agent). The history is
         #    kept verbatim — ModelMessage objects are provider-agnostic.
+        warn_suffix = f" ⚠ {model_warn}" if model_warn else ""
         if self._rebuild_agent is None:
-            self.set_status("Settings saved. Restart to apply.")
+            self.set_status(
+                f"Settings saved. Restart to apply.{warn_suffix}", error=bool(model_warn)
+            )
             return
         try:
             new_agent, model_err = self._rebuild_agent()
@@ -2436,7 +2438,10 @@ class ChatSidebar(Gtk.Box):
                 error=True,
             )
         else:
-            self.set_status(f"Switched to {provider_label} \u00b7 {model}.")
+            self.set_status(
+                f"Switched to {provider_label} \u00b7 {model}.{warn_suffix}",
+                error=bool(model_warn),
+            )
 
     def _confirm_unreachable(
         self,
@@ -2460,19 +2465,27 @@ class ChatSidebar(Gtk.Box):
             hint = f"• Verify your API key for {provider}.\n• Check reachability of {base_url}."
         else:
             hint = f"• Ensure your OpenAI-compatible server is running.\n• Verify endpoint is reachable at {base_url}."
+        return self._confirm_yes_no(
+            toplevel,
+            title=f"Cannot reach {provider_label}",
+            body=(
+                f"Preflight check error: {err}\n\n"
+                f"Actionable hints:\n{hint}\n\n"
+                f"Save anyway? The agent will retry when you send a message."
+            ),
+        )
 
+    def _confirm_yes_no(self, toplevel: Gtk.Window | None, *, title: str, body: str) -> bool:
+        """Modal Yes/No warning dialog. Returns the user's answer. Anchored
+        on `self` so PyGObject doesn't GC it mid-`.run()`."""
         confirm = Gtk.MessageDialog(
             transient_for=toplevel,
             flags=Gtk.DialogFlags.MODAL,
             message_type=Gtk.MessageType.WARNING,
             buttons=Gtk.ButtonsType.YES_NO,
-            text=f"Cannot reach {provider_label}",
+            text=title,
         )
-        confirm.format_secondary_text(
-            f"Preflight check error: {err}\n\n"
-            f"Actionable hints:\n{hint}\n\n"
-            f"Save anyway? The agent will retry when you send a message."
-        )
+        confirm.format_secondary_text(body)
         self._open_dialog = confirm
         keep = confirm.run() == Gtk.ResponseType.YES
         self._open_dialog = None

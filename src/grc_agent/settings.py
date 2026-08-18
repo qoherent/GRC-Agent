@@ -181,7 +181,11 @@ def load_settings() -> dict:
         raw_provider = "ollama_cloud" if "ollama.com" in ollama_url_saved else "ollama_local"
     elif raw_provider == "ollama_cloud":
         raw_provider = "ollama_cloud"
-    elif raw_provider == "openrouter" or raw_provider == "openai_compatible" and "openrouter.ai" in compat_url:
+    elif (
+        raw_provider == "openrouter"
+        or raw_provider == "openai_compatible"
+        and "openrouter.ai" in compat_url
+    ):
         raw_provider = "openrouter"
     elif raw_provider == "openai_compatible" and "api.openai.com" in compat_url:
         raw_provider = "openai"
@@ -205,8 +209,7 @@ def load_settings() -> dict:
         or _DEFAULT_MODELS["openai_model"]
     )
     openai_compatible_model = (
-        vals.get("OPENAI_COMPATIBLE_MODEL")
-        or _DEFAULT_MODELS["openai_compatible_model"]
+        vals.get("OPENAI_COMPATIBLE_MODEL") or _DEFAULT_MODELS["openai_compatible_model"]
     )
     openai_codex_model = vals.get("OPENAI_CODEX_MODEL") or _DEFAULT_MODELS["openai_codex_model"]
 

@@ -154,9 +154,7 @@ def test_concurrent_step_store_writes_no_locking():
                     started_at=datetime.now(UTC),
                 )
             )
-            await store.save_snapshot(
-                ContinuableSnapshot(run_id=rid, step_index=0, messages=msgs)
-            )
+            await store.save_snapshot(ContinuableSnapshot(run_id=rid, step_index=0, messages=msgs))
 
         asyncio.run(_go())
         return rid
@@ -612,7 +610,13 @@ def test_chatsidebar_failed_turn_leaves_failure_trail(tmp_path):
             raise RuntimeError("model exploded")
 
         @asynccontextmanager
-        async def request_stream(self, messages, model_settings, model_request_parameters, run_context=None):  # noqa: ARG002
+        async def request_stream(
+            self,
+            messages,  # noqa: ARG002
+            model_settings,  # noqa: ARG002
+            model_request_parameters,  # noqa: ARG002
+            run_context=None,  # noqa: ARG002
+        ):
             raise RuntimeError("model exploded")
             yield  # pragma: no cover
 
@@ -695,9 +699,9 @@ def test_chatsidebar_turn_without_session_records_ungrouped_run():
     store = get_step_store()
     runs = asyncio.run(store.list_runs())
     assert runs, "the turn must still be recorded"
-    assert all(
-        not (r.conversation_id or "").startswith("session-") for r in runs
-    ), "ungrouped runs must never claim a session conversation id"
+    assert all(not (r.conversation_id or "").startswith("session-") for r in runs), (
+        "ungrouped runs must never claim a session conversation id"
+    )
 
 
 # ==========================================
@@ -757,9 +761,7 @@ def test_v2_db_with_turn_traces_migrates_to_latest_and_drops_it(tmp_path, monkey
     with sqlite3.connect(str(db_path)) as raw:
         version = raw.execute("SELECT value FROM _meta WHERE key = 'schema_version'").fetchone()
         assert int(version[0]) == LATEST_SCHEMA_VERSION
-        tables = {
-            r[0] for r in raw.execute("SELECT name FROM sqlite_master WHERE type='table'")
-        }
+        tables = {r[0] for r in raw.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         assert "turn_traces" not in tables
         row = raw.execute("SELECT first_message FROM sessions").fetchone()
         assert row[0] == "v2 prompt"

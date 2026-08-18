@@ -279,9 +279,7 @@ def test_step_tables_created_on_shared_db_file():
     store = get_step_store()
     _run_one_turn(store)  # first write creates the tables
     with _open_raw_connection() as raw:
-        tables = {
-            r[0] for r in raw.execute("SELECT name FROM sqlite_master WHERE type='table'")
-        }
+        tables = {r[0] for r in raw.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     assert {"runs", "events", "snapshots", "tool_effects"} <= tables
     assert "turn_traces" not in tables, "v4 must drop the hand-rolled trace table"
 
@@ -434,12 +432,8 @@ def test_v3_db_with_turn_traces_migrates_to_v4_and_drops_it(tmp_path, monkeypatc
     db_path.parent.mkdir(parents=True, exist_ok=True)
 
     with sqlite3.connect(str(db_path)) as raw:
-        raw.execute(
-            "CREATE TABLE _meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
-        )
-        raw.execute(
-            "INSERT INTO _meta (key, value) VALUES ('schema_version', '3')"
-        )
+        raw.execute("CREATE TABLE _meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+        raw.execute("INSERT INTO _meta (key, value) VALUES ('schema_version', '3')")
         raw.execute(
             "CREATE TABLE sessions ("
             "id INTEGER PRIMARY KEY AUTOINCREMENT, "
@@ -458,9 +452,7 @@ def test_v3_db_with_turn_traces_migrates_to_v4_and_drops_it(tmp_path, monkeypatc
     db_mod.init_db()
 
     with sqlite3.connect(str(db_path)) as raw:
-        tables = {
-            r[0] for r in raw.execute("SELECT name FROM sqlite_master WHERE type='table'")
-        }
+        tables = {r[0] for r in raw.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         assert "turn_traces" not in tables
         version = raw.execute("SELECT value FROM _meta WHERE key = 'schema_version'").fetchone()
         assert int(version[0]) == db_mod.LATEST_SCHEMA_VERSION

@@ -25,7 +25,6 @@ from grc_agent.adapter import (
 from grc_agent.agent_factory import (
     build_agent_from_cfg,
     build_interactive_agent,
-    preflight_from_cfg,
 )
 from grc_agent.chat_sidebar import ChatSidebar
 from grc_agent.exec_monitor import ExecutionErrorMonitor
@@ -296,27 +295,49 @@ def build_app() -> tuple[Gtk.Window, NativeCanvasManager, ChatSidebar, NativeFlo
 async def _startup_preflight(sidebar: ChatSidebar) -> None:
     """Run after window.show_all() — surfaces a non-blocking status-bar
     warning if the configured chat backend is unreachable. Bounded at 5s
-    inside preflight_from_cfg. Running it via asyncio.to_thread keeps the
+    inside probe_backend. Running it via asyncio.to_thread keeps the
     unified main loop responsive (chat streaming, indexing polls,
     canvas syncs all keep firing) instead of the old sync call that
     delayed window.show_all() by up to 5s before any window appeared."""
     try:
         cfg = load_settings()
-        err = await asyncio.to_thread(preflight_from_cfg, cfg)
+
+        def _probe() -> tuple[str | None, str | None]:
+            from grc_agent.agent_factory import probe_backend
+            from grc_agent.settings import get_env_value
+            from grc_agent.ui.providers import PROVIDER_API_KEY
+
+            key_var = PROVIDER_API_KEY.get(cfg.get("provider", ""), "")
+            key = (get_env_value(key_var) or "") if key_var else ""
+            return probe_backend(
+                cfg.get("provider", ""),
+                key,
+                "",
+                cfg.get("model", ""),
+            )
+
+        reach_err, model_warn = await asyncio.to_thread(_probe)
+        err = reach_err
     except Exception as exc:
         err = f"preflight raised: {exc}"
+        model_warn = None
     if err:
         provider = cfg.get("provider", "?") if "cfg" in locals() else "?"
         from grc_agent.ui.providers import PROVIDER_LABELS
 
         provider_label = PROVIDER_LABELS.get(provider, provider)
-        if provider == "ollama":
+        if provider == "ollama_local":
             hint = "Ensure 'ollama serve' is running or check Preferences (Ctrl+,)."
         else:
             hint = "Check network connectivity or API key in Preferences (Ctrl+,)."
         sidebar.set_status(
             f"Cannot reach {provider_label} ({err}). {hint}",
             error=True,
+        )
+    elif model_warn:
+        sidebar.set_status(
+            f"Heads-up: {model_warn} Use Load in Settings (Ctrl+,) to pick a served model.",
+            error=False,
         )
 
 

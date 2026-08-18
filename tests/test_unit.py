@@ -352,7 +352,9 @@ def test_change_graph_new_variable_lands_in_header_band_not_centroid(temp_dial_t
     fg = load_flow_graph(str(temp_dial_tone))
     res = change_graph(
         fg,
-        add_blocks=[{"block_id": "variable", "instance_name": "new_var", "params": {"value": "1.0"}}],
+        add_blocks=[
+            {"block_id": "variable", "instance_name": "new_var", "params": {"value": "1.0"}}
+        ],
     )
     assert res["ok"] is True
     new_y = fg.get_block("new_var").states["coordinate"][1]
@@ -368,7 +370,9 @@ def test_change_graph_new_variable_alphabetically_packed_among_existing_variable
     fg = load_flow_graph(str(temp_dial_tone))
     res = change_graph(
         fg,
-        add_blocks=[{"block_id": "variable", "instance_name": "avg_level", "params": {"value": "1.0"}}],
+        add_blocks=[
+            {"block_id": "variable", "instance_name": "avg_level", "params": {"value": "1.0"}}
+        ],
     )
     assert res["ok"] is True
 
@@ -389,7 +393,9 @@ def test_change_graph_options_block_pinned_first_in_header_band(temp_dial_tone):
     fg = load_flow_graph(str(temp_dial_tone))
     res = change_graph(
         fg,
-        add_blocks=[{"block_id": "variable", "instance_name": "aaa_first", "params": {"value": "1.0"}}],
+        add_blocks=[
+            {"block_id": "variable", "instance_name": "aaa_first", "params": {"value": "1.0"}}
+        ],
     )
     assert res["ok"] is True
     options_block = next(b for b in fg.blocks if b.key == "options")
@@ -401,7 +407,9 @@ def test_change_graph_full_relayout_preserves_flow_band_rank_order(temp_dial_ton
     fg = load_flow_graph(str(temp_dial_tone))
     res = change_graph(
         fg,
-        add_blocks=[{"block_id": "variable", "instance_name": "new_var", "params": {"value": "1.0"}}],
+        add_blocks=[
+            {"block_id": "variable", "instance_name": "new_var", "params": {"value": "1.0"}}
+        ],
     )
     assert res["ok"] is True
 
@@ -455,7 +463,8 @@ def test_change_graph_header_band_wraps_when_many_variables(temp_empty):
             assert not _rects_overlap(*a, *b)
     # 16 header blocks total (options + samp_rate + 14 new) at 6 cols/row -> 3 rows.
     all_header_ys = {
-        fg.get_block(n).states["coordinate"][1] for n in ["samp_rate", *[f"v_{i:02d}" for i in range(count)]]
+        fg.get_block(n).states["coordinate"][1]
+        for n in ["samp_rate", *[f"v_{i:02d}" for i in range(count)]]
     }
     assert len(all_header_ys) == 3
 
@@ -465,17 +474,34 @@ def test_change_graph_disconnected_flow_components_share_rank_columns_without_ov
     res = change_graph(
         fg,
         add_blocks=[
-            {"block_id": "blocks_null_source", "instance_name": "src_a", "params": {"type": "float"}},
-            {"block_id": "blocks_null_sink", "instance_name": "sink_a", "params": {"type": "float"}},
-            {"block_id": "blocks_null_source", "instance_name": "src_b", "params": {"type": "float"}},
-            {"block_id": "blocks_null_sink", "instance_name": "sink_b", "params": {"type": "float"}},
+            {
+                "block_id": "blocks_null_source",
+                "instance_name": "src_a",
+                "params": {"type": "float"},
+            },
+            {
+                "block_id": "blocks_null_sink",
+                "instance_name": "sink_a",
+                "params": {"type": "float"},
+            },
+            {
+                "block_id": "blocks_null_source",
+                "instance_name": "src_b",
+                "params": {"type": "float"},
+            },
+            {
+                "block_id": "blocks_null_sink",
+                "instance_name": "sink_b",
+                "params": {"type": "float"},
+            },
         ],
         add_connections=["src_a:0->sink_a:0", "src_b:0->sink_b:0"],
         force=True,
     )
     assert res["ok"] is True
     coords = {
-        n: tuple(fg.get_block(n).states["coordinate"]) for n in ["src_a", "sink_a", "src_b", "sink_b"]
+        n: tuple(fg.get_block(n).states["coordinate"])
+        for n in ["src_a", "sink_a", "src_b", "sink_b"]
     }
     # Both sources are independent rank-0 components -> same column, different rows.
     assert coords["src_a"][0] == coords["src_b"][0]
@@ -511,7 +537,9 @@ def test_change_graph_remove_and_add_in_same_batch_relays_out_post_removal_state
     res = change_graph(
         fg,
         remove_blocks=["waterfall_sink_0"],
-        add_blocks=[{"block_id": "variable", "instance_name": "new_var", "params": {"value": "1.0"}}],
+        add_blocks=[
+            {"block_id": "variable", "instance_name": "new_var", "params": {"value": "1.0"}}
+        ],
         force=True,
     )
     assert res["ok"] is True
@@ -566,7 +594,11 @@ def test_change_graph_flow_band_never_starts_above_a_wrapped_header_band(temp_em
                 {"block_id": "variable", "instance_name": f"v_{i}", "params": {"value": "1.0"}}
                 for i in range(5)
             ),
-            {"block_id": "blocks_null_sink", "instance_name": "flow_block", "params": {"type": "float"}},
+            {
+                "block_id": "blocks_null_sink",
+                "instance_name": "flow_block",
+                "params": {"type": "float"},
+            },
         ],
         force=True,
     )
@@ -2147,6 +2179,7 @@ def test_settings_dialog_persists_model_name(tmp_path, monkeypatch):
     model_entry = next(e for e in entries if e.get_text() == "old-model-name")
     model_entry.set_text("brand-new-model-name")
 
+    monkeypatch.setattr("grc_agent.agent_factory.probe_backend", lambda *_a, **_kw: (None, None))
     dlg.emit("response", Gtk.ResponseType.APPLY)
 
     # With the read-after-destroy bug this stayed "old-model-name".
@@ -2419,6 +2452,7 @@ def test_settings_dialog_persists_api_key(tmp_path, monkeypatch):
     key_entry = next(e for e in entries if e.get_visibility() is False)
     key_entry.set_text("sk-test-persists-123")
 
+    monkeypatch.setattr("grc_agent.agent_factory.probe_backend", lambda *_a, **_kw: (None, None))
     dlg.emit("response", Gtk.ResponseType.APPLY)
 
     assert get_env_value("OPENAI_COMPATIBLE_API_KEY") == "sk-test-persists-123"
@@ -3710,9 +3744,7 @@ def test_settings_dialog_extended_fields(tmp_path, monkeypatch):
     from grc_agent.settings import load_settings, save_settings
 
     monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
-    save_settings(
-        "ollama_local", "old-model", ollama_base_url="http://localhost:11434"
-    )
+    save_settings("ollama_local", "old-model", ollama_base_url="http://localhost:11434")
 
     sidebar = ChatSidebar()
     sidebar._open_settings()
@@ -3737,7 +3769,7 @@ def test_settings_dialog_extended_fields(tmp_path, monkeypatch):
     url_entry.set_text("http://10.0.0.5:11434")
 
     # Bypass preflight reachability check for 10.0.0.5
-    monkeypatch.setattr("grc_agent.agent_factory.preflight_connection", lambda *_a, **_kw: None)
+    monkeypatch.setattr("grc_agent.agent_factory.probe_backend", lambda *_a, **_kw: (None, None))
 
     dlg.emit("response", Gtk.ResponseType.APPLY)
 
@@ -3758,7 +3790,9 @@ def test_settings_dialog_switch_to_ollama_cloud(tmp_path, monkeypatch):
     from grc_agent.ui.providers import PROVIDER_ORDER
 
     monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
-    save_settings("ollama_local", "qwen3.6:35b-a3b-q4_K_M", ollama_base_url="http://localhost:11434")
+    save_settings(
+        "ollama_local", "qwen3.6:35b-a3b-q4_K_M", ollama_base_url="http://localhost:11434"
+    )
 
     sidebar = ChatSidebar()
     sidebar._open_settings()
@@ -3771,7 +3805,7 @@ def test_settings_dialog_switch_to_ollama_cloud(tmp_path, monkeypatch):
     assert dlg.url_entry.get_sensitive() is False, "fixed endpoint must be read-only"
 
     # Bypass preflight reachability check
-    monkeypatch.setattr("grc_agent.agent_factory.preflight_connection", lambda *_a, **_kw: None)
+    monkeypatch.setattr("grc_agent.agent_factory.probe_backend", lambda *_a, **_kw: (None, None))
 
     dlg.emit("response", Gtk.ResponseType.APPLY)
 
@@ -3779,6 +3813,105 @@ def test_settings_dialog_switch_to_ollama_cloud(tmp_path, monkeypatch):
     assert persisted["provider"] == "ollama_cloud"
     # The fixed endpoint is canonical — no OLLAMA_BASE_URL line is written.
     assert persisted["ollama_base_url"] == "http://localhost:11434"
+
+
+class _FakeResponse:
+    def __init__(self, status_code=200, payload=None):
+        self.status_code = status_code
+        self._payload = payload if payload is not None else {"data": []}
+
+    def json(self):
+        return self._payload
+
+
+def test_probe_backend_flags_unsupported_tag(monkeypatch):
+    """The reported hang: a tag the backend does not serve (e.g.
+    'deepseek-v4-flash:0731-cloud' against a daemon serving ':cloud') makes
+    the first chat request hang silently while the daemon tries to pull it.
+    probe_backend must flag it from the backend's own catalog in the SAME
+    bounded call that checks reachability."""
+    import httpx as _httpx
+
+    from grc_agent.agent_factory import probe_backend
+
+    monkeypatch.setattr(
+        _httpx,
+        "get",
+        lambda *_a, **_kw: _FakeResponse(
+            payload={
+                "models": [{"name": "deepseek-v4-flash:cloud"}, {"name": "qwen3.6:35b-a3b-q4_K_M"}]
+            }
+        ),
+    )
+    reach, warn = probe_backend(
+        "ollama_local", "", "http://localhost:11434", "deepseek-v4-flash:0731-cloud"
+    )
+    assert reach is None
+    assert warn is not None and "not served" in warn
+    assert "deepseek-v4-flash:cloud" in warn  # the warning names what IS served
+
+    # The matching tag is fine.
+    _, warn2 = probe_backend(
+        "ollama_local", "", "http://localhost:11434", "deepseek-v4-flash:cloud"
+    )
+    assert warn2 is None
+
+
+def test_probe_backend_never_breaks_save_or_startup(monkeypatch):
+    """The probe must never block or raise on unaskable backends: codex is
+    OAuth-only, an unreachable endpoint is a reachability error (bounded),
+    and an empty model skips the listing check."""
+    import httpx as _httpx
+
+    from grc_agent.agent_factory import probe_backend
+
+    monkeypatch.setattr(
+        _httpx, "get", lambda *_a, **_kw: (_ for _ in ()).throw(_httpx.ConnectError("down"))
+    )
+
+    # Unreachable backend -> reachability error, no model warning, bounded.
+    reach, warn = probe_backend("ollama_local", "", "http://localhost:9999", "m")
+    assert reach is not None and "could not reach http://localhost:9999" in reach
+    assert warn is None
+
+    monkeypatch.setattr(
+        _httpx, "get", lambda *_a, **_kw: _FakeResponse(payload={"data": [{"id": "m"}]})
+    )
+    # Codex: credential check only, never a model-list probe.
+    monkeypatch.setattr("grc_agent.providers.openai_codex.is_signed_in", lambda: True)
+    assert probe_backend("openai_codex", "", "", "gpt-5.6-luna") == (None, None)
+    # Empty model -> reachability only.
+    assert probe_backend("ollama_local", "", "http://localhost:11434", "")[1] is None
+
+
+def test_settings_dialog_save_warns_on_unserved_model(tmp_path, monkeypatch):
+    """Save-path guard: a model the backend does not list is a status-bar
+    warning, never a blocking popup — the save proceeds and the warning text
+    is visible in the sidebar's status bar."""
+
+    from grc_agent.chat_sidebar import ChatSidebar
+    from grc_agent.settings import load_settings, save_settings
+
+    monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
+    save_settings(
+        "ollama_local", "qwen3.6:35b-a3b-q4_K_M", ollama_base_url="http://localhost:11434"
+    )
+
+    monkeypatch.setattr(
+        "grc_agent.agent_factory.probe_backend",
+        lambda *_a, **_k: (
+            None,
+            "Model 'typo-model' is not served by this backend (it lists 2 models).",
+        ),
+    )
+
+    sidebar = ChatSidebar()
+    sidebar._apply_settings_save(
+        "ollama_local", "typo-model", "OLLAMA_API_KEY", "", "http://localhost:11434", "auto"
+    )
+    # No popup: the save went through and the warning reached the status bar.
+    assert load_settings()["model"] == "typo-model"
+    assert "not served" in (sidebar._status_label.get_text() or "")
 
 
 def test_badge_regex_matching():
@@ -4606,7 +4739,11 @@ def test_save_block_generated_codegen_imports_the_saved_module_correctly(
     res2 = change_graph(
         fg2,
         add_blocks=[
-            {"block_id": "blocks_null_source", "instance_name": "src0", "params": {"type": "float"}},
+            {
+                "block_id": "blocks_null_source",
+                "instance_name": "src0",
+                "params": {"type": "float"},
+            },
             {
                 "block_id": "test_codegen_saved_block",
                 "instance_name": "reused",
@@ -4673,7 +4810,10 @@ def test_save_block_rejects_collision_with_stock_block_even_with_overwrite(
     assert result["error_type"] == "block_id_collision"
 
 
-def test_save_block_overwrite_gates_a_previously_saved_block_id(temp_empty, temp_hier_block_lib_dir):  # noqa: ARG001
+def test_save_block_overwrite_gates_a_previously_saved_block_id(
+    temp_empty,
+    temp_hier_block_lib_dir,  # noqa: ARG001
+):
     fg = load_flow_graph(str(temp_empty))
     _add_scale_epy_block(fg)
 
@@ -4810,7 +4950,11 @@ def test_native_flowgraph_proxy_save_block_calls_reload_only_on_success(monkeypa
     result = asyncio.run(proxy.save_block("my_epy", block_id="saved_id"))
     assert result["ok"] is True
     assert seen_calls == [
-        (fake_fg, "my_epy", {"block_id": "saved_id", "label": None, "category": None, "overwrite": False})
+        (
+            fake_fg,
+            "my_epy",
+            {"block_id": "saved_id", "label": None, "category": None, "overwrite": False},
+        )
     ]
     cm.reload_block_library.assert_called_once()
 
@@ -4825,7 +4969,6 @@ def test_native_flowgraph_proxy_save_block_calls_reload_only_on_success(monkeypa
     result2 = asyncio.run(proxy.save_block("my_epy"))
     assert result2["ok"] is False
     cm.reload_block_library.assert_not_called()
-
 
 
 def test_parse_final_summary_accepts_grc_agent_response_shapes():

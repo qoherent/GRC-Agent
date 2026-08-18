@@ -20,18 +20,30 @@ from grc_agent.agent_factory import _build_compaction_capability
 def test_compaction_under_budget_preserves_exact_history():
     """When message history is well within target_tokens, TieredCompaction
     leaves all messages and parts untouched, ensuring 100% KV cache hit rate."""
-    compaction = _build_compaction_capability({"provider": "ollama_local", "ollama_base_url": "http://localhost:11434"})
+    compaction = _build_compaction_capability(
+        {"provider": "ollama_local", "ollama_base_url": "http://localhost:11434"}
+    )
 
     history: list[ModelMessage] = [
         ModelRequest(parts=[UserPromptPart(content="Add a throttle block")]),
-        ModelResponse(parts=[
-            ThinkingPart(content="I should check the active flowgraph first."),
-            ToolCallPart(tool_name="inspect_graph", args={"detail": "all"}, tool_call_id="call_1"),
-        ]),
-        ModelRequest(parts=[
-            ToolReturnPart(tool_name="inspect_graph", content='{"blocks": ["samp_rate"]}', tool_call_id="call_1")
-        ]),
-        ModelResponse(parts=[TextPart(content="I see the flowgraph.")])
+        ModelResponse(
+            parts=[
+                ThinkingPart(content="I should check the active flowgraph first."),
+                ToolCallPart(
+                    tool_name="inspect_graph", args={"detail": "all"}, tool_call_id="call_1"
+                ),
+            ]
+        ),
+        ModelRequest(
+            parts=[
+                ToolReturnPart(
+                    tool_name="inspect_graph",
+                    content='{"blocks": ["samp_rate"]}',
+                    tool_call_id="call_1",
+                )
+            ]
+        ),
+        ModelResponse(parts=[TextPart(content="I see the flowgraph.")]),
     ]
 
     agent = Agent(TestModel(), capabilities=[compaction])
@@ -40,7 +52,12 @@ def test_compaction_under_budget_preserves_exact_history():
         result = await agent.run("Now wire it", message_history=history)
         all_msgs = result.all_messages()
         # Verify tool return in history was NOT cleared
-        ret_part = next(p for m in all_msgs for p in m.parts if isinstance(p, ToolReturnPart) and p.tool_call_id == "call_1")
+        ret_part = next(
+            p
+            for m in all_msgs
+            for p in m.parts
+            if isinstance(p, ToolReturnPart) and p.tool_call_id == "call_1"
+        )
         assert ret_part.content == '{"blocks": ["samp_rate"]}'
 
     asyncio.run(_run())
@@ -61,18 +78,42 @@ def test_compaction_over_budget_evicts_old_tool_returns_keeps_last_n():
     history: list[ModelMessage] = [
         # Turn 1
         ModelRequest(parts=[UserPromptPart(content="Turn 1: inspect")]),
-        ModelResponse(parts=[ToolCallPart(tool_name="inspect_graph", args={}, tool_call_id="call_t1")]),
-        ModelRequest(parts=[ToolReturnPart(tool_name="inspect_graph", content="A" * 1500, tool_call_id="call_t1")]),
+        ModelResponse(
+            parts=[ToolCallPart(tool_name="inspect_graph", args={}, tool_call_id="call_t1")]
+        ),
+        ModelRequest(
+            parts=[
+                ToolReturnPart(
+                    tool_name="inspect_graph", content="A" * 1500, tool_call_id="call_t1"
+                )
+            ]
+        ),
         ModelResponse(parts=[TextPart(content="Turn 1 done.")]),
         # Turn 2
         ModelRequest(parts=[UserPromptPart(content="Turn 2: inspect")]),
-        ModelResponse(parts=[ToolCallPart(tool_name="inspect_graph", args={}, tool_call_id="call_t2")]),
-        ModelRequest(parts=[ToolReturnPart(tool_name="inspect_graph", content="B" * 1500, tool_call_id="call_t2")]),
+        ModelResponse(
+            parts=[ToolCallPart(tool_name="inspect_graph", args={}, tool_call_id="call_t2")]
+        ),
+        ModelRequest(
+            parts=[
+                ToolReturnPart(
+                    tool_name="inspect_graph", content="B" * 1500, tool_call_id="call_t2"
+                )
+            ]
+        ),
         ModelResponse(parts=[TextPart(content="Turn 2 done.")]),
         # Turn 3
         ModelRequest(parts=[UserPromptPart(content="Turn 3: inspect")]),
-        ModelResponse(parts=[ToolCallPart(tool_name="inspect_graph", args={}, tool_call_id="call_t3")]),
-        ModelRequest(parts=[ToolReturnPart(tool_name="inspect_graph", content="C" * 1500, tool_call_id="call_t3")]),
+        ModelResponse(
+            parts=[ToolCallPart(tool_name="inspect_graph", args={}, tool_call_id="call_t3")]
+        ),
+        ModelRequest(
+            parts=[
+                ToolReturnPart(
+                    tool_name="inspect_graph", content="C" * 1500, tool_call_id="call_t3"
+                )
+            ]
+        ),
         ModelResponse(parts=[TextPart(content="Turn 3 done.")]),
     ]
 
@@ -140,7 +181,10 @@ def test_compaction_target_pins_conservative_window_for_lan_openai_compatible_en
     would otherwise never compact and overflow its context."""
     monkeypatch.delenv("GRC_COMPACTION_TARGET_TOKENS", raising=False)
     cap = _build_compaction_capability(
-        {"provider": "openai_compatible", "openai_compatible_base_url": "http://192.168.1.5:8000/v1"}
+        {
+            "provider": "openai_compatible",
+            "openai_compatible_base_url": "http://192.168.1.5:8000/v1",
+        }
     )
     assert cap.target_fraction == 0.75
     assert cap.context_window == 32_000
@@ -188,7 +232,10 @@ def test_compaction_clamp_tier_guards_the_window(monkeypatch):
         {"provider": "ollama_local", "ollama_base_url": "http://localhost:11434"}
     )
     cloud = _build_compaction_capability(
-        {"provider": "openai_compatible", "openai_compatible_base_url": "https://openrouter.ai/api/v1"}
+        {
+            "provider": "openai_compatible",
+            "openai_compatible_base_url": "https://openrouter.ai/api/v1",
+        }
     )
     for cap in (local, cloud):
         assert isinstance(cap.tiers[0], ClampOversizedMessages), type(cap.tiers[0])
@@ -236,14 +283,22 @@ def test_chat_sidebar_renders_compacted_messages_cleanly():
     # Simulate message history containing a cleared tool result
     sidebar._message_history = [
         ModelRequest(parts=[UserPromptPart(content="Inspect flowgraph")]),
-        ModelResponse(parts=[ToolCallPart(tool_name="inspect_graph", args={"detail": "all"}, tool_call_id="call_c1")]),
-        ModelRequest(parts=[
-            ToolReturnPart(
-                tool_name="inspect_graph",
-                content="[Flowgraph tool output cleared to conserve context window]",
-                tool_call_id="call_c1",
-            )
-        ]),
+        ModelResponse(
+            parts=[
+                ToolCallPart(
+                    tool_name="inspect_graph", args={"detail": "all"}, tool_call_id="call_c1"
+                )
+            ]
+        ),
+        ModelRequest(
+            parts=[
+                ToolReturnPart(
+                    tool_name="inspect_graph",
+                    content="[Flowgraph tool output cleared to conserve context window]",
+                    tool_call_id="call_c1",
+                )
+            ]
+        ),
         ModelResponse(parts=[TextPart(content="Here is the flowgraph overview.")]),
     ]
 

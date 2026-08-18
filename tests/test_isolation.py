@@ -1602,7 +1602,9 @@ def test_model_catalog_lists_what_each_backend_reports(monkeypatch):
     monkeypatch.setattr(
         httpx, "get", lambda *_a, **_k: _Resp({"models": [{"name": "b"}, {"name": "a"}]})
     )
-    got = asyncio.run(model_catalog.list_models({"provider": "ollama_local"}, base_url="http://x:11434"))
+    got = asyncio.run(
+        model_catalog.list_models({"provider": "ollama_local"}, base_url="http://x:11434")
+    )
     assert got == ["a", "b"], "ollama tags must be listed and sorted"
 
     # The OpenAI /v1/models shape.

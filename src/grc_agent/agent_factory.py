@@ -223,7 +223,9 @@ def _build_compaction_capability(cfg: dict) -> TieredCompaction:
     ]
 
     # Absolute escape hatch for deployments where the fraction is wrong.
-    env_override = get_env_value("GRC_COMPACTION_TARGET_TOKENS") or os.environ.get("GRC_COMPACTION_TARGET_TOKENS")
+    env_override = get_env_value("GRC_COMPACTION_TARGET_TOKENS") or os.environ.get(
+        "GRC_COMPACTION_TARGET_TOKENS"
+    )
     try:
         target_tokens = int(env_override) if env_override else None
     except (ValueError, TypeError):
@@ -375,17 +377,59 @@ def _preflight_target(provider: str, api_key: str, base_url: str) -> tuple[str, 
     return f"{base}/api/tags", {}
 
 
-def _preflight_status_error(r) -> str:
-    detail = ""
+def probe_backend(
+    provider: str,
+    api_key: str,
+    base_url: str,
+    model: str,
+    *,
+    timeout: float = 5.0,
+) -> tuple[str | None, str | None]:
+    """ONE bounded probe that answers both reachability and model listing.
+
+    Returns ``(reachability_error, model_warning)`` — at most one is set.
+    The backend's /models endpoint is fetched once and the same response is
+    parsed for both checks, so Save and startup pay one HTTP round trip with
+    the same 5s bound the old preflight already had (never 15s, never two
+    calls, never a freeze while a busy daemon pulls a missing tag).
+
+    ``model_warning`` is set when the backend answers but does not list the
+    configured model — the tag is either a typo or, on a local daemon, a tag
+    it would have to pull first (a silent multi-GB download that reads as a
+    hung chat: the request stays open with zero output for the whole pull).
+    One uniform rule: the backend's own model list is the source of truth.
+
+    Parsing lives in one place: `model_catalog._list_http_models`, the same
+    parser the Settings dialog's Load button uses — this probe is just that
+    parser plus a membership check, mapped to the tuple contract.
+    """
+    if provider == "openai_codex":
+        # No /models endpoint on the Codex transport — the equivalent
+        # question is whether a usable credential exists.
+        from grc_agent.providers.openai_codex import is_signed_in
+
+        if not is_signed_in():
+            return ("Not signed in to ChatGPT — use Sign in with ChatGPT in Settings", None)
+        return (None, None)
+
+    from grc_agent.model_catalog import _list_http_models
+
     try:
-        body = r.text.strip()
-        if body:
-            first = body.split("\n", 1)[0].strip()
-            if first:
-                detail = f": {first}"
-    except Exception:
-        pass
-    return f"HTTP {r.status_code}{detail}"
+        names = _list_http_models(provider, api_key, base_url, timeout=timeout)
+    except RuntimeError as exc:
+        return (str(exc), None)
+    if not model:
+        return (None, None)
+    if model in names:
+        return (None, None)
+    listed = ", ".join(names[:5]) or "(none)"
+    return (
+        None,
+        f"Model '{model}' is not served by this backend "
+        f"(it lists {len(names)} models, e.g. {listed}). "
+        "It may be a typo, or the backend may need to download it first — "
+        "which can look like a hung chat.",
+    )
 
 
 def preflight_connection(
@@ -407,53 +451,4 @@ def preflight_connection(
     NEW config BEFORE writing it to .env (no save/restore dance), while
     startup resolves them from the already-loaded cfg/env.
     """
-    if provider == "openai_codex":
-        # There is no /models endpoint on the Codex transport, so there is no
-        # URL to probe. The equivalent question is whether a usable credential
-        # exists — the first real request refreshes it if needed.
-        from grc_agent.providers.openai_codex import is_signed_in
-
-        if not is_signed_in():
-            return "Not signed in to ChatGPT — use Sign in with ChatGPT in Settings"
-        return None
-
-    target = _preflight_target(provider, api_key, base_url)
-    if isinstance(target, str):
-        return target
-    url, headers = target
-    try:
-        r = httpx.get(url, headers=headers, timeout=timeout)
-    except httpx.HTTPError as exc:
-        return f"connection failed: {exc}"
-    if r.status_code >= 400:
-        return _preflight_status_error(r)
-    return None
-
-
-def preflight_from_cfg(cfg: dict, *, timeout: float = 5.0) -> str | None:
-    """Startup-path convenience: resolve provider + key from a loaded cfg/env,
-    then call `preflight_connection`. Used by desktop_app.py after
-    build_interactive_agent() to warn (not block) on an unreachable backend.
-    Key/URL resolution comes from the providers catalog + settings env vars,
-    so this can never disagree with the dialog's Save-path preflight."""
-    from grc_agent.ui.providers import PROVIDER_API_KEY
-
-    provider = cfg.get("provider", "ollama_local")
-    if provider == "openai_codex":
-        return preflight_connection(provider, timeout=timeout)
-    key_var = PROVIDER_API_KEY.get(provider) or ""
-    key = get_env_value(key_var) or os.environ.get(key_var) or ""
-    if provider in ("ollama_local", "ollama_cloud"):
-        key = key or get_env_value("OLLAMA_CLOUD_API_KEY") or os.environ.get("OLLAMA_CLOUD_API_KEY") or ""
-    if provider == "ollama_local":
-        url = cfg.get("ollama_base_url") or ""
-    elif provider == "openai_compatible":
-        url = (
-            cfg.get("openai_compatible_base_url")
-            or get_env_value("OPENAI_COMPATIBLE_BASE_URL")
-            or ""
-        )
-    else:
-        # Fixed-endpoint providers (ollama_cloud, openrouter, openai).
-        url = ""
-    return preflight_connection(provider, key, base_url=url, timeout=timeout)
+    return probe_backend(provider, api_key, base_url, model="", timeout=timeout)[0]

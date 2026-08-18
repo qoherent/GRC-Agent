@@ -44,7 +44,9 @@ async def list_models(cfg: dict, api_key: str = "", base_url: str = "") -> list[
     return await asyncio.to_thread(_list_http_models, provider, api_key, base_url)
 
 
-def _list_http_models(provider: str, api_key: str, base_url: str) -> list[str]:
+def _list_http_models(
+    provider: str, api_key: str, base_url: str, *, timeout: float = _TIMEOUT
+) -> list[str]:
     from grc_agent.agent_factory import _preflight_target
 
     target = _preflight_target(provider, api_key, base_url)
@@ -52,7 +54,7 @@ def _list_http_models(provider: str, api_key: str, base_url: str) -> list[str]:
         raise RuntimeError(target)
     url, headers = target
     try:
-        r = httpx.get(url, headers=headers, timeout=_TIMEOUT)
+        r = httpx.get(url, headers=headers, timeout=timeout)
     except httpx.HTTPError as exc:
         raise RuntimeError(f"could not reach {url}: {exc}") from exc
     if r.status_code >= 400:

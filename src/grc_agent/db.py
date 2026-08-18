@@ -287,15 +287,11 @@ def _step_tables_exist(conn: sqlite3.Connection) -> bool:
     """The StepPersistence tables are created lazily on the store's first
     write — a fresh DB (or one whose sessions predate the capability) has no
     `runs` table, and every step-row cascade is a no-op there."""
-    tables = {
-        r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
-    }
+    tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     return "runs" in tables
 
 
-def _delete_step_rows_for_conversations(
-    conn: sqlite3.Connection, conv_ids: list[str]
-) -> None:
+def _delete_step_rows_for_conversations(conn: sqlite3.Connection, conv_ids: list[str]) -> None:
     """Delete every StepPersistence row belonging to the given conversation
     ids (runs + their events/snapshots/tool_effects children). The `media`
     table is deliberately untouched — blobs are content-addressed and shared
@@ -484,13 +480,9 @@ def _prune_in(conn: sqlite3.Connection, keep: int = _MAX_SESSIONS) -> None:
         ).fetchall()
     ]
     if evicted:
-        _delete_step_rows_for_conversations(
-            conn, [conversation_id_for_session(i) for i in evicted]
-        )
+        _delete_step_rows_for_conversations(conn, [conversation_id_for_session(i) for i in evicted])
         conn.execute(
-            "DELETE FROM sessions WHERE id IN ("
-            + ",".join("?" for _ in evicted)
-            + ")",
+            "DELETE FROM sessions WHERE id IN (" + ",".join("?" for _ in evicted) + ")",
             evicted,
         )
     conn.commit()
