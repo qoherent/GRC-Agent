@@ -521,7 +521,7 @@ def test_v0_to_v1_migration_survives_crash_after_alter(tmp_path, monkeypatch):
 
 
 # ==========================================
-# Phase 4: generation-rate helper (moved from trace.py into chat_sidebar)
+# Phase 4: generation-rate helper
 # ==========================================
 
 

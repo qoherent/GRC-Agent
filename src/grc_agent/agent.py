@@ -462,8 +462,8 @@ class StopGracefully(AbstractCapability[Any]):
 # (OpenRouter, via its plugins) the framework runs search/fetch server-side; on
 # providers without it (Ollama has none) it falls back to `local` — here
 # upstream pydantic-ai's own ddgs-backed `duckduckgo_search` tool and the
-# bundled markdownify `web_fetch`. Both wrap the same `ddgs` engine our old
-# hand-rolled adapter/search.py used (a hard dependency), while gaining a
+# bundled markdownify `web_fetch`. Both wrap the same `ddgs` engine, while
+# keeping a
 # proper tool name (`duckduckgo_search`, not the wrapped function's) and
 # honest error semantics (network failures raise into pydantic-ai's tool
 # retry instead of returning a masked "Web search failed: ..." string).

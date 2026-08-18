@@ -264,7 +264,7 @@ def _broken_embedding_env(monkeypatch, bad_model="model-that-does-not-exist-xyz:
 def test_scenario_generate_python_writes_nothing_to_disk(backend):
     """Dedicated verification for the generate_python tool, run through the
     full live-agent loop rather than calling adapter.preview_flowgraph_py()
-    directly (tests/test_unit.py already covers that in isolation). Proves
+    directly (the unit suite already covers that in isolation). Proves
     three things a real LLM turn could still get wrong even though the unit
     tests pass: the model actually calls generate_python (not just some
     other read tool), the tool hands back real generated Python source (not
@@ -325,8 +325,8 @@ def test_scenario_generate_python_writes_nothing_to_disk(backend):
 def _isolated_hier_block_lib_dir(tmp_path):
     """Redirects GNU Radio's Config.hier_block_lib_dir to a fresh tmp dir
     for the duration of the block, then restores it and rebuilds the real
-    get_platform() singleton. Mirrors tests/test_unit.py's
-    temp_hier_block_lib_dir fixture: Platform.block_classes is a single
+    get_platform() singleton (see tests/conftest.py's
+    temp_hier_block_lib_dir fixture): Platform.block_classes is a single
     ChainMap shared by every headless Platform instance (a Platform CLASS
     attribute) — leaving the singleton's registry pointed at a
     now-deleted tmp dir would silently corrupt every later test's view of
@@ -350,7 +350,7 @@ def _isolated_hier_block_lib_dir(tmp_path):
 @pytest.mark.parametrize("backend", _AVAILABLE_BACKENDS)
 def test_scenario_save_block_writes_to_isolated_hier_dir(backend, tmp_path):
     """Dedicated verification for the save_block tool, run through the full
-    live-agent loop (tests/test_unit.py already covers save_block_to_library
+    live-agent loop (the unit suite already covers save_block_to_library
     in isolation). Every other scenario is confined to fresh_agent()'s
     tempfile.mkdtemp()-copied .grc fixture — save_block is the first tool
     with a genuine external side effect (writing into GNU Radio's hier-block

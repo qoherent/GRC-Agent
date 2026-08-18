@@ -447,7 +447,7 @@ def test_catalog_corpus_version_reflects_block_set(monkeypatch):
         assert version_for(["blocks/a"]) != v1
     finally:
         # Don't poison the module-level cache for tests that run after this one
-        # (test_unit's RAG tests call _corpus_version("catalog") for real, and a
+        # (the RAG unit tests call _corpus_version("catalog") for real, and a
         # stale fake-platform hash here would force a spurious rebuild there).
         _CORPUS_VERSION_CACHE.pop("catalog", None)
 

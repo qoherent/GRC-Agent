@@ -204,6 +204,22 @@ def test_ui_micro_interactions_and_shortcuts():
     assert handled
     assert sidebar._entry.get_text() == "Line 1\n"
 
+    # 5. Ctrl+, opens settings (regression: the handler used the nonexistent
+    # Gdk.KEY_Comma constant — AttributeError on EVERY keypress). The tuple
+    # is evaluated per event, so any key must reach the handler unharmed.
+    any_event = Gdk.EventKey()
+    any_event.keyval = Gdk.KEY_t
+    assert sidebar._on_key_press_event(sidebar, any_event) is False
+
+    sidebar._open_dialog = None
+    settings_event = Gdk.EventKey()
+    settings_event.keyval = Gdk.KEY_comma
+    settings_event.state = Gdk.ModifierType.CONTROL_MASK
+    assert sidebar._on_key_press_event(sidebar, settings_event) is True
+    assert sidebar._open_dialog is not None
+    sidebar._open_dialog.destroy()
+    sidebar._open_dialog = None
+
 
 def test_delete_recent_session_ui(monkeypatch):
     """Per-row conversation delete requires confirmation (web-UI sidebar
@@ -1312,9 +1328,10 @@ def test_context_label_updates_with_pydantic_ai_usage():
 
 
 def test_badge_regex_matching():
-    """Block-name badge regex (ChatSidebar._compile_badge_regex): whole-word
-    match built from the live flowgraph's block names, no substring false
-    positives, longest-name-first precedence, cached by block-name set."""
+    """Block-name badge regex (MarkdownView.compile_badge_regex, the real
+    production path — the ChatSidebar pass-through shim was deleted): whole-
+    word match built from the live flowgraph's block names, no substring
+    false positives, longest-name-first precedence, cached by block-name set."""
     from unittest.mock import MagicMock
 
     from grc_agent.chat_sidebar import ChatSidebar
@@ -1337,7 +1354,7 @@ def test_badge_regex_matching():
     proxy._canvas_manager = cm
     sidebar._flowgraph_proxy = proxy
 
-    rx = sidebar._compile_badge_regex()
+    rx = sidebar._md.compile_badge_regex()
     assert rx is not None
     assert [m.group(1) for m in rx.finditer("test_block_x")] == ["test_block_x"]
     assert [m.group(1) for m in rx.finditer("x")] == ["x"]
@@ -1347,11 +1364,11 @@ def test_badge_regex_matching():
     assert [m.group(1) for m in rx.finditer("the rate of")] == []
 
     # Same block-name set -> identical cached pattern object.
-    assert sidebar._compile_badge_regex() is rx
+    assert sidebar._md.compile_badge_regex() is rx
 
     # No active blocks -> None, and the cache is cleared.
     cm.current_flow_graph = None
-    assert sidebar._compile_badge_regex() is None
+    assert sidebar._md.compile_badge_regex() is None
     assert sidebar._md._badge_regex_cache is None
 
 
@@ -1443,13 +1460,15 @@ def test_badge_hover_calls_canvas_highlight():
     proxy._canvas_manager = cm
     sidebar._flowgraph_proxy = proxy
 
-    pill = sidebar._make_block_badge_widget("analog_sig_source_x_0")
+    from grc_agent.ui.block_badge import BlockBadge, badge_enter, badge_leave
+
+    pill = BlockBadge("analog_sig_source_x_0", lambda: cm)
     assert pill is not None
 
-    sidebar._on_badge_enter(pill, None, "analog_sig_source_x_0")
+    badge_enter(cm, "analog_sig_source_x_0")
     cm.set_highlight_block.assert_called_once_with("analog_sig_source_x_0")
 
-    sidebar._on_badge_leave(pill, None, "analog_sig_source_x_0")
+    badge_leave(cm)
     cm.clear_highlight.assert_called_once()
 
 
@@ -1467,12 +1486,13 @@ def test_badge_click_scrolls_canvas():
     proxy._canvas_manager = cm
     sidebar._flowgraph_proxy = proxy
 
-    pill = sidebar._make_block_badge_widget("block_0")
+    from grc_agent.ui.block_badge import badge_click
+
     event = MagicMock()
     event.type = Gdk.EventType.BUTTON_PRESS
     event.button = 1
 
-    result = sidebar._on_badge_click(pill, event, "block_0")
+    result = badge_click(cm, event, "block_0")
     assert result is True
     cm.scroll_to_block.assert_called_once_with("block_0")
 

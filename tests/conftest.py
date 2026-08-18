@@ -8,35 +8,13 @@ requirement. Pinning here (before any test module runs) makes the suite
 deterministic regardless of test execution order.
 """
 
-import os
 import shutil
-import socket
 import tempfile
 from pathlib import Path
 
-import gi
 import pytest
 
 from grc_agent.adapter import change_graph
-
-
-def has_llm_backend():
-    if os.getenv("OPENROUTER_API_KEY"):
-        return True
-    try:
-        with socket.create_connection(("127.0.0.1", 11434), timeout=0.5):
-            return True
-    except OSError:
-        return False
-
-
-requires_llm = pytest.mark.skipif(
-    not has_llm_backend(),
-    reason="Requires a running local Ollama server or an OPENROUTER_API_KEY set in the environment",
-)
-
-gi.require_version("Gtk", "3.0")
-gi.require_version("Gdk", "3.0")
 
 """Shared fixtures/helpers/constants split out of the former test_unit.py god
 file. The epy sources and dial-tone block names feed adapter/graph, layout,
@@ -205,16 +183,6 @@ def temp_run_null_sink():
     tmp_dir = tempfile.mkdtemp()
     src = FIXTURES_DIR / "run_test_null_sink.grc"
     dst = Path(tmp_dir) / "run_test_null_sink.grc"
-    shutil.copy2(src, dst)
-    yield dst
-    shutil.rmtree(tmp_dir)
-
-
-@pytest.fixture
-def temp_run_head():
-    tmp_dir = tempfile.mkdtemp()
-    src = FIXTURES_DIR / "run_test_head.grc"
-    dst = Path(tmp_dir) / "run_test_head.grc"
     shutil.copy2(src, dst)
     yield dst
     shutil.rmtree(tmp_dir)

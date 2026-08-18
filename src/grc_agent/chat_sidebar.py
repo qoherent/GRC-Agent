@@ -12,7 +12,6 @@ Message history is stored as pydantic-ai's native ``ModelMessage`` objects.
 import asyncio
 import json
 import logging
-import re
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -66,12 +65,6 @@ from .settings import (
     load_settings,
     save_settings,
     upsert_env_key,
-)
-from .ui.block_badge import (
-    BlockBadge,
-    badge_click,
-    badge_enter,
-    badge_leave,
 )
 from .ui.css import apply_css as _apply_css
 from .ui.markdown_view import MarkdownView
@@ -623,10 +616,7 @@ class ChatSidebar(Gtk.Box):
         GLib.timeout_add(500, self._poll_indexing)
 
     def _on_key_press_event(self, _widget: Gtk.Widget, event: Gdk.EventKey) -> bool:
-        if (event.state & Gdk.ModifierType.CONTROL_MASK) and event.keyval in (
-            Gdk.KEY_comma,
-            Gdk.KEY_Comma,
-        ):
+        if (event.state & Gdk.ModifierType.CONTROL_MASK) and event.keyval == Gdk.KEY_comma:
             self._open_settings()
             return True
         return False
@@ -1718,24 +1708,6 @@ class ChatSidebar(Gtk.Box):
             if self._flowgraph_proxy
             else None
         )
-
-    def _compile_badge_regex(self) -> re.Pattern | None:
-        """Delegates to the MarkdownView (cached, whole-word over live block names)."""
-        return self._md.compile_badge_regex()
-
-    def _on_badge_enter(self, _widget, _event, name: str) -> bool:
-        badge_enter(self._get_cm(), name)
-        return False
-
-    def _on_badge_leave(self, _widget, _event, _name: str) -> bool:
-        badge_leave(self._get_cm())
-        return False
-
-    def _on_badge_click(self, _widget, event, name: str) -> bool:
-        return badge_click(self._get_cm(), event, name)
-
-    def _make_block_badge_widget(self, name: str) -> Gtk.EventBox:
-        return BlockBadge(name, self._get_cm)
 
     def _render_markdown_to_box(self, box: Gtk.Box, text: str, clear: bool = True) -> None:
         """Render markdown into ``box``. Delegates to the MarkdownView."""
