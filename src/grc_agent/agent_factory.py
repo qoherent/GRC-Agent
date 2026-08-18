@@ -12,10 +12,13 @@ from pydantic_ai.providers.ollama import OllamaProvider
 from pydantic_ai.providers.openai import OpenAIProvider
 from pydantic_ai.retries import AsyncTenacityTransport, RetryConfig
 from pydantic_ai_harness.compaction import (
+    ClampOversizedMessages,
     ClearToolResults,
     SlidingWindowCompaction,
     TieredCompaction,
 )
+from pydantic_ai_harness.planning import Planning
+from pydantic_ai_harness.step_persistence import StepPersistence
 from tenacity import retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from grc_agent.agent import (
@@ -26,10 +29,35 @@ from grc_agent.agent import (
     web_fetch_cap,
     web_search_cap,
 )
+from grc_agent.db import get_step_store
 from grc_agent.prompts import build_system_prompt
 from grc_agent.settings import default_settings, get_env_value, load_settings
 
+# genai-prices registry errors documented in the harness compaction docs:
+# an OVER-recorded window means compaction never fires before the provider
+# rejects the request (the dangerous direction). `context_window` overrides
+# resolution outright, per the docs' own remedy. Keyed by substring so
+# prefixed ids (e.g. OpenRouter's 'anthropic/claude-sonnet-4-5') match too.
+_MODEL_WINDOW_OVERRIDES = {
+    "claude-sonnet-4-5": 200_000,  # registry records 1,000,000; real window 200,000
+    "claude-opus-4-6": 1_000_000,  # registry records 200,000; real window 1,000,000 (safe but wasteful)
+}
+
+
 _log = logging.getLogger(__name__)
+
+
+def _provider_base_url(cfg: dict) -> str:
+    """The configured endpoint for the active chat provider ("" when there
+    isn't one — ChatGPT/Codex is always chatgpt.com OAuth with no user-set
+    base URL). One resolution shared by the compaction local/cloud rule and
+    the StepPersistence run metadata, so the two can never disagree."""
+    provider = cfg.get("provider", "ollama")
+    if provider == "openai_codex":
+        return ""
+    if provider == "ollama":
+        return cfg.get("ollama_base_url", "") or ""
+    return cfg.get("openai_compatible_base_url", "") or ""
 
 
 def _retrying_http_client() -> httpx.AsyncClient:
@@ -138,17 +166,15 @@ def _build_compaction_capability(cfg: dict) -> TieredCompaction:
     """Build a tiered context compaction capability tailored to the active provider.
 
     Evicts bulky older tool return contents (e.g. inspect_graph 10k JSONs, generate_python previews)
-    when approaching the context budget, keeping the last 2 tool return pairs and dialogue history intact.
+    when the history exceeds a fraction of the model's context window, keeping the last 2 tool
+    return pairs and dialogue history intact.
+
+    The target is one uniform fraction (75%) of the model's window, resolved per
+    request from the genai-prices registry pydantic-ai-harness already ships
+    with. Only models the registry cannot resolve use a fallback denominator
+    — no more hand-picked absolute budgets per deployment class.
     """
-    provider = cfg.get("provider", "ollama")
-    if provider == "openai_codex":
-        # The Codex transport is always remote (chatgpt.com OAuth, no base
-        # URL of its own) — reading openai_compatible_base_url here would
-        # pick up whatever local vLLM URL a user left configured for the
-        # other provider and wrongly classify a 272k-window model as local.
-        base_url = ""
-    else:
-        base_url = cfg.get("ollama_base_url", "") if provider == "ollama" else cfg.get("openai_compatible_base_url", "")
+    base_url = _provider_base_url(cfg)
     # One uniform rule: any plain-HTTP endpoint is a self-hosted server
     # (every cloud provider — ollama.com, openrouter.ai, chatgpt.com — is
     # https). This covers localhost, 127.0.0.1, LAN IPs, and custom http
@@ -157,29 +183,52 @@ def _build_compaction_capability(cfg: dict) -> TieredCompaction:
     # overflow its context.
     is_local = base_url.startswith("http://")
 
-    # Target threshold: 24,000 tokens for 32k local models (~75% context), 96,000 for cloud models.
-    default_target = 24_000 if is_local else 96_000
+    # Tier 0: clamp a single runaway part (giant tool result or response)
+    # before anything else — the only strategy that can reach the NEWEST
+    # oversized part, which ClearToolResults (old results only) and
+    # SlidingWindowCompaction (oldest messages only) cannot. Zero-LLM.
+    # Threshold mirrors the window pins: half the assumed window, so one
+    # part can never alone overflow it.
+    clamp_tokens = 16_000 if is_local else 64_000
+    tiers = [
+        ClampOversizedMessages(max_part_tokens=clamp_tokens),
+        ClearToolResults(
+            max_tokens=1,
+            keep_pairs=2,
+            placeholder="[Flowgraph tool output cleared to conserve context window]",
+        ),
+        SlidingWindowCompaction(
+            max_tokens=1,
+            keep_messages=20,
+            preserve_first_user_message=True,
+        ),
+    ]
+
+    # Absolute escape hatch for deployments where the fraction is wrong.
     env_override = get_env_value("GRC_COMPACTION_TARGET_TOKENS") or os.environ.get("GRC_COMPACTION_TARGET_TOKENS")
     try:
-        target_tokens = int(env_override) if env_override else default_target
+        target_tokens = int(env_override) if env_override else None
     except (ValueError, TypeError):
-        target_tokens = default_target
+        target_tokens = None
+    if target_tokens is not None:
+        return TieredCompaction(tiers=tiers, target_tokens=target_tokens)
 
-    return TieredCompaction(
-        tiers=[
-            ClearToolResults(
-                max_tokens=1,
-                keep_pairs=2,
-                placeholder="[Flowgraph tool output cleared to conserve context window]",
-            ),
-            SlidingWindowCompaction(
-                max_tokens=1,
-                keep_messages=20,
-                preserve_first_user_message=True,
-            ),
-        ],
-        target_tokens=target_tokens,
-    )
+    if is_local:
+        # A self-hosted model id says nothing about the window the server
+        # actually serves — a registry entry describes the upstream spec,
+        # not this deployment's --ctx / num_ctx — so pin the conservative
+        # 32k local window outright: 0.75 x 32k = 24k target, the previous
+        # fixed local budget, for every plain-HTTP endpoint.
+        return TieredCompaction(tiers=tiers, target_fraction=0.75, context_window=32_000)
+    # Cloud: the model's real window from the pricing registry (gpt-5.x,
+    # claude, gemini, ... all carry one), corrected where the registry is
+    # documented wrong; models the registry does not know fall back to 128k
+    # — 0.75 x 128k = 96k, the previous fixed cloud budget.
+    model_id = str(cfg.get("model", ""))
+    for key, window in _MODEL_WINDOW_OVERRIDES.items():
+        if key in model_id:
+            return TieredCompaction(tiers=tiers, target_fraction=0.75, context_window=window)
+    return TieredCompaction(tiers=tiers, target_fraction=0.75, fallback_context_window=128_000)
 
 
 def build_agent_from_cfg(cfg: dict) -> tuple[Agent, str | None]:
@@ -202,16 +251,17 @@ def build_agent_from_cfg(cfg: dict) -> tuple[Agent, str | None]:
         cfg = default_settings()
         model = _build_model(cfg, http_client)
 
-    is_ollama = cfg["provider"] == "ollama"
-    thinking = cfg.get("ollama_thinking_enabled", True)
-    if is_ollama:
-        model_settings = ModelSettings(extra_body={"think": thinking})
-    elif cfg["provider"] == "openai_codex":
+    if cfg["provider"] == "openai_codex":
         from grc_agent.providers.openai_codex.model import CODEX_MODEL_SETTINGS
 
         # Codex rejects store:true outright ("Store must be set to false").
         model_settings = ModelSettings(**CODEX_MODEL_SETTINGS)
     else:
+        # Ollama and plain OpenAI-compatible endpoints: no thinking request
+        # knobs at all — the provider's native default stands. Verified live:
+        # current Ollama /v1 ignores `think`/`reasoning_effort` either way
+        # (hybrid models think by default), and older servers only know the
+        # native-API `think` flag, not an OpenAI-compat equivalent.
         model_settings = ModelSettings()
 
     from grc_agent.native_canvas import NativeFlowgraphProxy
@@ -226,6 +276,16 @@ def build_agent_from_cfg(cfg: dict) -> tuple[Agent, str | None]:
         capabilities=[
             StopGracefully(),
             ModelRequestLogger(),
+            StepPersistence(
+                store=get_step_store(),
+                agent_name="grc_chat",
+                metadata={
+                    "provider": str(cfg.get("provider", "")),
+                    "model": str(cfg.get("model", "")),
+                    "base_url": _provider_base_url(cfg),
+                },
+            ),
+            Planning(),
             _build_compaction_capability(cfg),
             web_search_cap,
             web_fetch_cap,

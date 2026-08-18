@@ -1,8 +1,8 @@
 # ruff: noqa: E402
 """Settings dialog for the chat sidebar.
 
-Owns only the dialog *UI* (provider dropdown, model/key entries, Ollama URL +
-reasoning checkbox) and the per-provider field-sync logic. On Save it reads the
+Owns only the dialog *UI* (provider dropdown, model/key entries, Ollama URL,
+embedding-backend selector) and the per-provider field-sync logic. On Save it reads the
 widget values *before* destroying itself (regression-critical — reading after
 destroy returns ''/-1), then hands them to the sidebar's ``on_save`` callback,
 which owns preflight, persistence and live-swap.
@@ -180,19 +180,6 @@ class SettingsDialog(Gtk.Dialog):
         grid.attach(self.url_label, 0, 7, 1, 1)
         grid.attach(self.url_entry, 1, 7, 1, 1)
 
-        lbl_t = Gtk.Label(label="Model Reasoning:")
-        lbl_t.set_xalign(0.0)
-        lbl_t.set_tooltip_text("Enable or disable model thinking output (think: true/false)")
-        self.thinking_check = Gtk.CheckButton(
-            label="Enable reasoning / thinking tags (think: true)"
-        )
-        self.thinking_check.set_active(cfg.get("ollama_thinking_enabled", True))
-        self.thinking_check.set_tooltip_text(
-            "Controls whether model reasoning is enabled (think: True/False) for supported Ollama models."
-        )
-        grid.attach(lbl_t, 0, 8, 1, 1)
-        grid.attach(self.thinking_check, 1, 8, 1, 1)
-
         self.provider_combo.connect("changed", self._sync_provider_fields)
         self.ollama_cloud_check.connect("toggled", self._on_ollama_cloud_toggled)
 
@@ -331,14 +318,12 @@ class SettingsDialog(Gtk.Dialog):
             self.ollama_cloud_check.set_visible(False)
             self.url_label.set_visible(False)
             self.url_entry.set_visible(False)
-            self.thinking_check.set_sensitive(False)
             return
         self.url_label.set_visible(True)
         self.url_entry.set_visible(True)
 
         if p == "ollama":
             self.ollama_cloud_check.set_visible(True)
-            self.thinking_check.set_sensitive(True)
             self._on_ollama_cloud_toggled(self.ollama_cloud_check)
         else:  # openai_compatible
             self.ollama_cloud_check.set_visible(False)
@@ -353,7 +338,6 @@ class SettingsDialog(Gtk.Dialog):
             self.url_entry.set_tooltip_text(
                 "Base URL for OpenAI-compatible server (e.g. OpenRouter, llama.cpp, vLLM, OpenAI)"
             )
-            self.thinking_check.set_sensitive(False)
 
     def _collect(self) -> tuple:
         idx = self.provider_combo.get_active()
@@ -368,10 +352,9 @@ class SettingsDialog(Gtk.Dialog):
                 base_url = self.url_entry.get_text().strip() or "http://localhost:11434"
         else:
             base_url = self.url_entry.get_text().strip() or "https://openrouter.ai/api/v1"
-        thinking = self.thinking_check.get_active()
         eidx = self.embed_combo.get_active()
         embed_backend = EMBED_BACKEND_ORDER[eidx] if eidx >= 0 else "auto"
-        return provider, model, key_var, key_val, base_url, thinking, embed_backend
+        return provider, model, key_var, key_val, base_url, embed_backend
 
     def _on_response(self, _dlg: Gtk.Dialog, response: int) -> None:
         # Read widget values BEFORE destroy — reading after destroy returns

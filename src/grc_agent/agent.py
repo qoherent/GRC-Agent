@@ -24,6 +24,7 @@ from pydantic_ai.capabilities import (
     WebSearch,
     WrapNodeRunHandler,
 )
+from pydantic_ai.common_tools.duckduckgo import duckduckgo_search_tool
 from pydantic_ai.models.ollama import OllamaModel
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.providers.ollama import OllamaProvider
@@ -35,7 +36,6 @@ from pydantic_graph import End
 from grc_agent.adapter import (
     change_graph,
     inspect_graph,
-    lite_web_search,
     load_flow_graph,
     preview_flowgraph_py,
     query_catalog,
@@ -460,12 +460,17 @@ class StopGracefully(AbstractCapability[Any]):
 
 # Provider-adaptive web capabilities. On providers with native web support
 # (OpenRouter, via its plugins) the framework runs search/fetch server-side; on
-# providers without it (Ollama has none) it falls back to `local` — here a
-# lite.duckduckgo.com scrape (`lite_web_search`) and the bundled markdownify
-# fetch (`WebFetch(local=True)`). Eager (defer_loading=False) so the tools are
-# always callable — no load_capability round-trip. Defined once here and
-# imported by agent_factory.py / tests so every Agent shares the same instances.
-web_search_cap = WebSearch(local=lite_web_search)
+# providers without it (Ollama has none) it falls back to `local` — here
+# upstream pydantic-ai's own ddgs-backed `duckduckgo_search` tool and the
+# bundled markdownify `web_fetch`. Both wrap the same `ddgs` engine our old
+# hand-rolled adapter/search.py used (a hard dependency), while gaining a
+# proper tool name (`duckduckgo_search`, not the wrapped function's) and
+# honest error semantics (network failures raise into pydantic-ai's tool
+# retry instead of returning a masked "Web search failed: ..." string).
+# Eager (defer_loading=False) so the tools are always callable — no
+# load_capability round-trip. Defined once here and imported by
+# agent_factory.py / tests so every Agent shares the same instances.
+web_search_cap = WebSearch(local=duckduckgo_search_tool(max_results=5))
 web_fetch_cap = WebFetch(local=True)
 
 

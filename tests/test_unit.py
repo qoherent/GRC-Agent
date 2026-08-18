@@ -18,7 +18,6 @@ from grc_agent.adapter import (
     change_graph,
     generate_flowgraph_py,
     inspect_graph,
-    lite_web_search,
     load_flow_graph,
     preview_flowgraph_py,
     query_catalog,
@@ -1375,20 +1374,26 @@ def test_query_docs_rag():
 # ==========================================
 # Web Tools Unit Tests (1 test)
 # ==========================================
-# Only lite_web_search is our own code — the WebFetch(local=True) markdownify
-# fallback is upstream pydantic-ai, so it isn't re-tested here.
+# The local search fallback and the WebFetch(local=True) markdownify fallback
+# are both upstream pydantic-ai code now — not re-tested beyond the wiring
+# smoke test below.
 
 
 def test_web_search_success():
-    # lite_web_search hits lite.duckduckgo.com directly (no LLM), and must NOT
-    # silently return "No results" like the old adapter.web_search did.
+    # The local search fallback must be upstream's ddgs-backed tool named
+    # `duckduckgo_search` (the system prompt names it), and its live call
+    # must return real results (no LLM involved). The old hand-rolled
+    # wrapper surfaced as a tool named after the wrapped function instead.
     import asyncio
 
-    res = asyncio.run(lite_web_search("python programming language"))
-    assert isinstance(res, str)
+    from pydantic_ai.common_tools.duckduckgo import duckduckgo_search_tool
+
+    tool = duckduckgo_search_tool(max_results=5)
+    assert tool.name == "duckduckgo_search"
+    res = asyncio.run(tool.function("python programming language"))
+    assert isinstance(res, list)
     assert len(res) > 0
-    assert "No web results" not in res
-    assert "Python" in res or "python" in res
+    assert "python" in (res[0].get("title", "") + res[0].get("body", "")).lower()
 
 
 # ==========================================
@@ -3219,43 +3224,6 @@ def test_prune_history_removed():
     assert not hasattr(agent, "prune_history")
 
 
-def test_lite_web_search_returns_results_for_real_query():
-    """The ddgs-based search returns real results for a normal query.
-    No mocking — tests the live backend."""
-    import asyncio
-
-    from grc_agent.adapter import search
-
-    result = asyncio.run(search.lite_web_search("GNU Radio tutorial"))
-    assert not result.startswith("No web results")
-    assert not result.startswith("Web search failed")
-    assert len(result) > 100
-
-
-def test_lite_web_search_handles_ddgs_failure_gracefully(monkeypatch):
-    """When the ddgs library raises (network error, rate limit, etc.),
-    the search returns a 'Web search failed' message instead of crashing."""
-    import asyncio
-
-    from grc_agent.adapter import search
-
-    class _BrokenDDGS:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_a):
-            return False
-
-        def text(self, *_a, **_kw):
-            raise RuntimeError("ddgs backend down")
-
-    import ddgs
-
-    monkeypatch.setattr(ddgs, "DDGS", _BrokenDDGS)
-    result = asyncio.run(search.lite_web_search("anything"))
-    assert "Web search failed" in result
-
-
 def test_apply_canvas_zoom_delegates_to_native_drawing_area_methods():
     """Regression: Ctrl+Plus/Minus/0 must delegate to GRC's own
     DrawingArea.zoom_in()/zoom_out()/reset_zoom() instead of hand-rolling
@@ -3603,8 +3571,8 @@ def test_context_label_updates_with_pydantic_ai_usage():
 # ==========================================
 
 
-def test_settings_custom_ollama_url_and_thinking(tmp_path, monkeypatch):
-    """Test OLLAMA_BASE_URL and OLLAMA_THINKING_ENABLED settings load, default, and save."""
+def test_settings_custom_ollama_url(tmp_path, monkeypatch):
+    """Test OLLAMA_BASE_URL settings load, default, and save."""
     from grc_agent.settings import default_settings, load_settings, save_settings
 
     env_file = tmp_path / ".env"
@@ -3613,42 +3581,37 @@ def test_settings_custom_ollama_url_and_thinking(tmp_path, monkeypatch):
     # 1. Defaults
     defaults = default_settings()
     assert defaults["ollama_base_url"] == "http://localhost:11434"
-    assert defaults["ollama_thinking_enabled"] is True
 
     # 2. Load from empty .env returns defaults
     cfg = load_settings()
     assert cfg["ollama_base_url"] == "http://localhost:11434"
-    assert cfg["ollama_thinking_enabled"] is True
 
     # 3. Save custom settings
     save_settings(
         "ollama",
         "qwen3.6:35b-a3b-q4_K_M",
         ollama_base_url="http://192.168.1.100:11434",
-        thinking_enabled=False,
     )
 
     # 4. Load persisted custom settings
     cfg2 = load_settings()
     assert cfg2["ollama_base_url"] == "http://192.168.1.100:11434"
-    assert cfg2["ollama_thinking_enabled"] is False
 
 
-def test_agent_factory_custom_ollama_url_and_thinking():
-    """Test build_agent_from_cfg passes custom base_url and thinking flag to model settings."""
+def test_agent_factory_custom_ollama_url():
+    """Test build_agent_from_cfg passes custom base_url to the provider."""
     from grc_agent.agent_factory import build_agent_from_cfg, preflight_connection
 
     cfg = {
         "provider": "ollama",
         "model": "qwen3.6:35b-a3b-q4_K_M",
         "ollama_base_url": "http://192.168.1.200:11434",
-        "ollama_thinking_enabled": False,
     }
 
     agent, err = build_agent_from_cfg(cfg)
     assert err is None
-    # Verify thinking is False in model_settings
-    assert agent.model_settings.get("extra_body", {}).get("think") is False
+    # No thinking request knobs: the provider's native default stands.
+    assert not (agent.model_settings or {}).get("extra_body")
 
     # Verify provider base_url contains custom IP (with /v1 appended)
     provider = getattr(agent.model, "_provider", None) or getattr(agent.model, "provider", None)
@@ -3740,7 +3703,7 @@ def test_copy_code_block_to_clipboard():
 
 
 def test_settings_dialog_extended_fields(tmp_path, monkeypatch):
-    """Test Settings Dialog includes Base URL entry and Thinking checkbox, saving them properly."""
+    """Test Settings Dialog includes Base URL entry, saving it properly."""
     from gi.repository import Gtk
 
     from grc_agent.chat_sidebar import ChatSidebar
@@ -3748,7 +3711,7 @@ def test_settings_dialog_extended_fields(tmp_path, monkeypatch):
 
     monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
     save_settings(
-        "ollama", "old-model", ollama_base_url="http://localhost:11434", thinking_enabled=True
+        "ollama", "old-model", ollama_base_url="http://localhost:11434"
     )
 
     sidebar = ChatSidebar()
@@ -3773,14 +3736,6 @@ def test_settings_dialog_extended_fields(tmp_path, monkeypatch):
     url_entry = next(e for e in entries if e.get_text() == "http://localhost:11434")
     url_entry.set_text("http://10.0.0.5:11434")
 
-    thinking_check = next(
-        c
-        for c in checks
-        if "think" in (c.get_label() or "").lower() or "reasoning" in (c.get_label() or "").lower()
-    )
-    assert thinking_check.get_active() is True
-    thinking_check.set_active(False)
-
     # Bypass preflight reachability check for 10.0.0.5
     monkeypatch.setattr("grc_agent.agent_factory.preflight_connection", lambda *_a, **_kw: None)
 
@@ -3788,7 +3743,6 @@ def test_settings_dialog_extended_fields(tmp_path, monkeypatch):
 
     persisted = load_settings()
     assert persisted["ollama_base_url"] == "http://10.0.0.5:11434"
-    assert persisted["ollama_thinking_enabled"] is False
 
 
 def test_settings_dialog_ollama_cloud_checkbox(tmp_path, monkeypatch):

@@ -73,7 +73,6 @@ from grc_agent.adapter.rag import (
     query_docs,
     render_catalog_block,
 )
-from grc_agent.adapter.search import lite_web_search
 from grc_agent.adapter.snapshots import (
     _prune_old_backups,
     _read_undo_cursor,
@@ -132,7 +131,6 @@ __all__ = [
     "hide_panels_by_default",
     "inspect_graph",
     "keep_param",
-    "lite_web_search",
     "load_flow_graph",
     "param_metadata",
     "parse_conn",

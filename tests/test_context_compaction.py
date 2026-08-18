@@ -1,6 +1,5 @@
 import asyncio
 import os
-import sqlite3
 
 from pydantic_ai import Agent
 from pydantic_ai.messages import (
@@ -16,8 +15,6 @@ from pydantic_ai.messages import (
 from pydantic_ai.models.test import TestModel
 
 from grc_agent.agent_factory import _build_compaction_capability
-from grc_agent.db import init_db, save_session
-from grc_agent.trace import TraceRecorder, save_turn_trace
 
 
 def test_compaction_under_budget_preserves_exact_history():
@@ -135,20 +132,26 @@ def test_sliding_window_preserves_first_user_prompt():
     asyncio.run(_run())
 
 
-def test_compaction_target_is_local_for_lan_openai_compatible_endpoint(monkeypatch):
+def test_compaction_target_pins_conservative_window_for_lan_openai_compatible_endpoint(monkeypatch):
     """Regression: an openai_compatible endpoint on a LAN IP (plain http://)
-    must be treated as local (24k target), not cloud (96k) — a 32k-window LAN
-    model would otherwise never compact and overflow its context."""
+    must pin the conservative 32k local window (0.75 x 32k = 24k target), not
+    resolve from the pricing registry — a registry entry describes the
+    upstream spec, not this deployment's --ctx, so a 32k-window LAN model
+    would otherwise never compact and overflow its context."""
     monkeypatch.delenv("GRC_COMPACTION_TARGET_TOKENS", raising=False)
     cap = _build_compaction_capability(
         {"provider": "openai_compatible", "openai_compatible_base_url": "http://192.168.1.5:8000/v1"}
     )
-    assert cap.target_tokens == 24_000
+    assert cap.target_fraction == 0.75
+    assert cap.context_window == 32_000
+    assert cap.target_tokens is None
 
 
-def test_compaction_target_is_cloud_for_https_endpoints(monkeypatch):
-    """https endpoints (ollama.com, openrouter.ai, custom proxies) are cloud
-    — 96k target. The one uniform rule is the scheme, not the hostname."""
+def test_compaction_target_resolves_real_window_for_https_endpoints(monkeypatch):
+    """https endpoints (ollama.com, openrouter.ai, custom proxies) resolve the
+    model's real window from the genai-prices registry per request; models the
+    registry doesn't know fall back to 128k (0.75 x 128k = 96k — the old fixed
+    cloud budget). The one uniform rule is the scheme, not the hostname."""
     monkeypatch.delenv("GRC_COMPACTION_TARGET_TOKENS", raising=False)
     for base_url in (
         "https://openrouter.ai/api/v1",
@@ -158,66 +161,67 @@ def test_compaction_target_is_cloud_for_https_endpoints(monkeypatch):
         cap = _build_compaction_capability(
             {"provider": "openai_compatible", "openai_compatible_base_url": base_url}
         )
-        assert cap.target_tokens == 96_000, f"{base_url} should be cloud"
+        assert cap.target_fraction == 0.75, f"{base_url} should be cloud"
+        assert cap.context_window is None
+        assert cap.fallback_context_window == 128_000, f"{base_url} should be cloud"
 
 
-def test_compaction_target_is_local_for_localhost_ollama(monkeypatch):
+def test_compaction_target_pins_conservative_window_for_localhost_ollama(monkeypatch):
     monkeypatch.delenv("GRC_COMPACTION_TARGET_TOKENS", raising=False)
     cap = _build_compaction_capability(
         {"provider": "ollama", "ollama_base_url": "http://localhost:11434"}
     )
-    assert cap.target_tokens == 24_000
+    assert cap.target_fraction == 0.75
+    assert cap.context_window == 32_000
+    assert cap.target_tokens is None
 
 
-def test_trace_isolation_preserves_uncompacted_events_in_sqlite(tmp_path, monkeypatch):
-    """Regression & Architectural Guarantee:
-    Even when wire messages are compacted, SQLite's turn_traces table MUST
-    store the 100% full raw uncompacted tool inputs, tool returns, and reasoning
-    events for future fine-tuning."""
-    monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
-    from grc_agent.db import get_db_path
-    db_file = get_db_path()
-    init_db()
+def test_compaction_clamp_tier_guards_the_window(monkeypatch):
+    """Tier 0 must be ClampOversizedMessages, the only strategy that can
+    reach a runaway NEWEST part; its threshold mirrors the window pins
+    (half the assumed window: 16k local / 64k cloud), so one part can never
+    alone overflow the context."""
+    from pydantic_ai_harness.compaction import ClampOversizedMessages
 
-    # Create a session first so FK constraint is satisfied
-    sid = save_session(None, "/tmp/test.grc", [])
-    assert sid is not None
-
-    # Create a TraceRecorder and record a massive 15,000-token tool return event
-    recorder = TraceRecorder(
-        session_id=sid,
-        provider="ollama",
-        model="qwen3.6:35b-a3b-q4_K_M",
-        base_url="http://localhost:11434",
-        user_prompt="Inspect the full flowgraph",
-        origin_page_path="/tmp/test.grc",
+    monkeypatch.delenv("GRC_COMPACTION_TARGET_TOKENS", raising=False)
+    local = _build_compaction_capability(
+        {"provider": "ollama", "ollama_base_url": "http://localhost:11434"}
     )
+    cloud = _build_compaction_capability(
+        {"provider": "openai_compatible", "openai_compatible_base_url": "https://openrouter.ai/api/v1"}
+    )
+    for cap in (local, cloud):
+        assert isinstance(cap.tiers[0], ClampOversizedMessages), type(cap.tiers[0])
+    assert local.tiers[0].max_part_tokens == 16_000
+    assert cloud.tiers[0].max_part_tokens == 64_000
 
-    full_payload = '{"blocks": [' + ', '.join(f'{{"id": "block_{i}", "type": "complex"}}' for i in range(500)) + ']}'
-    assert len(full_payload) > 10_000
 
-    from pydantic_ai.messages import FunctionToolCallEvent, FunctionToolResultEvent
-
-    recorder.on_event(FunctionToolCallEvent(part=ToolCallPart(tool_name="inspect_graph", args={"detail": "all"}, tool_call_id="call_inspect_1")))
-    recorder.on_event(FunctionToolResultEvent(part=ToolReturnPart(tool_name="inspect_graph", content=full_payload, tool_call_id="call_inspect_1")))
-    row = recorder.finalize(run=None)
-    row["run_id"] = "run_123"
-    row["conversation_id"] = "conv_123"
-
-    # Save to SQLite
-    save_turn_trace(row)
-
-    # Verify SQLite turn_traces table has the UNCOMPACTED 10k+ payload intact
-    conn = sqlite3.connect(db_file)
-    cur = conn.cursor()
-    cur.execute("SELECT events FROM turn_traces WHERE run_id = ?", ("run_123",))
-    row = cur.fetchone()
-    conn.close()
-
-    assert row is not None
-    events_json = row[0]
-    assert len(events_json) > 10_000
-    assert "block_499" in events_json, "turn_traces must store uncompacted ground truth"
+def test_compaction_window_override_for_documented_registry_errors(monkeypatch):
+    """genai-prices records claude-sonnet-4-5 as 1,000,000 vs its real
+    200,000 — an over-recorded window would never compact before the
+    provider rejects the request. The docs prescribe an explicit
+    context_window override; the map must apply it (substring match covers
+    prefixed ids like OpenRouter's 'anthropic/claude-sonnet-4-5')."""
+    monkeypatch.delenv("GRC_COMPACTION_TARGET_TOKENS", raising=False)
+    cap = _build_compaction_capability(
+        {
+            "provider": "openai_compatible",
+            "model": "anthropic/claude-sonnet-4-5",
+            "openai_compatible_base_url": "https://openrouter.ai/api/v1",
+        }
+    )
+    assert cap.context_window == 200_000
+    assert cap.target_fraction == 0.75
+    # An unknown cloud model still gets the 128k fallback.
+    cap2 = _build_compaction_capability(
+        {
+            "provider": "openai_compatible",
+            "model": "some/unknown-model",
+            "openai_compatible_base_url": "https://openrouter.ai/api/v1",
+        }
+    )
+    assert cap2.context_window is None
+    assert cap2.fallback_context_window == 128_000
 
 
 def test_chat_sidebar_renders_compacted_messages_cleanly():

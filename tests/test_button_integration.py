@@ -65,7 +65,7 @@ def _build_cloud_agent(fixture: str):
         instructions=build_system_prompt("pai-button-test"),
         tools=grc_tools(),
         capabilities=[StopGracefully(), web_search_cap, web_fetch_cap],
-        model_settings=ModelSettings(extra_body={"think": True}),
+        model_settings=ModelSettings(),
         retries={"tools": 3, "output": 3},
     )
     agent.output_validator(validate_flowgraph_state)

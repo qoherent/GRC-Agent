@@ -50,7 +50,7 @@ The agent interacts with the flowgraph through six highly specialized tools:
 
 To preserve context window limits and optimize reasoning tokens, visual and schema metadata is pruned using a two-stage process:
 
-- **Stage A (Visual & Structural Layout Pruning)**: Excludes layout-specific variables (e.g. GUI hints, coordinates) and non-DSP nodes (such as imports, snippets).
+- **Stage A (Visual & Structural Layout Pruning)**: Excludes layout-specific variables (e.g. GUI hints, coordinates) and schema plumbing (block `id`, `showports`, `bus_structure_*`); imports/snippets stay in the listing, tagged by a `role` field.
 - **Stage B (Parameter Visibility Pruning)**: Omits default configuration values, advanced parameters, and unconnected optional ports. The LLM receives a clean, semantic JSON representation of the active DSP topology.
 
 ### 2. Local SQLite Vector RAG (`query_knowledge`)
@@ -59,7 +59,7 @@ Knowledge grounding is enforced through a local SQLite vector database (`sqlite-
 
 - **Catalog Domain**: Queries GNU Radio block metadata, block IDs, category mappings, parameter options, and port structures.
 - **Docs Domain**: Queries wiki pages, tutorials, and conceptual documentation parsed and heading-chunked.
-- **Embedding Provider Fallback**: Embeddings are generated using local Ollama (`embeddinggemma:latest`) or OpenRouter (`perplexity/pplx-embed-v1-0.6b`) backends, checking for model or dimensionality changes on startup.
+- **Embedding Backend Selection**: The embeddings backend is chosen independently of the chat provider (`GRC_EMBED_BACKEND`: `auto` (follow chat provider) | `ollama` | `llamacpp` (the bundled local runtime serving EmbeddingGemma) | `openai_compatible`); the vector-DB filename is keyed on the backend so switching never mixes one model's vectors with another's index. Staleness is checked on first use — an embedding-model or corpus change triggers a rebuild.
 - **Lexical Fallback**: Vector search is primary. If the embedding call itself fails (backend unreachable, model not pulled), `query_knowledge` transparently falls back to a local SQLite FTS5 (BM25) keyword search over the same catalog/docs corpus — including on a cold cache where the embedding backend was never reachable, in which case the DB is built lexical-only (no vector index) rather than failing the whole ingest. The tool result always tags which path served it (`"search_mode": "vector" | "lexical"`), so a fallback is never silent to the caller.
 
 ### 3. Python Code Preview (`generate_python`)

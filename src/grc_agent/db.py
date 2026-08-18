@@ -7,6 +7,7 @@ from typing import Any
 
 from pydantic_ai import ModelMessagesTypeAdapter
 from pydantic_ai.messages import ModelMessage
+from pydantic_ai_harness.step_persistence import SqliteStepStore
 
 from .settings import env_path
 
@@ -15,7 +16,7 @@ _log = logging.getLogger(__name__)
 # Latest on-disk schema version applied by init_db(). Each migration in
 # _apply_migrations() bumps the version recorded in the `_meta` table so a
 # crashed migration resumes cleanly and a stale-schema DB is detectable.
-LATEST_SCHEMA_VERSION = 3
+LATEST_SCHEMA_VERSION = 4
 
 # Generous cap so the sessions table cannot grow without limit. The previous
 # JSON-file store bounded itself to 10 on write; this only prunes well outside
@@ -33,8 +34,8 @@ _initialized_paths: set[str] = set()
 # each fresh tmp path rather than being skipped by a stale global flag.
 _cleanup_done: set[str] = set()
 
-# Guards the init_db check-then-add sequence. save_session and save_turn_trace
-# call init_db() from asyncio.to_thread workers, so two threads could
+# Guards the init_db check-then-add sequence. Worker threads can
+# call init_db() concurrently with the main loop, so two threads could
 # otherwise both pass the _initialized_paths guard and run the migrations
 # concurrently.
 _init_lock = threading.Lock()
@@ -51,12 +52,11 @@ def get_db_path() -> Path:
 def get_connection() -> sqlite3.Connection:
     """Open a connection with the standard desktop SQLite reliability pragmas.
 
-    The app is single-threaded (gbulb), but ``save_session`` / ``save_turn_trace``
-    are dispatched via ``asyncio.to_thread`` (worker thread) while reads like
+    The app is single-threaded (gbulb), but session writes are dispatched via
+    ``asyncio.to_thread`` (worker thread) while reads like
     ``get_recent_sessions`` run on the main loop — WAL + busy_timeout is the
     one uniform rule that keeps the two from blocking each other under the
-    default rollback journal. ``foreign_keys`` is per-connection in SQLite, so
-    the ``turn_traces.session_id`` ON DELETE CASCADE fires reliably.
+    default rollback journal.
     """
     db_path = get_db_path()
     db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -73,7 +73,6 @@ def get_connection() -> sqlite3.Connection:
             mode_row[0],
         )
     conn.execute("PRAGMA busy_timeout=5000")
-    conn.execute("PRAGMA foreign_keys=ON")
     return conn
 
 
@@ -155,7 +154,9 @@ def _migrate_to_v1(conn: sqlite3.Connection) -> None:
 
 
 def _migrate_to_v2(conn: sqlite3.Connection) -> None:
-    """v2: `turn_traces` table — one row per agent turn (see trace.py)."""
+    """v2 (superseded): `turn_traces` table. Kept so existing v0/v1 databases
+    pass through the ordered migration chain to v4, which drops the table
+    (replaced by pydantic-ai-harness `StepPersistence` events/snapshots)."""
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS turn_traces (
@@ -187,18 +188,25 @@ def _migrate_to_v2(conn: sqlite3.Connection) -> None:
 
 
 def _migrate_to_v3(conn: sqlite3.Connection) -> None:
-    """v3: `turn_traces.generation_ms` — the turn's model generation time,
-    computed natively from pydantic-ai's ModelRequest/ModelResponse
-    timestamps (tool-call time excluded). The tok/s status-line rate derives
-    from it, so the displayed number and the persisted row can never
-    disagree."""
-    conn.execute("ALTER TABLE turn_traces ADD COLUMN generation_ms INTEGER NOT NULL DEFAULT 0")
+    """v3 (superseded): `turn_traces.generation_ms`. Kept as a no-op step so
+    existing v2 databases pass through the ordered migration chain to v4,
+    which drops the whole `turn_traces` table (replaced by pydantic-ai-harness
+    `StepPersistence` events/snapshots)."""
+
+
+def _migrate_to_v4(conn: sqlite3.Connection) -> None:
+    """v4: drop `turn_traces` — per-turn observability is now owned by the
+    harness `StepPersistence` capability (events/snapshots/tool_effects/runs
+    tables, created by `SqliteStepStore` on the same file), grouped per chat
+    session via `conversation_id = 'session-{id}'`. No bridge, no dual write."""
+    conn.execute("DROP TABLE IF EXISTS turn_traces")
 
 
 _MIGRATIONS = (
     _migrate_to_v1,
     _migrate_to_v2,
     _migrate_to_v3,
+    _migrate_to_v4,
 )
 
 
@@ -218,7 +226,7 @@ def init_db() -> None:
     Ensures the `_meta` table exists, reads the persisted schema version, and
     applies any pending migrations. Subsequent calls short-circuit on the
     per-path ``_initialized_paths`` guard. Thread-safe via ``_init_lock`` so
-    a worker-thread ``init_db()`` (from ``save_turn_trace``) can't race the
+    a worker-thread ``init_db()`` can't race the
     main loop's init.
     """
     db_path = str(get_db_path())
@@ -236,7 +244,91 @@ def init_db() -> None:
             current = _read_schema_version(conn)
             if current < LATEST_SCHEMA_VERSION:
                 _apply_migrations(conn, current)
+            # The StepPersistence tables are created by SqliteStepStore on
+            # first use; guard the sweep so it never runs against a file that
+            # has none yet (fresh DB before the first agent turn).
+            if _step_tables_exist(conn):
+                _sweep_orphan_step_rows(conn)
+                conn.commit()
         _initialized_paths.add(db_path)
+
+
+def conversation_id_for_session(session_id: int) -> str:
+    """The StepPersistence conversation id grouping every run of one chat
+    session. Single source of truth — the sidebar passes it to `Agent.iter()`
+    and the cleanup SQL below matches it."""
+    return f"session-{session_id}"
+
+
+_step_stores: dict[str, SqliteStepStore] = {}
+
+
+def get_step_store() -> SqliteStepStore:
+    """The process-wide `SqliteStepStore` co-located on `chat_sessions.db`.
+
+    One store per resolved db path (so test isolation via `GRC_AGENT_ENV`
+    gets a fresh store per tmp path), shared across agent live-swaps — the
+    store outlives any single `Agent`. `max_snapshots_per_run=2` bounds the
+    full-history snapshot write amplification: a turn with many tool calls
+    still keeps only its newest snapshots (plus the newest `complete` one
+    for `continue_run`). Media externalization (64 KiB threshold) keeps big
+    tool-return blobs deduplicated in the sibling `media` table instead of
+    repeated inside every snapshot row."""
+    key = str(get_db_path())
+    store = _step_stores.get(key)
+    if store is None:
+        init_db()
+        store = SqliteStepStore(database=key, max_snapshots_per_run=2)
+        _step_stores[key] = store
+    return store
+
+
+def _step_tables_exist(conn: sqlite3.Connection) -> bool:
+    """The StepPersistence tables are created lazily on the store's first
+    write — a fresh DB (or one whose sessions predate the capability) has no
+    `runs` table, and every step-row cascade is a no-op there."""
+    tables = {
+        r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+    }
+    return "runs" in tables
+
+
+def _delete_step_rows_for_conversations(
+    conn: sqlite3.Connection, conv_ids: list[str]
+) -> None:
+    """Delete every StepPersistence row belonging to the given conversation
+    ids (runs + their events/snapshots/tool_effects children). The `media`
+    table is deliberately untouched — blobs are content-addressed and shared
+    across snapshots, so orphan GC is out of scope (same call the upstream
+    store makes). Runs with no session row are handled by the init-time
+    orphan sweep, not this targeted delete."""
+    if not conv_ids:
+        return
+    if not _step_tables_exist(conn):
+        return
+    placeholders = ",".join("?" for _ in conv_ids)
+    run_ids = f"SELECT run_id FROM runs WHERE conversation_id IN ({placeholders})"
+    for table in ("snapshots", "events", "tool_effects"):
+        conn.execute(f"DELETE FROM {table} WHERE run_id IN ({run_ids})", conv_ids)
+    conn.execute(f"DELETE FROM runs WHERE conversation_id IN ({placeholders})", conv_ids)
+
+
+def _sweep_orphan_step_rows(conn: sqlite3.Connection) -> None:
+    """Delete step rows grouped under a `session-{id}` conversation whose
+    session row no longer exists — e.g. a Clear History that raced an
+    in-flight turn (the capability keeps writing snapshots for the old
+    conversation id after the sweep, so this also runs at init). One uniform
+    rule: only `session-*` ids are candidates; rows with other or NULL
+    conversation ids (ungrouped runs) are never touched."""
+    orphans = [
+        r[0]
+        for r in conn.execute(
+            "SELECT DISTINCT conversation_id FROM runs "
+            "WHERE conversation_id LIKE 'session-%' "
+            "AND conversation_id NOT IN (SELECT 'session-' || id FROM sessions)"
+        ).fetchall()
+    ]
+    _delete_step_rows_for_conversations(conn, orphans)
 
 
 def _cleanup_invalid_sessions() -> None:
@@ -379,15 +471,28 @@ def _extract_first_user_prompt_json(messages_json: str) -> str:
 
 def _prune_in(conn: sqlite3.Connection, keep: int = _MAX_SESSIONS) -> None:
     """Evict the oldest sessions beyond ``keep`` (by updated_at then id) using
-    an already-open connection. The ON DELETE CASCADE on turn_traces keeps
-    each evicted session's trace rows from being orphaned. Bounds the table's
+    an already-open connection, taking each evicted session's StepPersistence
+    rows (runs/events/snapshots/tool_effects) with it. Bounds the tables'
     growth; the deleted rows are the long-tail a user is unlikely to scroll
     back to."""
-    conn.execute(
-        "DELETE FROM sessions WHERE id NOT IN ("
-        "SELECT id FROM sessions ORDER BY updated_at DESC, id DESC LIMIT ?)",
-        (keep,),
-    )
+    evicted = [
+        r[0]
+        for r in conn.execute(
+            "SELECT id FROM sessions WHERE id NOT IN ("
+            "SELECT id FROM sessions ORDER BY updated_at DESC, id DESC LIMIT ?)",
+            (keep,),
+        ).fetchall()
+    ]
+    if evicted:
+        _delete_step_rows_for_conversations(
+            conn, [conversation_id_for_session(i) for i in evicted]
+        )
+        conn.execute(
+            "DELETE FROM sessions WHERE id IN ("
+            + ",".join("?" for _ in evicted)
+            + ")",
+            evicted,
+        )
     conn.commit()
 
 
@@ -451,10 +556,12 @@ def save_session(
 
 
 def delete_session(session_id: int) -> None:
-    """Delete a session from SQLite. Its turn_traces rows are removed by the
-    ON DELETE CASCADE on the foreign key (see _migrate_to_v2)."""
+    """Delete a session from SQLite, together with its StepPersistence rows
+    (runs/events/snapshots/tool_effects for `conversation_id =
+    'session-{id}'`)."""
     init_db()
     with _conn() as conn:
+        _delete_step_rows_for_conversations(conn, [conversation_id_for_session(session_id)])
         conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
         conn.commit()
 
@@ -463,9 +570,20 @@ def delete_all_sessions() -> None:
     """Delete every saved session. Used by the toolbar 'Clear History' button,
     which clears the whole recent-sessions list the user sees — independent of
     which flowgraph (if any) is active. Per-session deletion stays available via
-    the per-row delete buttons (delete_session). All turn_traces rows are
-    removed by the ON DELETE CASCADE on each session's foreign key."""
+    the per-row delete buttons (delete_session). All StepPersistence rows for
+    `session-*` conversations go with them; ungrouped runs (NULL conversation
+    id) are left alone, and content-addressed `media` blobs are shared and
+    deliberately kept."""
     init_db()
     with _conn() as conn:
+        convs = []
+        if _step_tables_exist(conn):
+            convs = [
+                r[0]
+                for r in conn.execute(
+                    "SELECT DISTINCT conversation_id FROM runs WHERE conversation_id LIKE 'session-%'"
+                ).fetchall()
+            ]
+        _delete_step_rows_for_conversations(conn, convs)
         conn.execute("DELETE FROM sessions")
         conn.commit()

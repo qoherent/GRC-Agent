@@ -55,7 +55,7 @@ flowchart TB
   PR --> AG
   AG --> GR
   AG --> RG
-  AG -->|"search.py fallback"| SR["DuckDuckGo"]
+  AG -->|"duckduckgo_search fallback"| SR["DuckDuckGo"]
   RG <--> ING["ingest.py"]
   RG -.->|"embedding unreachable"| FTS["SQLite FTS5<br/>lexical fallback"]
   GR <--> SN
@@ -71,12 +71,17 @@ flowchart TB
 | `chat_sidebar.py` | Native GTK chat UI. Streaming via `agent.iter()` + `run.next()`, settings dialog with live-swap, provider badge, auto-scroll tracking, Send/Stop button. |
 | `native_canvas.py` | GRC `MainWindow` signal-wiring: dynamic graph resolution from `window.current_page`, notebook tab tracking, manual-edit disk-sync, agent-edit redraw, pan. |
 | `exec_monitor.py` | Detects flowgraph execution failures from GRC's console message bus; auto-notifies the agent with the return code (agent reads the full log via `get_run_log`). |
-| `agent_factory.py` | Builds the interactive `Agent` from saved settings (live-swappable). Includes preflight connection check, `ModelRequestLogger`, and tiered context compaction (`pydantic-ai-harness`). |
-| `db.py` | SQLite chat-session persistence (save/load/delete, recent-sessions list). |
+| `agent_factory.py` | Builds the interactive `Agent` from saved settings (live-swappable). Includes preflight connection check, `ModelRequestLogger`, tiered context compaction, `Planning`, and `StepPersistence` durability (a `SqliteStepStore` on the chat DB) — capabilities from `pydantic-ai-harness`. |
+| `model_catalog.py` | Asks each backend which models it actually serves (the Settings dialog's model Load button). |
+| `db.py` | SQLite chat-session persistence (save/load/delete, recent-sessions list) plus the harness `SqliteStepStore` (runs/events/snapshots, created lazily) on the same file, with session-scoped cascade cleanup. |
 | `adapter/` | Sole `gnuradio` importer. Flowgraph load/save, `change_graph`, param filtering, RAG (vector search with an SQLite FTS5 lexical fallback) with cached embed client, codegen. |
 | `agent.py` | PydanticAI tools (`inspect_graph`, `query_knowledge`, `generate_python`, `change_graph`, `get_run_log`, `save_block`), capabilities, scenario harness. |
+| `prompts.py` | The agent's system prompt — one uniform rule per concern. |
 | `settings.py` | Persisted preferences (provider, models, API keys) in `.env` via `python-dotenv`. |
 | `ingest.py` | Builds the catalog/docs vector databases on first use. |
+| `embed_runtime.py` | Optional bundled llama.cpp + EmbeddingGemma runtime, so vector search needs nothing installed system-wide. |
+| `providers/openai_codex/` | ChatGPT Plus/Pro (Codex): OAuth login, 0600 token store with lock-guarded refresh, and the Responses-model transport. |
+| `ui/` | The sidebar's GTK widgets: settings dialog, Codex login dialog, embed-runtime progress dialog, markdown/table/code rendering, welcome view. |
 
 ---
 

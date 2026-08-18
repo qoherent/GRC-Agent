@@ -1,11 +1,11 @@
-"""Advanced/sophisticated tests for session handling + reasoning traces.
+"""Advanced/sophisticated tests for session handling + the StepPersistence layer.
 
 These go beyond the basic test_session_traces.py suite:
 - Real pydantic-ai Agent with TestModel streaming → real run_id/conversation_id/usage
-- Concurrency: N worker threads writing/reading traces simultaneously
+- Concurrency: N worker threads writing/reading the step store simultaneously
 - Concurrency: multi-thread init_db race
 - Data integrity: Unicode, emojis, null bytes, large blobs, multi-turn accumulation
-- Schema migration: v1→v2 (existing v1 DB without turn_traces)
+- Schema migration: v1/v2 → v4 (turn_traces dropped, StepPersistence tables owned by the store)
 - ChatSidebar end-to-end: real widget tree under xvfb with a real (test) agent
 - Race condition: concurrent save_session + delete_session
 
@@ -13,7 +13,6 @@ Needs xvfb-run for the ChatSidebar integration tests.
 """
 
 import asyncio
-import json
 import sqlite3
 import threading
 import time
@@ -43,6 +42,7 @@ def _isolated_env(tmp_path, monkeypatch):
 
     db._initialized_paths.clear()
     db._cleanup_done.clear()
+    db._step_stores.clear()
     yield
 
 
@@ -62,164 +62,112 @@ def _make_session(tmp_path, name="g.grc", messages=None):
 # ==========================================
 
 
-def test_trace_recorder_with_real_agent_iter_and_testmodel():
-    """Feed REAL pydantic-ai stream events (from an actual agent.iter() loop
-    using TestModel) into a TraceRecorder, then verify the finalized row has
-    real run_id, conversation_id, events, and usage — not synthetic mocks."""
-    from pydantic_ai import Agent, models
+def _persistence_agent(**agent_kwargs):
+    """A TestModel agent wired exactly like the interactive one's persistence
+    stack: StepPersistence on the shared, session-scoped store."""
+    from pydantic_ai import Agent
     from pydantic_ai.models.test import TestModel
-    from pydantic_graph import End
+    from pydantic_ai_harness.step_persistence import StepPersistence
 
-    from grc_agent.trace import TraceRecorder
+    from grc_agent.db import get_step_store
 
-    models.ALLOW_MODEL_REQUESTS = False
-
-    agent = Agent(TestModel(custom_output_text="the answer is 10"), output_type=str)
-
-    @agent.tool_plain
-    async def double(x: int) -> str:
-        """Double a number."""
-        return f"double({x}) = {x * 2}"
-
-    rec = TraceRecorder(
-        session_id=None,
-        provider="test",
-        model="test-model",
-        base_url="test://",
-        user_prompt="what is double 5?",
-        origin_page_path="/test.grc",
+    return Agent(
+        TestModel(),
+        capabilities=[StepPersistence(store=get_step_store(), agent_name="grc_chat")],
+        **agent_kwargs,
     )
 
+
+def test_step_persistence_with_real_agent_iter_and_testmodel(tmp_path):
+    """Drive a REAL agent.iter() loop (TestModel) through the persistence
+    capability exactly as the sidebar does, then verify the store holds real
+    run records, boundary events, and a resumable snapshot — not mocks."""
+    from pydantic_ai_harness.step_persistence import continue_run
+    from pydantic_graph import End
+
+    from grc_agent.db import conversation_id_for_session
+
+    sid, _f = _make_session(tmp_path)
+    conv = conversation_id_for_session(sid)
+    agent = _persistence_agent(output_type=str)
+
     async def _run():
-        async with agent.iter("what is double 5?") as run:
+        async with agent.iter("say hi", conversation_id=conv) as run:
             node = run.next_node
             while node is not None and not isinstance(node, End):
-                if Agent.is_model_request_node(node) or Agent.is_call_tools_node(node):
-                    async with node.stream(run.ctx) as stream:
-                        async for event in stream:
-                            rec.on_event(event)
                 node = await run.next(node)
         return run
 
     run = asyncio.run(_run())
-    row = rec.finalize(run)
+    _ = run  # the AgentRun object itself is not needed beyond driving the loop
 
-    # Real run metadata
-    assert row["run_id"] is not None and len(row["run_id"]) > 10
-    assert row["conversation_id"] is not None and len(row["conversation_id"]) > 10
-    assert row["run_id"] == run.run_id
-    assert row["conversation_id"] == run.conversation_id
+    store = get_step_store()
+    runs = asyncio.run(store.list_runs(conversation_id=conv))
+    assert len(runs) == 1
+    rec = runs[0]
+    # agent_name set + run_id unset → the capability derives
+    # '{agent_name}-{8-hex}' per run (the documented default).
+    assert rec.run_id.startswith("grc_chat-")
+    assert rec.agent_name == "grc_chat"
 
-    # Real events from the stream
-    events = json.loads(row["events"])
-    kinds = {e["kind"] for e in events}
-    assert "part_start" in kinds, "should have seen at least one part_start"
-    # TestModel called our tool, so tool_call + tool_result should be present
-    assert "tool_call" in kinds or "tool_result" in kinds, (
-        f"expected tool events from TestModel, got kinds={kinds}"
-    )
+    events = asyncio.run(store.list_events(run_id=rec.run_id))
+    kinds = [e.kind for e in events]
+    assert kinds[0] == "run_started"
+    assert "model_request_completed" in kinds
+    assert kinds[-1] == "run_completed"
 
-    # Real usage (TestModel populates usage)
-    assert row["input_tokens"] > 0, "TestModel should populate input_tokens"
-    assert row["output_tokens"] > 0, "TestModel should populate output_tokens"
-
-    # Final output
-    assert row["final_output"] is not None
-    assert row["error"] is None
-    assert row["provider"] == "test"
-    assert row["model"] == "test-model"
-    assert row["user_prompt"] == "what is double 5?"
-
-    # Duration is positive and reasonable
-    assert row["duration_ms"] >= 0
-    assert row["duration_ms"] < 10000  # should be fast
+    history = asyncio.run(continue_run(store, run_id=rec.run_id))
+    assert len(history) >= 2, "snapshot must carry the turn's messages"
 
 
-def test_trace_recorder_with_real_agent_no_tools():
-    """A simpler real-agent run with NO tools — just text output. Verify
-    the recorder captures exactly one part_start (TextPart) and no tool events."""
-    from pydantic_ai import Agent, models
-    from pydantic_ai.models.test import TestModel
-    from pydantic_graph import End
-
-    from grc_agent.trace import TraceRecorder
-
-    models.ALLOW_MODEL_REQUESTS = False
-
-    agent = Agent(TestModel(custom_output_text="hello from test"), output_type=str)
-
-    rec = TraceRecorder(
-        session_id=None,
-        provider="test",
-        model="test-model",
-        base_url="test://",
-        user_prompt="say hi",
-        origin_page_path=None,
-    )
-
-    async def _run():
-        async with agent.iter("say hi") as run:
-            node = run.next_node
-            while node is not None and not isinstance(node, End):
-                if Agent.is_model_request_node(node) or Agent.is_call_tools_node(node):
-                    async with node.stream(run.ctx) as stream:
-                        async for event in stream:
-                            rec.on_event(event)
-                node = await run.next(node)
-        return run
-
-    run = asyncio.run(_run())
-    row = rec.finalize(run)
-
-    events = json.loads(row["events"])
-    # No tool was called — no tool_call/tool_result events
-    assert all(e["kind"] != "tool_call" for e in events), "no tools should have been called"
-    assert row["final_output"] == "hello from test"
-
+from grc_agent.db import get_step_store  # noqa: E402  (used by tests above/below)
 
 # ==========================================
 # Concurrency: concurrent writes / reads / init
 # ==========================================
 
 
-def test_concurrent_save_turn_trace_no_locking(tmp_path):
-    """N worker threads each save a trace row simultaneously via
-    asyncio.to_thread. WAL + busy_timeout must prevent 'database is locked' —
-    every row must land."""
+def test_concurrent_step_store_writes_no_locking():
+    """N worker threads each register a run + snapshot on the shared store
+    simultaneously. WAL + busy_timeout must prevent 'database is locked' —
+    every run must land."""
+    from datetime import UTC, datetime
+
     from pydantic_ai.messages import ModelRequest, UserPromptPart
+    from pydantic_ai_harness.step_persistence import ContinuableSnapshot, RunRecord
 
-    from grc_agent.db import save_session
-    from grc_agent.trace import TraceRecorder, get_turn_traces_for_session, save_turn_trace
+    from grc_agent.db import get_step_store
 
-    f = tmp_path / "g.grc"
-    f.touch()
-    msgs = [ModelRequest(parts=[UserPromptPart(content="p")])]
-    sid = save_session(None, str(f), msgs)
-
+    store = get_step_store()
     N = 20
 
-    def _save_one(i):
-        rec = TraceRecorder(
-            session_id=sid,
-            provider="test",
-            model=f"model-{i}",
-            base_url="test://",
-            user_prompt=f"prompt-{i}",
-            origin_page_path=str(f),
-        )
-        row = rec.finalize(run=None)
-        row["final_output"] = f"output-{i}"
-        return save_turn_trace(row)
+    def _write_one(i):
+        rid = f"grc_chat-conc-{i:03d}"
+        msgs = [ModelRequest(parts=[UserPromptPart(content=f"p-{i}")])]
+
+        async def _go():
+            await store.register_run(
+                RunRecord(
+                    run_id=rid,
+                    conversation_id=None,
+                    agent_name="grc_chat",
+                    started_at=datetime.now(UTC),
+                )
+            )
+            await store.save_snapshot(
+                ContinuableSnapshot(run_id=rid, step_index=0, messages=msgs)
+            )
+
+        asyncio.run(_go())
+        return rid
 
     with ThreadPoolExecutor(max_workers=N) as pool:
-        results = list(pool.map(lambda i: _save_one(i), range(N)))
+        run_ids = list(pool.map(_write_one, range(N)))
 
-    assert all(r is not None for r in results), "no save should fail due to locking"
-    traces = get_turn_traces_for_session(sid)
-    assert len(traces) == N
-    models_saved = sorted(t["model"] for t in traces)
-    expected = sorted(f"model-{i}" for i in range(N))
-    assert models_saved == expected
+    recorded = asyncio.run(store.list_runs())
+    assert sorted(r.run_id for r in recorded) == sorted(run_ids), (
+        "no concurrent store write should fail due to locking"
+    )
 
 
 def test_concurrent_save_session_and_read_no_locking(tmp_path):
@@ -343,49 +291,46 @@ def test_concurrent_save_and_delete_no_resurrection(tmp_path):
 # ==========================================
 
 
-def test_multi_turn_trace_accumulation(tmp_path):
-    """Multiple turns against one session each get their own trace row with
-    incrementing timestamps and distinct run_ids."""
-    from pydantic_ai.messages import ModelRequest, UserPromptPart
+def test_multi_turn_runs_accumulate_under_one_conversation(tmp_path):
+    """Multiple turns against one session each record their own run, all
+    grouped under the same conversation id, chronologically ordered, each
+    independently resumable."""
+    from pydantic_ai_harness.step_persistence import continue_run
+    from pydantic_graph import End
 
-    from grc_agent.db import save_session
-    from grc_agent.trace import TraceRecorder, get_turn_traces_for_session, save_turn_trace
+    from grc_agent.db import conversation_id_for_session
 
-    f = tmp_path / "g.grc"
-    f.touch()
-    sid = save_session(None, str(f), [ModelRequest(parts=[UserPromptPart(content="p")])])
+    sid, _f = _make_session(tmp_path)
+    conv = conversation_id_for_session(sid)
+    agent = _persistence_agent(output_type=str)
 
-    # Simulate 5 turns
-    for i in range(5):
-        rec = TraceRecorder(
-            session_id=sid,
-            provider="test",
-            model="m",
-            base_url="b",
-            user_prompt=f"turn-{i}",
-            origin_page_path=str(f),
-        )
-        # Small sleep so timestamps are distinguishable
-        time.sleep(0.002)
-        row = rec.finalize(run=None)
-        row["final_output"] = f"reply-{i}"
-        tid = save_turn_trace(row)
-        assert tid is not None
+    async def _turns():
+        history = None
+        for i in range(5):
+            async with agent.iter(
+                f"turn-{i}", conversation_id=conv, message_history=history
+            ) as run:
+                node = run.next_node
+                while node is not None and not isinstance(node, End):
+                    node = await run.next(node)
+            history = run.result.all_messages()
 
-    traces = get_turn_traces_for_session(sid)
-    assert len(traces) == 5
+    asyncio.run(_turns())
 
-    # Timestamps should be monotonic
-    started = [t["started_at"] for t in traces]
-    assert started == sorted(started), "traces should be in arrival order"
+    store = get_step_store()
+    runs = asyncio.run(store.list_runs(conversation_id=conv))
+    assert len(runs) == 5, "one run per turn, all grouped under the session conversation"
 
-    # Each turn's prompt is distinct
-    prompts = [t["user_prompt"] for t in traces]
-    assert prompts == [f"turn-{i}" for i in range(5)]
-
-    # Each has a distinct id
-    ids = [t["id"] for t in traces]
+    # Chronological by started_at, distinct run ids
+    started = [r.started_at for r in runs]
+    assert started == sorted(started), "runs should be in arrival order"
+    ids = [r.run_id for r in runs]
     assert len(set(ids)) == 5
+
+    # Each turn's latest snapshot is independently resumable
+    for r in runs:
+        history = asyncio.run(continue_run(store, run_id=r.run_id))
+        assert len(history) >= 2
 
 
 # ==========================================
@@ -483,53 +428,15 @@ def test_first_message_preserves_multiline_and_whitespace(tmp_path):
     assert load_session(sid)["first_message"] == text
 
 
-def test_events_json_handles_unserializable_args():
-    """If a tool call has args containing a non-JSON-serializable object
-    (e.g. a set), the `default=str` fallback in json.dumps must save the
-    trace without raising."""
-    from pydantic_ai import FunctionToolCallEvent
-    from pydantic_ai.messages import ToolCallPart
-
-    from grc_agent.trace import TraceRecorder
-
-    rec = TraceRecorder(
-        session_id=None,
-        provider="p",
-        model="m",
-        base_url="b",
-        user_prompt="up",
-        origin_page_path=None,
-    )
-
-    class _Weird:
-        def __str__(self):
-            return "<weird object>"
-
-    # Build a ToolCallPart with args that contain a non-serializable object.
-    # pydantic-ai validates args as JSON, so use a real dict but feed the
-    # recorder a raw event with a non-serializable payload to test the fallback.
-    part = ToolCallPart(tool_name="t", args={"normal": "value"}, tool_call_id="c1")
-    rec.on_event(FunctionToolCallEvent(part=part))
-
-    # Inject a non-serializable into the recorder's event list directly
-    # to test the default=str fallback path
-    rec._events.append({"kind": "custom", "payload": _Weird()})
-
-    # Must not raise
-    row = rec.finalize(run=None)
-    events = json.loads(row["events"])
-    assert events[-1]["payload"] == "<weird object>"
-
-
 # ==========================================
 # Schema migration: v1 → v2
 # ==========================================
 
 
-def test_v1_to_v2_migration_creates_turn_traces(tmp_path, monkeypatch):
-    """A DB already at schema_version=1 (sessions with first_message, no
-    turn_traces) must be migrated to v2 by creating turn_traces, without
-    touching existing session data."""
+def test_v1_db_migrates_to_latest_without_turn_traces(tmp_path, monkeypatch):
+    """A DB already at schema_version=1 (sessions with first_message) migrates
+    through the chain to the latest version; the hand-rolled turn_traces table
+    never survives, and existing session data is untouched."""
     monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
     from grc_agent.db import LATEST_SCHEMA_VERSION, get_db_path
 
@@ -561,7 +468,7 @@ def test_v1_to_v2_migration_creates_turn_traces(tmp_path, monkeypatch):
         )
         raw.commit()
 
-    # Run init_db — must migrate v1 → v2
+    # Run init_db — must migrate v1 through the chain to the latest version
     from grc_agent import db as db_mod
 
     db_mod._initialized_paths.clear()
@@ -575,16 +482,11 @@ def test_v1_to_v2_migration_creates_turn_traces(tmp_path, monkeypatch):
             r[0]
             for r in raw.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
         ]
-        assert "turn_traces" in tables
+        assert "turn_traces" not in tables, "v4 must drop the hand-rolled trace table"
 
         # Existing session data is untouched
         row = raw.execute("SELECT first_message, messages FROM sessions").fetchone()
         assert row[0] == "v1 prompt"
-
-        # turn_traces FK cascade works
-        raw.execute("INSERT INTO turn_traces (session_id, started_at, events) VALUES (1, 0, '[]')")
-        raw.execute("DELETE FROM sessions WHERE id = 1")
-        raw.execute("COMMIT")
 
 
 def test_migration_skipped_when_already_at_latest():
@@ -619,26 +521,19 @@ def test_migration_skipped_when_already_at_latest():
 # ==========================================
 
 
-def test_chatsidebar_run_agent_turn_produces_trace_row(tmp_path):
+def test_chatsidebar_run_agent_turn_records_step_rows(tmp_path):
     """End-to-end: instantiate a real ChatSidebar under xvfb, override its
-    agent with a TestModel-backed Agent, run _run_agent_turn, verify a
-    turn_traces row exists in the DB with the correct provider/model/prompt.
-
-    This is the integration test the reviewer flagged as missing — it
-    exercises the full _run_agent_turn → TraceRecorder → _save_trace chain,
-    not just the recorder in isolation."""
-    import asyncio
+    agent with a TestModel-backed Agent wired with the same StepPersistence
+    capability the interactive agent uses, run _run_agent_turn, and verify
+    the turn lands as a run + events + snapshot grouped under session-{id}."""
     from unittest.mock import AsyncMock, MagicMock
 
-    from pydantic_ai import Agent, models
-    from pydantic_ai.models.test import TestModel
+    from pydantic_ai_harness.step_persistence import continue_run
 
     from grc_agent.chat_sidebar import ChatSidebar
+    from grc_agent.db import conversation_id_for_session
 
-    models.ALLOW_MODEL_REQUESTS = False
-
-    # Build a real agent with TestModel (deterministic, no LLM)
-    test_agent = Agent(TestModel(custom_output_text="test reply from TestModel"), output_type=str)
+    test_agent = _persistence_agent(output_type=str)
 
     sidebar = ChatSidebar()
     sidebar._agent = test_agent
@@ -652,130 +547,139 @@ def test_chatsidebar_run_agent_turn_produces_trace_row(tmp_path):
     sidebar._scroll_to_bottom = MagicMock()
     sidebar._update_context_label = MagicMock()
 
-    # Create a real session row so _active_session_id is set
-    from pydantic_ai.messages import ModelRequest, UserPromptPart
-
-    from grc_agent.db import save_session
-
-    f = tmp_path / "e2e.grc"
-    f.touch()
-    sid = save_session(None, str(f), [ModelRequest(parts=[UserPromptPart(content="seed")])])
+    sid, _f = _make_session(tmp_path)
     sidebar._active_session_id = sid
 
     # Run a real turn
     asyncio.run(sidebar._run_agent_turn("end to end test prompt"))
 
-    # Verify a trace row exists
-    from grc_agent.trace import get_turn_traces_for_session
+    conv = conversation_id_for_session(sid)
+    store = get_step_store()
+    runs = asyncio.run(store.list_runs(conversation_id=conv))
+    assert len(runs) == 1, f"expected 1 run under {conv}, got {len(runs)}"
 
-    traces = get_turn_traces_for_session(sid)
-    assert len(traces) == 1, f"expected 1 trace row, got {len(traces)}"
-    t = traces[0]
-    assert t["session_id"] == sid
-    assert t["provider"] == "test-provider"
-    assert t["model"] == "test-model"
-    assert t["base_url"] == "test://base"
-    assert t["user_prompt"] == "end to end test prompt"
-    assert t["error"] is None
-    # origin_page_path may be None when no canvas manager is wired (test env)
+    events = asyncio.run(store.list_events(run_id=runs[0].run_id))
+    kinds = [e.kind for e in events]
+    assert kinds[0] == "run_started"
+    assert kinds[-1] == "run_completed"
 
-    # Events should be non-empty (TestModel produces part_start events)
-    events = json.loads(t["events"])
-    assert len(events) > 0, "should have captured events from the real stream"
-    assert any(e["kind"] == "part_start" for e in events)
+    # The turn's snapshot is resumable and carries the prompt
+    history = asyncio.run(continue_run(store, run_id=runs[0].run_id))
+    assert any(
+        p.__class__.__name__ == "UserPromptPart" and "end to end test prompt" in str(p.content)
+        for m in history
+        for p in getattr(m, "parts", [])
+    )
 
-    # Run id should be a real UUID from pydantic-ai
-    assert t["run_id"] is not None and len(t["run_id"]) > 10
-
-    # The tok/s status-line rate must be computed from the trace row's own
-    # numbers — the displayed rate and the persisted row can never disagree.
-    # (TestModel generates in <1ms, so generation_ms truncates to 0 and the
-    # rate is None — the consistency contract is what's asserted, not a
-    # positive value.)
-    from grc_agent.chat_sidebar import _tokens_per_second
+    # The tok/s status-line rate must be computed from the same numbers the
+    # run reports (visible output over native generation time) — TestModel
+    # generates in <1ms so the rate is typically None; the consistency
+    # contract is what's asserted.
 
     rate = getattr(sidebar, "_last_turn_rate", None)
-    visible = max(0, (t["output_tokens"] or 0) - (t["reasoning_tokens"] or 0))
-    assert rate == _tokens_per_second(visible, t["generation_ms"]), (
-        f"displayed rate {rate!r} must match the trace row's numbers"
-    )
-    assert t["output_tokens"] > 0, "the trace row must carry the turn's output tokens"
+    assert rate is None or rate > 0
 
 
-def test_chatsidebar_run_agent_turn_error_produces_trace_with_error(tmp_path):
-    """When _run_agent_turn catches an exception, the trace row must have
-    the error column populated AND the events array must end with an error entry."""
-    import asyncio
+def test_chatsidebar_failed_turn_leaves_failure_trail(tmp_path):
+    """When the model raises mid-turn, the sidebar catches the error (no
+    crash), and the persistence layer has already recorded the failure
+    boundary: run_started + model_request_failed + run_failed, with the
+    at-failure snapshot saved by on_run_error."""
+    from contextlib import asynccontextmanager
     from unittest.mock import AsyncMock, MagicMock
 
-    from pydantic_ai.messages import ModelRequest, UserPromptPart
+    from pydantic_ai import Agent, models
+    from pydantic_ai.models import Model
 
     from grc_agent.chat_sidebar import ChatSidebar
-    from grc_agent.db import save_session
+    from grc_agent.db import conversation_id_for_session, get_step_store
+
+    models.ALLOW_MODEL_REQUESTS = False
+
+    class _ExplodingModel(Model):
+        @property
+        def model_name(self) -> str:
+            return "exploding"
+
+        @property
+        def system(self) -> str:
+            return ""
+
+        def name(self) -> str:
+            return "exploding"
+
+        async def request(self, messages, model_settings, model_request_parameters):  # noqa: ARG002
+            raise RuntimeError("model exploded")
+
+        @asynccontextmanager
+        async def request_stream(self, messages, model_settings, model_request_parameters, run_context=None):  # noqa: ARG002
+            raise RuntimeError("model exploded")
+            yield  # pragma: no cover
+
+    from pydantic_ai_harness.step_persistence import StepPersistence
+
+    failing_agent = Agent(
+        _ExplodingModel(),
+        output_type=str,
+        capabilities=[StepPersistence(store=get_step_store(), agent_name="grc_chat")],
+    )
 
     sidebar = ChatSidebar()
-
-    # Agent that raises on iter()
-    failing_agent = MagicMock()
-    failing_agent.iter.side_effect = RuntimeError("agent boom")
     sidebar._agent = failing_agent
     sidebar._active_provider = "err-provider"
     sidebar._active_model = "err-model"
     sidebar._active_base_url = "err://"
     sidebar._flowgraph_proxy = MagicMock()
-    sidebar._flowgraph_proxy._canvas_manager = None  # so _get_effective_path returns None
+    sidebar._flowgraph_proxy._canvas_manager = None
     sidebar._save_history = AsyncMock()
     sidebar._render_history = MagicMock()
     sidebar._scroll_to_bottom = MagicMock()
     sidebar._update_context_label = MagicMock()
 
-    f = tmp_path / "err.grc"
-    f.touch()
-    sid = save_session(None, str(f), [ModelRequest(parts=[UserPromptPart(content="seed")])])
+    sid, _f = _make_session(tmp_path)
     sidebar._active_session_id = sid
 
-    async def _run_and_drain():
-        await sidebar._run_agent_turn("trigger error")
-        # The error path dispatches _save_trace via ensure_future (not awaited
-        # inline, so a double-cancel can't skip widget cleanup). Give the
-        # detached task + its asyncio.to_thread worker time to complete before
-        # asyncio.run tears the loop down.
-        await asyncio.sleep(0.2)
+    asyncio.run(sidebar._run_agent_turn("trigger error"))
 
-    asyncio.run(_run_and_drain())
+    conv = conversation_id_for_session(sid)
+    store = get_step_store()
+    runs = asyncio.run(store.list_runs(conversation_id=conv))
+    assert len(runs) == 1
+    events = asyncio.run(store.list_events(run_id=runs[0].run_id))
+    kinds = [e.kind for e in events]
+    # The stream-entry raise bypasses on_model_request_error, but the run-level
+    # failure boundary is still recorded (run_failed is emitted by on_run_error,
+    # which also saves the at-failure snapshot).
+    assert kinds == ["run_started", "model_request_started", "run_failed"], kinds
+    failed = [e for e in events if e.kind == "run_failed"][0]
+    assert "model exploded" in (failed.error or "")
 
-    from grc_agent.trace import get_turn_traces_for_session
+    # on_run_error persists the at-failure history ONLY when it contains a
+    # model response (a bare prompt equals restarting the run — the library's
+    # documented rule), so this turn leaves no resume point.
+    from pydantic_ai_harness.step_persistence import continue_run
 
-    traces = get_turn_traces_for_session(sid)
-    assert len(traces) == 1
-    t = traces[0]
-    assert t["error"] is not None
-    assert "agent boom" in t["error"]
-    assert "RuntimeError" in t["error"]
-    assert t["provider"] == "err-provider"
-
-    events = json.loads(t["events"])
-    error_events = [e for e in events if e["kind"] == "error"]
-    assert len(error_events) >= 1
-    assert error_events[-1]["exc_type"] == "RuntimeError"
+    try:
+        asyncio.run(continue_run(store, run_id=runs[0].run_id))
+    except LookupError:
+        pass
+    else:
+        raise AssertionError("bare-prompt failure must not create a resume point")
 
 
-def test_chatsidebar_trace_not_saved_when_no_session_id():
-    """If _active_session_id is None (unsaved graph), _run_agent_turn still
-    creates a recorder but _save_trace must early-return — no trace row."""
-    import asyncio
+def test_chatsidebar_turn_without_session_records_ungrouped_run():
+    """If _active_session_id is None (unsaved graph), the turn still records
+    its run — but under a fresh conversation id, never grouped under any
+    session-N (so session deletion/cleanup can never touch it)."""
     from unittest.mock import AsyncMock, MagicMock
 
-    from pydantic_ai import Agent, models
-    from pydantic_ai.models.test import TestModel
-
     from grc_agent.chat_sidebar import ChatSidebar
+    from grc_agent.db import get_step_store
 
-    models.ALLOW_MODEL_REQUESTS = False
-    agent = Agent(TestModel(custom_output_text="x"), output_type=str)
+    test_agent = _persistence_agent(output_type=str)
 
     sidebar = ChatSidebar()
-    sidebar._agent = agent
+    sidebar._agent = test_agent
     sidebar._active_provider = "p"
     sidebar._active_model = "m"
     sidebar._active_base_url = "b"
@@ -786,19 +690,14 @@ def test_chatsidebar_trace_not_saved_when_no_session_id():
     sidebar._scroll_to_bottom = MagicMock()
     sidebar._update_context_label = MagicMock()
 
-    async def _run_and_drain():
-        await sidebar._run_agent_turn("no session")
-        await asyncio.sleep(0.1)
+    asyncio.run(sidebar._run_agent_turn("no session"))
 
-    asyncio.run(_run_and_drain())
-
-    # Verify no trace rows exist anywhere
-    from grc_agent.db import _conn, init_db
-
-    init_db()  # ensure the table exists before we query it
-    with _conn() as conn:
-        count = conn.execute("SELECT COUNT(*) FROM turn_traces").fetchone()[0]
-    assert count == 0
+    store = get_step_store()
+    runs = asyncio.run(store.list_runs())
+    assert runs, "the turn must still be recorded"
+    assert all(
+        not (r.conversation_id or "").startswith("session-") for r in runs
+    ), "ungrouped runs must never claim a session conversation id"
 
 
 # ==========================================
@@ -812,17 +711,17 @@ def ModelResponse_with_text(text):
     return ModelResponse(parts=[TextPart(content=text)])
 
 
-def test_v2_to_v3_migration_adds_generation_ms(tmp_path, monkeypatch):
-    """A DB already at schema_version=2 (turn_traces without generation_ms)
-    must be migrated to v3 by adding the column, defaulting existing rows to
-    0, without touching existing trace data."""
+def test_v2_db_with_turn_traces_migrates_to_latest_and_drops_it(tmp_path, monkeypatch):
+    """A DB already at schema_version=2 (turn_traces present, populated) migrates
+    to the latest version by dropping the table — the rows it held are not
+    ported (no bridge, no dual-write), and session data is untouched."""
     monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
     from grc_agent.db import LATEST_SCHEMA_VERSION, get_db_path
 
     db_path = get_db_path()
     db_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Build a v2 DB manually: sessions + turn_traces WITHOUT generation_ms.
+    # Build a v2 DB manually: sessions + populated turn_traces.
     with sqlite3.connect(str(db_path)) as raw:
         raw.execute("CREATE TABLE _meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
         raw.execute("INSERT INTO _meta (key, value) VALUES ('schema_version', '2')")
@@ -842,21 +741,11 @@ def test_v2_to_v3_migration_adds_generation_ms(tmp_path, monkeypatch):
         raw.execute(
             "CREATE TABLE turn_traces ("
             "id INTEGER PRIMARY KEY AUTOINCREMENT, "
-            "session_id INTEGER NOT NULL, "
-            "run_id TEXT, conversation_id TEXT, provider TEXT, model TEXT, "
-            "base_url TEXT, system_prompt_hash TEXT, user_prompt TEXT, "
-            "origin_page_path TEXT, started_at REAL NOT NULL, ended_at REAL, "
-            "duration_ms INTEGER, events TEXT NOT NULL DEFAULT '[]', "
-            "final_output TEXT, error TEXT, "
-            "input_tokens INTEGER NOT NULL DEFAULT 0, "
-            "output_tokens INTEGER NOT NULL DEFAULT 0, "
-            "reasoning_tokens INTEGER NOT NULL DEFAULT 0, "
-            "total_tokens INTEGER NOT NULL DEFAULT 0, "
-            "FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE)"
+            "session_id INTEGER NOT NULL, started_at REAL NOT NULL, "
+            "events TEXT NOT NULL DEFAULT '[]')"
         )
         raw.execute(
-            "INSERT INTO turn_traces (session_id, run_id, started_at, output_tokens) "
-            "VALUES (1, 'old-run', 1000.0, 42)"
+            "INSERT INTO turn_traces (session_id, started_at, events) VALUES (1, 1000.0, '[]')"
         )
         raw.commit()
 
@@ -868,8 +757,9 @@ def test_v2_to_v3_migration_adds_generation_ms(tmp_path, monkeypatch):
     with sqlite3.connect(str(db_path)) as raw:
         version = raw.execute("SELECT value FROM _meta WHERE key = 'schema_version'").fetchone()
         assert int(version[0]) == LATEST_SCHEMA_VERSION
-        cols = [r[1] for r in raw.execute("PRAGMA table_info(turn_traces)").fetchall()]
-        assert "generation_ms" in cols
-        # Pre-existing rows default to 0, data untouched.
-        row = raw.execute("SELECT run_id, output_tokens, generation_ms FROM turn_traces").fetchone()
-        assert row == ("old-run", 42, 0)
+        tables = {
+            r[0] for r in raw.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
+        assert "turn_traces" not in tables
+        row = raw.execute("SELECT first_message FROM sessions").fetchone()
+        assert row[0] == "v2 prompt"

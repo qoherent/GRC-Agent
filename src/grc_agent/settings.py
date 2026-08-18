@@ -61,7 +61,6 @@ _DEFAULT_MODELS = {
 _DEFAULT_PROVIDER = "ollama"
 _DEFAULT_OLLAMA_BASE_URL = "http://localhost:11434"
 _DEFAULT_OPENAI_COMPATIBLE_BASE_URL = "https://openrouter.ai/api/v1"
-_DEFAULT_OLLAMA_THINKING_ENABLED = True
 
 # mtime-gated cache for dotenv_values(env_path()). dotenv_values re-parses the
 # whole .env from disk on every call; callers like rag.py's embedding path hit
@@ -132,7 +131,6 @@ def default_settings() -> dict:
         "embed_backend": _DEFAULT_EMBED_BACKEND,
         "ollama_base_url": _DEFAULT_OLLAMA_BASE_URL,
         "openai_compatible_base_url": _DEFAULT_OPENAI_COMPATIBLE_BASE_URL,
-        "ollama_thinking_enabled": _DEFAULT_OLLAMA_THINKING_ENABLED,
         **_DEFAULT_MODELS,
     }
     res["model"] = res[_PROVIDER_MODEL_KEY[res["provider"]]]
@@ -143,7 +141,7 @@ def load_settings() -> dict:
     """Read the saved preferences from the `.env` file (the source of truth),
     applying defaults for any vars not present. Returns a dict with keys:
     provider, model, ollama_model, openai_compatible_model,
-    ollama_base_url, openai_compatible_base_url, ollama_thinking_enabled."""
+    ollama_base_url, openai_compatible_base_url, embed_backend."""
     vals = _cached_dotenv()
 
     raw_provider = vals.get("GRC_PROVIDER", _DEFAULT_PROVIDER)
@@ -155,12 +153,6 @@ def load_settings() -> dict:
         provider = raw_provider
     else:
         provider = _DEFAULT_PROVIDER
-
-    thinking_val = vals.get("OLLAMA_THINKING_ENABLED")
-    if thinking_val is None:
-        thinking_enabled = _DEFAULT_OLLAMA_THINKING_ENABLED
-    else:
-        thinking_enabled = thinking_val.lower() in ("true", "1", "yes")
 
     ollama_model = (
         vals.get("OLLAMA_CHAT_MODEL")
@@ -198,7 +190,6 @@ def load_settings() -> dict:
         "openai_codex_model": openai_codex_model,
         "ollama_base_url": ollama_url,
         "openai_compatible_base_url": openai_url,
-        "ollama_thinking_enabled": thinking_enabled,
     }
     res["model"] = res[_PROVIDER_MODEL_KEY[provider]]
     return res
@@ -216,11 +207,10 @@ def save_settings(
     model: str,
     ollama_base_url: str | None = None,
     openai_compatible_base_url: str | None = None,
-    thinking_enabled: bool | None = None,
     embed_backend: str | None = None,
 ) -> None:
-    """Persist the active provider, chat model name, base URLs, embedding
-    backend, and thinking toggle into the `.env` file."""
+    """Persist the active provider, chat model name, base URLs, and embedding
+    backend into the `.env` file."""
     if provider not in _VALID_PROVIDERS:
         raise ValueError(f"Unknown provider: {provider!r}")
     if embed_backend is not None and embed_backend not in _VALID_EMBED_BACKENDS:
@@ -235,8 +225,6 @@ def save_settings(
     if openai_compatible_base_url is not None:
         url = openai_compatible_base_url.strip() or _DEFAULT_OPENAI_COMPATIBLE_BASE_URL
         upsert_env_key("OPENAI_COMPATIBLE_BASE_URL", url)
-    if thinking_enabled is not None:
-        upsert_env_key("OLLAMA_THINKING_ENABLED", "true" if thinking_enabled else "false")
     if embed_backend is not None:
         upsert_env_key("GRC_EMBED_BACKEND", embed_backend)
 

@@ -172,7 +172,7 @@ def test_scenario_execution(sc_name, backend):
                 web_search_cap,
                 web_fetch_cap,
             ],
-            model_settings=ModelSettings(extra_body={"think": True}),
+            model_settings=ModelSettings(),
             retries={"tools": 3, "output": 3},
         )
         agent.output_validator(validate_flowgraph_state)
@@ -287,7 +287,7 @@ def test_scenario_generate_python_writes_nothing_to_disk(backend):
             instructions=build_system_prompt("pai-experiment-test"),
             tools=grc_tools(),
             capabilities=[StopGracefully(), web_search_cap, web_fetch_cap],
-            model_settings=ModelSettings(extra_body={"think": True}),
+            model_settings=ModelSettings(),
             retries={"tools": 3, "output": 3},
         )
         agent.output_validator(validate_flowgraph_state)
@@ -373,7 +373,7 @@ def test_scenario_save_block_writes_to_isolated_hier_dir(backend, tmp_path):
                 instructions=build_system_prompt("pai-experiment-test"),
                 tools=grc_tools(),
                 capabilities=[StopGracefully(), web_search_cap, web_fetch_cap],
-                model_settings=ModelSettings(extra_body={"think": True}),
+                model_settings=ModelSettings(),
                 retries={"tools": 3, "output": 3},
             )
             agent.output_validator(validate_flowgraph_state)
@@ -436,7 +436,7 @@ def test_scenario_lexical_fallback_ollama_cloud_only(monkeypatch):
                 instructions=build_system_prompt("pai-experiment-test"),
                 tools=grc_tools(),
                 capabilities=[StopGracefully(), web_search_cap, web_fetch_cap],
-                model_settings=ModelSettings(extra_body={"think": True}),
+                model_settings=ModelSettings(),
                 retries={"tools": 3, "output": 3},
             )
             agent.output_validator(validate_flowgraph_state)

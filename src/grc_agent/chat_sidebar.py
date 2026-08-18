@@ -55,6 +55,7 @@ from pydantic_ai.messages import (
 from pydantic_graph import End
 
 from .db import (
+    conversation_id_for_session,
     delete_all_sessions,
     delete_session,
     deserialize_messages,
@@ -65,11 +66,6 @@ from .settings import (
     load_settings,
     save_settings,
     upsert_env_key,
-)
-from .trace import (
-    TraceRecorder,
-    delete_turn_trace,
-    save_turn_trace,
 )
 from .ui.block_badge import (
     BlockBadge,
@@ -240,9 +236,9 @@ def _tokens_per_second(output_tokens: int | None, duration_ms: int | None) -> fl
     `output_tokens` is the turn's VISIBLE output (total minus reasoning) and
     `duration_ms` is the time the model was actually generating — computed
     natively from pydantic-ai's ModelRequest/ModelResponse timestamps (see
-    TraceRecorder.finalize), so tool-call time is excluded and the number is
-    the rate the user watched text stream, not tokens per wall-clock turn
-    second.
+    _generation_ms_from_messages), so tool-call time is excluded and the
+    number is the rate the user watched text stream, not tokens per
+    wall-clock turn second.
 
     Returns None rather than 0 for a turn that produced no tokens or took no
     measurable time — showing "0 tok/s" would read as a stalled backend.
@@ -250,6 +246,26 @@ def _tokens_per_second(output_tokens: int | None, duration_ms: int | None) -> fl
     if not output_tokens or not duration_ms or duration_ms <= 0:
         return None
     return output_tokens / (duration_ms / 1000)
+
+
+def _generation_ms_from_messages(new_msgs: list[Any]) -> int:
+    """Sum of (ModelResponse.timestamp - ModelRequest.timestamp) per pair.
+
+    pydantic-ai stamps high-precision local timestamps on ModelRequest
+    (send) and ModelResponse (received) — the delta per (request, response)
+    pair is that request's model processing time (TTFT + generation). Tool
+    execution happens between a response and the next request, so summing
+    the pairs excludes it. `new_msgs` must be THIS run's own messages
+    (`result.new_messages()` — input history and older runs excluded), so
+    no prior-turn leakage. Verified live: a tool-calling turn's pair-sum
+    matched the measured generation time and excluded the tool sleep.
+    """
+    total_ms = 0.0
+    # The pairing is inherently (n, n-1): the last message has no successor.
+    for prev, m in zip(new_msgs, new_msgs[1:], strict=False):
+        if m.__class__.__name__ == "ModelResponse" and prev.__class__.__name__ == "ModelRequest":
+            total_ms += (m.timestamp - prev.timestamp).total_seconds() * 1000
+    return int(total_ms)
 
 
 def resolve_model_context_length(provider: str, model: str) -> int | None:
@@ -1333,29 +1349,6 @@ class ChatSidebar(Gtk.Box):
             except Exception:
                 _log.exception("Failed to remove session resurrected by in-flight save")
 
-    async def _save_trace(self, row: dict[str, Any]) -> None:
-        """Persist one finalized turn-trace row. Mirrors ``_save_history``'s
-        pattern: the SQLite insert runs on a worker thread (``asyncio.to_thread``)
-        on the WAL-enabled DB, and the same clear-generation guard prevents a
-        late insert from resurrecting a trace row for a session the user just
-        cleared. (The ON DELETE CASCADE on ``turn_traces.session_id`` already
-        handles the case where the session ROW is gone; this guard covers the
-        case where the chat UI was cleared via ``clear_messages`` without
-        removing the underlying session row.)"""
-        if row.get("session_id") is None:
-            return
-        gen = self._clear_generation
-        try:
-            new_id = await asyncio.to_thread(save_turn_trace, row)
-        except Exception as e:
-            _log.error("Failed to save turn trace to database: %s", e)
-            return
-        if new_id is not None and gen != self._clear_generation:
-            try:
-                delete_turn_trace(new_id)
-            except Exception:
-                _log.exception("Failed to remove trace resurrected by in-flight save")
-
     def stop_chat(self) -> None:
         if self._chat_task and not self._chat_task.done():
             self._chat_task.cancel()
@@ -1368,24 +1361,18 @@ class ChatSidebar(Gtk.Box):
         if self._md is not None:
             self._md.set_shutting_down(True)
 
-    async def _stream_request(
-        self, ctx: _StreamCtx, node, run, recorder: TraceRecorder | None = None
-    ) -> None:
+    async def _stream_request(self, ctx: _StreamCtx, node, run) -> None:
         async with node.stream(run.ctx) as stream:
             async for event in stream:
                 if isinstance(event, PartStartEvent):
                     self._on_part_start(ctx, event)
                 elif isinstance(event, PartDeltaEvent):
                     self._on_part_delta(ctx, event)
-                if recorder is not None:
-                    recorder.on_event(event)
         # Force a final flush so the last throttled chunk is painted before the
         # node hands control back (and before any markdown re-render).
         self._flush_streaming(ctx, force=True)
 
-    async def _stream_tools(
-        self, ctx: _StreamCtx, node, run, recorder: TraceRecorder | None = None
-    ) -> None:
+    async def _stream_tools(self, ctx: _StreamCtx, node, run) -> None:
         async with node.stream(run.ctx) as stream:
             async for event in stream:
                 if isinstance(event, FunctionToolCallEvent):
@@ -1407,11 +1394,6 @@ class ChatSidebar(Gtk.Box):
                             self._set_tool_result(exp, res_str)
                         ctx.full_raw_text += f"<Tool Result: {res_str}>\n"
                         self._update_copy_text(ctx.box, ctx.full_raw_text)
-                # Feed the recorder AFTER the GTK handlers — best-effort capture
-                # that never blocks a UI update, and never gets skipped by a
-                # GTK-handler exception (same ordering as _stream_request).
-                if recorder is not None:
-                    recorder.on_event(event)
 
     def _on_part_start(self, ctx: _StreamCtx, event: PartStartEvent) -> None:
         part = event.part
@@ -2118,41 +2100,39 @@ class ChatSidebar(Gtk.Box):
         origin_gen = self._clear_generation
         ctx: _StreamCtx | None = None
         active_run: Any = None
-        # Per-turn trace recorder. Captures provider/model/base_url snapshot
-        # at turn start so a live-swap mid-turn stays attributable. Fed by
-        # _stream_request/_stream_tools during the iter() loop; finalized +
-        # persisted once at the end via _save_trace (mirror of _save_history).
-        recorder: TraceRecorder | None = None
-        turn_exc: BaseException | None = None
         try:
             if self._agent is None:
                 self._append_error("No agent configured.")
                 return
             ctx = _StreamCtx(self._start_agent_message())
-            recorder = TraceRecorder(
-                session_id=self._active_session_id,
-                provider=getattr(self, "_active_provider", "") or "",
-                model=getattr(self, "_active_model", "") or "",
-                base_url=getattr(self, "_active_base_url", "") or "",
-                user_prompt=text,
-                origin_page_path=self._get_effective_path(),
-            )
             self._message_history = _clean_message_history_for_new_turn(self._message_history)
             async with self._agent.iter(
                 text,
                 message_history=self._message_history,
                 deps=self._flowgraph_proxy,
+                # Groups this turn's StepPersistence runs/events/snapshots
+                # under the active chat session — the same conversation id
+                # db.py's cleanup SQL matches. Inherited by message_history
+                # on later turns, but passed explicitly every turn as one
+                # uniform rule (runs before a session row exists — e.g. a
+                # failed first send — fall back to pydantic-ai's fresh id
+                # and are simply ungrouped).
+                conversation_id=(
+                    conversation_id_for_session(self._active_session_id)
+                    if self._active_session_id is not None
+                    else None
+                ),
             ) as run:
                 active_run = run
                 self._active_run = run
                 node = run.next_node
                 while node is not None and not isinstance(node, End):
                     if Agent.is_model_request_node(node):
-                        await self._stream_request(ctx, node, run, recorder)
+                        await self._stream_request(ctx, node, run)
                     elif Agent.is_call_tools_node(node):
                         self._close_text(ctx)
                         self._close_thinking(ctx)
-                        await self._stream_tools(ctx, node, run, recorder)
+                        await self._stream_tools(ctx, node, run)
                     self._scroll_to_bottom()
                     node = await run.next(node)
                     self._update_context_label()
@@ -2162,10 +2142,7 @@ class ChatSidebar(Gtk.Box):
                 await self._save_history()
                 self._render_history()
                 rich_rendered = True
-        except asyncio.CancelledError as e:
-            turn_exc = e
-            if recorder is not None:
-                recorder.record_error("cancelled", e)
+        except asyncio.CancelledError:
             if self.current_page is origin_page and self._clear_generation == origin_gen:
                 if active_run is not None:
                     try:
@@ -2181,10 +2158,7 @@ class ChatSidebar(Gtk.Box):
                 rich_rendered = True
             raise
         except Exception as e:
-            turn_exc = e
             _log.exception("agent run failed")
-            if recorder is not None:
-                recorder.record_error("run", e)
             if self.current_page is origin_page:
                 if active_run is not None:
                     try:
@@ -2199,40 +2173,22 @@ class ChatSidebar(Gtk.Box):
                 self._append_error(_format_turn_error(e))
                 rich_rendered = True
         finally:
-            # Persist the trace row for this turn. Finalize even if recorder
-            # saw no events (e.g. the agent was None or iter() raised early)
-            # — a turn that ended in an error is still a recorded turn. The
-            # clear-generation guard inside _save_trace prevents a late insert
-            # from resurrecting a trace against a cleared session.
-            #
-            # On the success path (turn_exc is None) we await so the trace is
-            # saved before widgets update. On cancel/error paths we dispatch as
-            # a detached future — mirroring the cancel-path's _save_history
-            # pattern — so a double-cancel can't skip the widget cleanup below
-            # (CancelledError inherits BaseException, not Exception).
-            if recorder is not None:
+            # Generation rate for the status line. Visible output tokens
+            # (turn total minus hidden reasoning) over the time the model was
+            # actually generating, computed natively from pydantic-ai's own
+            # ModelRequest/ModelResponse timestamps (tool-call time excluded).
+            if active_run is not None and getattr(active_run, "result", None) is not None:
                 try:
-                    row = recorder.finalize(active_run, turn_exc)
-                    # Generation rate for the status line. Visible output
-                    # tokens (turn total minus hidden reasoning) over the
-                    # time the model was actually generating — computed
-                    # natively by the trace from pydantic-ai's own
-                    # ModelRequest/ModelResponse timestamps (tool-call time
-                    # excluded). Taken from the trace row rather than timed
-                    # separately, so the number shown and the number
-                    # persisted can never disagree.
-                    visible_output = max(
-                        0, (row.get("output_tokens") or 0) - (row.get("reasoning_tokens") or 0)
-                    )
+                    usage = getattr(active_run, "usage", None)
+                    output_tokens = getattr(usage, "output_tokens", 0) or 0 if usage else 0
+                    details = (getattr(usage, "details", None) or {}) if usage else {}
+                    reasoning = details.get("reasoning_tokens", 0) or 0
                     self._last_turn_rate = _tokens_per_second(
-                        visible_output, row.get("generation_ms")
+                        max(0, output_tokens - reasoning),
+                        _generation_ms_from_messages(active_run.result.new_messages()),
                     )
-                    if turn_exc is None:
-                        await self._save_trace(row)
-                    else:
-                        asyncio.ensure_future(self._save_trace(row))
                 except Exception:
-                    _log.exception("Failed to dispatch trace save")
+                    _log.exception("Failed to compute generation rate")
             self._active_run = None
             self._update_context_label()
             # Paint any throttled-but-unflushed tail before deciding whether to
@@ -2364,7 +2320,6 @@ class ChatSidebar(Gtk.Box):
         key_var: str | None,
         key_val: str,
         base_url: str,
-        thinking_enabled: bool,
         embed_backend: str,
     ) -> None:
         """Write the new config to `.env`. The base-URL argument is routed to
@@ -2378,7 +2333,6 @@ class ChatSidebar(Gtk.Box):
                 provider,
                 model,
                 openai_compatible_base_url=base_url,
-                thinking_enabled=thinking_enabled,
                 embed_backend=embed_backend,
             )
         else:
@@ -2386,7 +2340,6 @@ class ChatSidebar(Gtk.Box):
                 provider,
                 model,
                 ollama_base_url=base_url,
-                thinking_enabled=thinking_enabled,
                 embed_backend=embed_backend,
             )
         if key_var:
@@ -2399,7 +2352,6 @@ class ChatSidebar(Gtk.Box):
         key_var: str | None,
         key_val: str,
         ollama_base_url: str = "http://localhost:11434",
-        thinking_enabled: bool = True,
         embed_backend: str = "auto",
     ) -> None:
         """Post-Save flow: preflight → persist → live-swap.
@@ -2434,7 +2386,7 @@ class ChatSidebar(Gtk.Box):
         #    immediately after emitting the response signal.
         try:
             self._persist_settings(
-                provider, model, key_var, key_val, ollama_base_url, thinking_enabled, embed_backend
+                provider, model, key_var, key_val, ollama_base_url, embed_backend
             )
         except Exception as e:
             _log.exception("Failed to save settings")

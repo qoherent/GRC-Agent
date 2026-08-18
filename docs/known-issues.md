@@ -74,7 +74,10 @@ endpoint was keyed on the dead `provider == "ollama_cloud"` string, so since
 the v0.1.5 consolidation a cloud user's context-length lookup silently went
 to `localhost:11434`. It now derives the endpoint from the resolved
 `ollama_base_url` (the same source of truth `_build_model` uses) and attaches
-the API key when that URL is ollama.com.
+the API key when that URL is ollama.com. (The lookup still lives in
+`chat_sidebar.resolve_model_context_length` for the context label; only the
+compaction path stopped using it when it moved to `TieredCompaction`'s
+genai-prices registry — see `AGENTS.md`.)
 
 Two earlier instances of the same trap, both fixed on branch `26`: the
 EmbeddingGemma task prefix keyed on `provider != "openrouter"` (permanently

@@ -134,7 +134,7 @@ def test_agent_fixes_buffer_too_small_ollama_cloud():
         instructions=build_system_prompt("buffer-fix-test"),
         tools=grc_tools(),
         capabilities=[StopGracefully(), web_search_cap, web_fetch_cap],
-        model_settings=ModelSettings(extra_body={"think": True}),
+        model_settings=ModelSettings(),
         retries={"tools": 3, "output": 3},
     )
     agent.output_validator(validate_flowgraph_state)
