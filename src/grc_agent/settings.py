@@ -8,14 +8,21 @@ benchmarking.
 Env vars (resolved by env_path(): GRC_AGENT_ENV override -> repo-root `.env`
 -> ~/.config/grc_agent/.env for an installed package):
 
-  GRC_PROVIDER              active chat provider: ollama | openai_compatible
+  GRC_PROVIDER              active chat provider: ollama_local |
+                            ollama_cloud | openrouter | openai |
+                            openai_compatible | openai_codex
   GRC_EMBED_BACKEND         embeddings backend: auto | ollama | llamacpp |
                             openai_compatible ("auto" follows GRC_PROVIDER)
-  OLLAMA_CHAT_MODEL         local Ollama chat model
-  OPENAI_COMPATIBLE_MODEL   OpenAI-compatible chat model
-  OLLAMA_BASE_URL           local/remote Ollama base URL
+  OLLAMA_CHAT_MODEL         Ollama chat model (local and cloud share it)
+  OPENROUTER_MODEL          OpenRouter chat model
+  OPENAI_MODEL              OpenAI API chat model
+  OPENAI_COMPATIBLE_MODEL   other OpenAI-compatible chat model
+  OPENAI_CODEX_MODEL        ChatGPT/Codex chat model
+  OLLAMA_BASE_URL           local Ollama base URL (ollama_local only;
+                            ollama_cloud is fixed to https://ollama.com/v1)
   OPENAI_COMPATIBLE_BASE_URL
-  OPENAI_COMPATIBLE_API_KEY
+  OLLAMA_API_KEY            Ollama Cloud key (local only needs it if auth'd)
+  OPENROUTER_API_KEY / OPENAI_API_KEY / OPENAI_COMPATIBLE_API_KEY
 
 `load_settings()` reads the `.env` *file* (the saved source of truth), never
 os.environ. A model/provider change is applied live by the Settings dialog's
@@ -30,7 +37,14 @@ from pathlib import Path
 
 from dotenv import dotenv_values, set_key
 
-_VALID_PROVIDERS = ("ollama", "openai_compatible", "openai_codex")
+_VALID_PROVIDERS = (
+    "ollama_local",
+    "ollama_cloud",
+    "openrouter",
+    "openai",
+    "openai_compatible",
+    "openai_codex",
+)
 
 # Which backend serves RAG embeddings. Deliberately independent of the chat
 # provider: a chat endpoint that speaks the OpenAI API does not necessarily
@@ -43,22 +57,31 @@ _DEFAULT_EMBED_BACKEND = "auto"
 
 # Per-provider chat-model env var name + settings dict key.
 _PROVIDER_ENV_VAR = {
-    "ollama": "OLLAMA_CHAT_MODEL",
+    "ollama_local": "OLLAMA_CHAT_MODEL",
+    "ollama_cloud": "OLLAMA_CHAT_MODEL",
+    "openrouter": "OPENROUTER_MODEL",
+    "openai": "OPENAI_MODEL",
     "openai_compatible": "OPENAI_COMPATIBLE_MODEL",
     "openai_codex": "OPENAI_CODEX_MODEL",
 }
 _PROVIDER_MODEL_KEY = {
-    "ollama": "ollama_model",
+    "ollama_local": "ollama_model",
+    "ollama_cloud": "ollama_model",
+    "openrouter": "openrouter_model",
+    "openai": "openai_model",
     "openai_compatible": "openai_compatible_model",
     "openai_codex": "openai_codex_model",
 }
 
 _DEFAULT_MODELS = {
     "ollama_model": "qwen3.6:35b-a3b-q4_K_M",
+    "openrouter_model": "deepseek/deepseek-v4-flash",
+    "openai_model": "gpt-5.6-sol",
     "openai_compatible_model": "deepseek/deepseek-v4-flash",
     "openai_codex_model": "gpt-5.6-luna",
 }
-_DEFAULT_PROVIDER = "ollama"
+_DEFAULT_PROVIDER = "ollama_local"
+
 _DEFAULT_OLLAMA_BASE_URL = "http://localhost:11434"
 _DEFAULT_OPENAI_COMPATIBLE_BASE_URL = "https://openrouter.ai/api/v1"
 
@@ -122,7 +145,11 @@ def resolve_embed_backend(cfg: dict) -> str:
     # ChatGPT/Codex transport does not expose /v1/embeddings at all, so it
     # falls back to the default rather than resolving to a backend that would
     # fail every call.
-    return provider if provider in ("ollama", "openai_compatible") else _DEFAULT_PROVIDER
+    if provider in ("ollama_local", "ollama_cloud"):
+        return "ollama"
+    if provider in ("openrouter", "openai", "openai_compatible"):
+        return "openai_compatible"
+    return "ollama"
 
 
 def default_settings() -> dict:
@@ -144,24 +171,41 @@ def load_settings() -> dict:
     ollama_base_url, openai_compatible_base_url, embed_backend."""
     vals = _cached_dotenv()
 
+    # Legacy-value normalization (pre concrete-provider split): map the old
+    # ambiguous ids to their concrete successor using the base URL they were
+    # pointing at, so an existing .env keeps working after the split.
     raw_provider = vals.get("GRC_PROVIDER", _DEFAULT_PROVIDER)
-    if raw_provider in ("openrouter", "openai_compatible"):
-        provider = "openai_compatible"
-    elif raw_provider in ("ollama", "ollama_cloud"):
-        provider = "ollama"
-    elif raw_provider in _VALID_PROVIDERS:
-        provider = raw_provider
-    else:
-        provider = _DEFAULT_PROVIDER
+    compat_url = vals.get("OPENAI_COMPATIBLE_BASE_URL", "") or ""
+    ollama_url_saved = vals.get("OLLAMA_BASE_URL", "") or ""
+    if raw_provider == "ollama":
+        raw_provider = "ollama_cloud" if "ollama.com" in ollama_url_saved else "ollama_local"
+    elif raw_provider == "ollama_cloud":
+        raw_provider = "ollama_cloud"
+    elif raw_provider == "openrouter" or raw_provider == "openai_compatible" and "openrouter.ai" in compat_url:
+        raw_provider = "openrouter"
+    elif raw_provider == "openai_compatible" and "api.openai.com" in compat_url:
+        raw_provider = "openai"
+    provider = raw_provider if raw_provider in _VALID_PROVIDERS else _DEFAULT_PROVIDER
 
     ollama_model = (
         vals.get("OLLAMA_CHAT_MODEL")
         or vals.get("OLLAMA_CLOUD_MODEL")
         or _DEFAULT_MODELS["ollama_model"]
     )
+    # OPENAI_COMPATIBLE_MODEL is the legacy fallback for openrouter/openai:
+    # a pre-split .env pointed one of those services at it.
+    openrouter_model = (
+        vals.get("OPENROUTER_MODEL")
+        or vals.get("OPENAI_COMPATIBLE_MODEL")
+        or _DEFAULT_MODELS["openrouter_model"]
+    )
+    openai_model = (
+        vals.get("OPENAI_MODEL")
+        or vals.get("OPENAI_COMPATIBLE_MODEL")
+        or _DEFAULT_MODELS["openai_model"]
+    )
     openai_compatible_model = (
         vals.get("OPENAI_COMPATIBLE_MODEL")
-        or vals.get("OPENROUTER_MODEL")
         or _DEFAULT_MODELS["openai_compatible_model"]
     )
     openai_codex_model = vals.get("OPENAI_CODEX_MODEL") or _DEFAULT_MODELS["openai_codex_model"]
@@ -171,12 +215,12 @@ def load_settings() -> dict:
         ollama_url = (
             "https://ollama.com/v1"
             if vals.get("OLLAMA_CLOUD_API_KEY")
-            else _DEFAULT_OLLAMA_BASE_URL
+            else "http://localhost:11434"
         )
 
     openai_url = vals.get("OPENAI_COMPATIBLE_BASE_URL")
     if not openai_url:
-        openai_url = _DEFAULT_OPENAI_COMPATIBLE_BASE_URL
+        openai_url = "https://openrouter.ai/api/v1"
 
     embed_backend = vals.get("GRC_EMBED_BACKEND", _DEFAULT_EMBED_BACKEND)
     if embed_backend not in _VALID_EMBED_BACKENDS:
@@ -186,6 +230,8 @@ def load_settings() -> dict:
         "provider": provider,
         "embed_backend": embed_backend,
         "ollama_model": ollama_model,
+        "openrouter_model": openrouter_model,
+        "openai_model": openai_model,
         "openai_compatible_model": openai_compatible_model,
         "openai_codex_model": openai_codex_model,
         "ollama_base_url": ollama_url,

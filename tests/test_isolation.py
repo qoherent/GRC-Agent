@@ -25,7 +25,7 @@ def test_settings_isolation_and_defaults(tmp_path, monkeypatch):
 
     # 1. Load initial settings (defaults)
     cfg = load_settings()
-    assert cfg["provider"] == "ollama"
+    assert cfg["provider"] == "ollama_local"
     assert cfg["ollama_model"] == "qwen3.6:35b-a3b-q4_K_M"
     assert cfg["openai_compatible_model"] == "deepseek/deepseek-v4-flash"
 
@@ -38,9 +38,9 @@ def test_settings_isolation_and_defaults(tmp_path, monkeypatch):
     assert cfg["ollama_model"] == "qwen3.6:35b-a3b-q4_K_M"  # preserved!
 
     # 3. Switch back to ollama and change model
-    save_settings("ollama", "mistral-large")
+    save_settings("ollama_local", "mistral-large")
     cfg = load_settings()
-    assert cfg["provider"] == "ollama"
+    assert cfg["provider"] == "ollama_local"
     assert cfg["model"] == "mistral-large"
     assert cfg["ollama_model"] == "mistral-large"
     assert cfg["openai_compatible_model"] == "google/gemini-2.5-flash"  # preserved!
@@ -56,7 +56,7 @@ def test_db_and_model_isolation(tmp_path, monkeypatch):
     monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_env_file))
 
     # Test under Ollama provider
-    save_settings("ollama", "qwen3.6:35b-a3b-q4_K_M")
+    save_settings("ollama_local", "qwen3.6:35b-a3b-q4_K_M")
     db_path_ollama, model_ollama = get_db_and_model("catalog")
     assert db_path_ollama.endswith("catalog_ollama.db")
     assert "catalog_openai_compatible.db" not in db_path_ollama
@@ -83,7 +83,7 @@ def test_embed_endpoint_isolation(tmp_path, monkeypatch):
     monkeypatch.setenv("OPENAI_COMPATIBLE_API_KEY", "dummy-openrouter-key")
 
     # Ollama provider check
-    save_settings("ollama", "qwen3.6:35b-a3b-q4_K_M")
+    save_settings("ollama_local", "qwen3.6:35b-a3b-q4_K_M")
     base_url, api_key, _uds = _embed_endpoint()
     assert base_url == "http://localhost:11434/v1"
     assert api_key == "not-needed"
@@ -118,7 +118,7 @@ def test_get_embed_client_never_returns_mismatched_client_for_key(tmp_path, monk
     rag_mod._embed_client_state = None
 
     try:
-        save_settings("ollama", "qwen3.6:35b-a3b-q4_K_M")
+        save_settings("ollama_local", "qwen3.6:35b-a3b-q4_K_M")
         client_ollama = rag_mod._get_embed_client()
         assert str(client_ollama.base_url).rstrip("/") == "http://localhost:11434/v1"
 
@@ -132,7 +132,7 @@ def test_get_embed_client_never_returns_mismatched_client_for_key(tmp_path, monk
         assert client_openrouter is not client_ollama
 
         # Switch back — must rebuild again
-        save_settings("ollama", "qwen3.6:35b-a3b-q4_K_M")
+        save_settings("ollama_local", "qwen3.6:35b-a3b-q4_K_M")
         client_ollama_again = rag_mod._get_embed_client()
         assert str(client_ollama_again.base_url).rstrip("/") == "http://localhost:11434/v1"
     finally:
@@ -147,7 +147,7 @@ def test_web_build_model_isolation(tmp_path, monkeypatch):
 
     http_client = _retrying_http_client()
 
-    cfg = {"provider": "ollama", "model": "qwen3.6:35b-a3b-q4_K_M"}
+    cfg = {"provider": "ollama_local", "model": "qwen3.6:35b-a3b-q4_K_M"}
     m = _build_model(cfg, http_client)
     assert isinstance(m, OllamaModel)
     assert m.model_name == "qwen3.6:35b-a3b-q4_K_M"
@@ -164,9 +164,8 @@ def test_web_build_model_isolation(tmp_path, monkeypatch):
     # Ollama remote / cloud (ollama.com) with API key
     upsert_env_key("OLLAMA_API_KEY", "dummy-test-key")
     cfg = {
-        "provider": "ollama",
+        "provider": "ollama_cloud",
         "model": "deepseek-v4-flash:cloud",
-        "ollama_base_url": "https://ollama.com/v1",
     }
     m = _build_model(cfg, http_client)
     assert isinstance(m, OllamaModel)
@@ -229,9 +228,9 @@ def test_upsert_env_key_inserts_and_updates(tmp_path):
     env = tmp_path / ".env"
 
     # Insert
-    upsert_env_key("GRC_PROVIDER", "ollama", path=env)
+    upsert_env_key("GRC_PROVIDER", "ollama_local", path=env)
     content = env.read_text(encoding="utf-8")
-    assert "GRC_PROVIDER=ollama" in content
+    assert "GRC_PROVIDER=ollama_local" in content
 
     # Update
     upsert_env_key("GRC_PROVIDER", "openai_compatible", path=env)
@@ -278,7 +277,7 @@ def test_build_model_ollama_cloud_raises_on_missing_api_key(tmp_path, monkeypatc
     with pytest.raises(ValueError, match="API key is required"):
         _build_model(
             {
-                "provider": "ollama",
+                "provider": "ollama_cloud",
                 "model": "deepseek-v4-flash:cloud",
                 "ollama_base_url": "https://ollama.com/v1",
             },
@@ -293,9 +292,9 @@ def test_save_settings_writes_openai_compatible_model_to_env(tmp_path, monkeypat
     monkeypatch.setenv("GRC_AGENT_ENV", str(env))
 
     # First save ollama — sets GRC_PROVIDER + OLLAMA_CHAT_MODEL
-    save_settings("ollama", "qwen3.6:35b-a3b-q4_K_M")
+    save_settings("ollama_local", "qwen3.6:35b-a3b-q4_K_M")
     content = env.read_text(encoding="utf-8")
-    assert "GRC_PROVIDER=ollama" in content
+    assert "GRC_PROVIDER=ollama_local" in content
     assert "OLLAMA_CHAT_MODEL=qwen3.6:35b-a3b-q4_K_M" in content
 
     # Now save openai_compatible — must add OPENAI_COMPATIBLE_MODEL and update
@@ -343,7 +342,7 @@ def test_rag_building_flag_set_during_ensure_db_built(tmp_path, monkeypatch):
     monkeypatch.setenv("GRC_AGENT_VECTORS_DIR", str(tmp_vectors))
     monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
 
-    save_settings("ollama", "qwen3.6:35b-a3b-q4_K_M")
+    save_settings("ollama_local", "qwen3.6:35b-a3b-q4_K_M")
     db_path, model = get_db_and_model("catalog")
 
     # _rag_building is module-global; a prior test's build may have left a
@@ -555,7 +554,7 @@ def test_lexical_only_db_does_not_rehammer_embedding_backend(tmp_path, monkeypat
     tmp_vectors.mkdir()
     monkeypatch.setenv("GRC_AGENT_VECTORS_DIR", str(tmp_vectors))
     monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
-    save_settings("ollama", "qwen3.6:35b-a3b-q4_K_M")
+    save_settings("ollama_local", "qwen3.6:35b-a3b-q4_K_M")
     db_path, model = get_db_and_model("catalog")
 
     def fail_embed(text, model):  # noqa: ARG001
@@ -597,7 +596,7 @@ def test_query_catalog_falls_back_to_lexical_when_embedding_unreachable(tmp_path
     tmp_vectors.mkdir()
     monkeypatch.setenv("GRC_AGENT_VECTORS_DIR", str(tmp_vectors))
     monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
-    save_settings("ollama", "qwen3.6:35b-a3b-q4_K_M")
+    save_settings("ollama_local", "qwen3.6:35b-a3b-q4_K_M")
     db_path, model = get_db_and_model("catalog")
 
     def fail_embed(text, model):  # noqa: ARG001
@@ -642,7 +641,7 @@ def test_query_catalog_lexical_message_present_even_when_embed_succeeds(tmp_path
     tmp_vectors.mkdir()
     monkeypatch.setenv("GRC_AGENT_VECTORS_DIR", str(tmp_vectors))
     monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
-    save_settings("ollama", "qwen3.6:35b-a3b-q4_K_M")
+    save_settings("ollama_local", "qwen3.6:35b-a3b-q4_K_M")
     db_path, model = get_db_and_model("catalog")
 
     def fail_embed(text, model):  # noqa: ARG001
@@ -681,7 +680,7 @@ def test_query_docs_falls_back_to_lexical_when_embedding_unreachable(tmp_path, m
     tmp_vectors.mkdir()
     monkeypatch.setenv("GRC_AGENT_VECTORS_DIR", str(tmp_vectors))
     monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
-    save_settings("ollama", "qwen3.6:35b-a3b-q4_K_M")
+    save_settings("ollama_local", "qwen3.6:35b-a3b-q4_K_M")
     db_path, model = get_db_and_model("docs")
     docs_calls = []
 
@@ -727,7 +726,7 @@ def test_ensure_db_built_rebuilds_when_fts_table_missing(tmp_path, monkeypatch):
     tmp_vectors.mkdir()
     monkeypatch.setenv("GRC_AGENT_VECTORS_DIR", str(tmp_vectors))
     monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
-    save_settings("ollama", "qwen3.6:35b-a3b-q4_K_M")
+    save_settings("ollama_local", "qwen3.6:35b-a3b-q4_K_M")
     db_path, model = get_db_and_model("catalog")
 
     conn = sqlite3.connect(db_path)
@@ -860,14 +859,14 @@ def test_build_agent_from_cfg_produces_correct_model_type_per_provider(tmp_path,
     from grc_agent.agent_factory import build_agent_from_cfg
 
     # ollama (local default)
-    save_settings("ollama", "qwen3.6:35b-a3b-q4_K_M")
+    save_settings("ollama_local", "qwen3.6:35b-a3b-q4_K_M")
     agent_local, _ = build_agent_from_cfg(load_settings())
     assert isinstance(agent_local.model, OllamaModel), (
         f"local ollama cfg must produce OllamaModel, got {type(agent_local.model).__name__}"
     )
 
     # ollama (remote/cloud)
-    save_settings("ollama", "deepseek-v4-flash:cloud", ollama_base_url="https://ollama.com/v1")
+    save_settings("ollama_cloud", "deepseek-v4-flash:cloud")
     upsert_env_key("OLLAMA_API_KEY", "dummy-key-for-build-test")
     agent_cloud, _ = build_agent_from_cfg(load_settings())
     assert isinstance(agent_cloud.model, OllamaModel), (
@@ -923,7 +922,7 @@ def test_live_swap_rebuilds_agent_with_new_provider(tmp_path, monkeypatch):
     # 1. Boot with ollama cfg + a dummy key. We never send a real
     #    request on this agent, so the dummy key is fine — it just exercises
     #    the build path and gives us a baseline agent to "swap away from".
-    save_settings("ollama", "deepseek-v4-flash:cloud", ollama_base_url="https://ollama.com/v1")
+    save_settings("ollama_cloud", "deepseek-v4-flash:cloud")
     upsert_env_key("OLLAMA_API_KEY", "dummy-boot-key-not-used")
     agent1, _ = build_agent_from_cfg(load_settings())
     assert isinstance(agent1.model, OllamaModel)
@@ -977,22 +976,15 @@ def test_preflight_connection_returns_none_on_success_and_error_on_failure():
     api_key = os.environ.get("OPENROUTER_API_KEY")
     if api_key:
         # Real success path — exercises the actual endpoint.
-        err = preflight_connection(
-            "openai_compatible",
-            api_key,
-            ollama_base_url="https://openrouter.ai/api/v1",
-            timeout=10.0,
-        )
+        err = preflight_connection("openrouter", api_key, timeout=10.0)
         assert err is None, f"expected None for a valid OpenRouter key, got: {err!r}"
 
     # Deterministic failure: missing key for OpenRouter must return a non-empty error string.
-    err = preflight_connection(
-        "openai_compatible", "", ollama_base_url="https://openrouter.ai/api/v1", timeout=10.0
-    )
+    err = preflight_connection("openrouter", "", timeout=10.0)
     assert isinstance(err, str) and err, "missing openrouter key must produce a non-empty error"
 
     # Deterministic failure: missing key for Ollama Cloud must return a non-empty error string.
-    err = preflight_connection("ollama", "", ollama_base_url="https://ollama.com/v1", timeout=10.0)
+    err = preflight_connection("ollama_cloud", "", timeout=10.0)
     assert isinstance(err, str) and err, "missing ollama cloud key must produce a non-empty error"
 
 
@@ -1019,7 +1011,7 @@ def test_embed_backend_is_independent_of_chat_provider(tmp_path, monkeypatch):
     assert cfg["embed_backend"] == "auto"
     assert resolve_embed_backend(cfg) == "openai_compatible"
 
-    save_settings("ollama", "qwen3.6:35b-a3b-q4_K_M")
+    save_settings("ollama_local", "qwen3.6:35b-a3b-q4_K_M")
     assert resolve_embed_backend(load_settings()) == "ollama"
 
     # Pinned explicitly, the chat provider no longer has any say.
@@ -1033,7 +1025,7 @@ def test_embed_backend_is_independent_of_chat_provider(tmp_path, monkeypatch):
     assert "embeddinggemma" in model.lower()
 
     with pytest.raises(ValueError):
-        save_settings("ollama", "m", embed_backend="not-a-backend")
+        save_settings("ollama_local", "m", embed_backend="not-a-backend")
 
 
 def test_gemma_task_prefix_follows_the_model_not_the_provider():
@@ -1186,7 +1178,7 @@ def test_partial_embedding_failure_yields_no_vector_index(tmp_path, monkeypatch)
 
     monkeypatch.setenv("GRC_AGENT_VECTORS_DIR", str(tmp_path / "vectors"))
     monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
-    save_settings("ollama", "qwen3.6:35b-a3b-q4_K_M")
+    save_settings("ollama_local", "qwen3.6:35b-a3b-q4_K_M")
     db_path, model = get_db_and_model("catalog")
 
     calls = {"n": 0}
@@ -1243,7 +1235,7 @@ def test_codex_is_a_real_third_provider(tmp_path, monkeypatch):
     assert cfg["model"] == "gpt-5.1-codex", "res['model'] needs a _PROVIDER_MODEL_KEY entry"
 
     # Switching away and back must not lose either provider's model.
-    save_settings("ollama", "qwen3.6:35b-a3b-q4_K_M")
+    save_settings("ollama_local", "qwen3.6:35b-a3b-q4_K_M")
     cfg = load_settings()
     assert cfg["openai_codex_model"] == "gpt-5.1-codex"
 
@@ -1610,7 +1602,7 @@ def test_model_catalog_lists_what_each_backend_reports(monkeypatch):
     monkeypatch.setattr(
         httpx, "get", lambda *_a, **_k: _Resp({"models": [{"name": "b"}, {"name": "a"}]})
     )
-    got = asyncio.run(model_catalog.list_models({"provider": "ollama"}, base_url="http://x:11434"))
+    got = asyncio.run(model_catalog.list_models({"provider": "ollama_local"}, base_url="http://x:11434"))
     assert got == ["a", "b"], "ollama tags must be listed and sorted"
 
     # The OpenAI /v1/models shape.

@@ -1091,7 +1091,7 @@ def test_vector_db_dimension_check_is_cached(tmp_path, monkeypatch):
 
     from grc_agent.settings import save_settings
 
-    save_settings("ollama", "qwen3.6:35b-a3b-q4_K_M")
+    save_settings("ollama_local", "qwen3.6:35b-a3b-q4_K_M")
     db_path, model = get_db_and_model("catalog")
 
     # Build a minimal valid sqlite-vec DB with a known dimension so
@@ -1855,14 +1855,14 @@ def test_ui_micro_interactions_and_shortcuts():
 
     # 2. Active Provider badge tooltips
     sidebar.set_active_provider(
-        "openai_compatible",
+        "openrouter",
         "deepseek/deepseek-v4-flash",
         is_default=False,
         base_url="https://openrouter.ai/api/v1",
     )
     assert "deepseek-v4-flash" in sidebar._provider_label.get_text()
     tooltip = sidebar._provider_label.get_tooltip_text()
-    assert "OpenAI Compatible" in tooltip
+    assert "OpenRouter" in tooltip
     assert "https://openrouter.ai/api/v1" in tooltip
     assert "Configured provider active" in tooltip
 
@@ -2123,7 +2123,7 @@ def test_settings_dialog_persists_model_name(tmp_path, monkeypatch):
     from grc_agent.settings import load_settings, save_settings
 
     monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
-    save_settings("ollama", "old-model-name")  # known starting model
+    save_settings("ollama_local", "old-model-name")  # known starting model
 
     sidebar = ChatSidebar()
     sidebar._open_settings()
@@ -2164,7 +2164,7 @@ def test_settings_dialog_reports_save_failure(tmp_path, monkeypatch):
     from grc_agent.settings import save_settings
 
     monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
-    save_settings("ollama", "old-model-name")
+    save_settings("ollama_local", "old-model-name")
 
     sidebar = ChatSidebar()
     sidebar._open_settings()
@@ -3551,7 +3551,7 @@ def test_context_label_updates_with_pydantic_ai_usage():
         _context_negative_cache.clear()
 
     sidebar = ChatSidebar()
-    sidebar.set_active_provider("ollama", "deepseek-v4-flash:cloud")
+    sidebar.set_active_provider("ollama_cloud", "deepseek-v4-flash:cloud")
 
     sidebar._message_history = [
         ModelRequest(parts=[UserPromptPart(content="Hello")]),
@@ -3588,7 +3588,7 @@ def test_settings_custom_ollama_url(tmp_path, monkeypatch):
 
     # 3. Save custom settings
     save_settings(
-        "ollama",
+        "ollama_local",
         "qwen3.6:35b-a3b-q4_K_M",
         ollama_base_url="http://192.168.1.100:11434",
     )
@@ -3603,7 +3603,7 @@ def test_agent_factory_custom_ollama_url():
     from grc_agent.agent_factory import build_agent_from_cfg, preflight_connection
 
     cfg = {
-        "provider": "ollama",
+        "provider": "ollama_local",
         "model": "qwen3.6:35b-a3b-q4_K_M",
         "ollama_base_url": "http://192.168.1.200:11434",
     }
@@ -3619,7 +3619,7 @@ def test_agent_factory_custom_ollama_url():
     assert "192.168.1.200:11434" in provider.base_url
 
     # Verify preflight_connection uses custom ollama_base_url (will fail connection gracefully)
-    res = preflight_connection("ollama", ollama_base_url="http://127.0.0.1:9999", timeout=0.1)
+    res = preflight_connection("ollama_local", base_url="http://127.0.0.1:9999", timeout=0.1)
     assert res is not None
     assert "connection failed" in res.lower() or "http" in res.lower() or "refused" in res.lower()
 
@@ -3653,7 +3653,7 @@ def test_openai_compatible_provider_and_factory(tmp_path, monkeypatch):
     assert "localhost:8080" in provider.base_url
 
     res = preflight_connection(
-        "openai_compatible", ollama_base_url="http://127.0.0.1:9999/v1", timeout=0.1
+        "openai_compatible", base_url="http://127.0.0.1:9999/v1", timeout=0.1
     )
     assert res is not None
     assert "connection failed" in res.lower() or "http" in res.lower() or "refused" in res.lower()
@@ -3711,7 +3711,7 @@ def test_settings_dialog_extended_fields(tmp_path, monkeypatch):
 
     monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
     save_settings(
-        "ollama", "old-model", ollama_base_url="http://localhost:11434"
+        "ollama_local", "old-model", ollama_base_url="http://localhost:11434"
     )
 
     sidebar = ChatSidebar()
@@ -3745,54 +3745,40 @@ def test_settings_dialog_extended_fields(tmp_path, monkeypatch):
     assert persisted["ollama_base_url"] == "http://10.0.0.5:11434"
 
 
-def test_settings_dialog_ollama_cloud_checkbox(tmp_path, monkeypatch):
-    """Checking 'Use Ollama Cloud' sets https://ollama.com/v1 and disables URL entry.
-    Unchecking enables URL entry with default http://localhost:11434."""
+def test_settings_dialog_switch_to_ollama_cloud(tmp_path, monkeypatch):
+    """Regression (reported): switching to Ollama Cloud and saving must
+    persist the concrete ollama_cloud provider. With the split, selecting
+    the provider shows the fixed https://ollama.com/v1 endpoint read-only —
+    there is no cloud checkbox to misconfigure and no editable URL to
+    silently keep pointing at localhost."""
     from gi.repository import Gtk
 
     from grc_agent.chat_sidebar import ChatSidebar
     from grc_agent.settings import load_settings, save_settings
+    from grc_agent.ui.providers import PROVIDER_ORDER
 
     monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
-    save_settings("ollama", "qwen3.6:35b-a3b-q4_K_M", ollama_base_url="http://localhost:11434")
+    save_settings("ollama_local", "qwen3.6:35b-a3b-q4_K_M", ollama_base_url="http://localhost:11434")
 
     sidebar = ChatSidebar()
     sidebar._open_settings()
     dlg = sidebar._open_dialog
     assert dlg is not None
 
-    checks: list[Gtk.CheckButton] = []
-    entries: list[Gtk.Entry] = []
+    # Select "Ollama Cloud" in the provider dropdown.
+    dlg.provider_combo.set_active(PROVIDER_ORDER.index("ollama_cloud"))
+    assert dlg.url_entry.get_text() == "https://ollama.com/v1"
+    assert dlg.url_entry.get_sensitive() is False, "fixed endpoint must be read-only"
 
-    def walk(w):
-        if isinstance(w, Gtk.CheckButton):
-            checks.append(w)
-        if isinstance(w, Gtk.Entry):
-            entries.append(w)
-        if isinstance(w, Gtk.Container):
-            for c in w.get_children():
-                walk(c)
-
-    walk(dlg)
-
-    cloud_check = next(c for c in checks if "cloud" in (c.get_label() or "").lower())
-    url_entry = next(e for e in entries if "localhost" in e.get_text())
-
-    assert cloud_check.get_active() is False
-    assert url_entry.get_sensitive() is True
-
-    # Check the Cloud box
-    cloud_check.set_active(True)
-    assert url_entry.get_text() == "https://ollama.com/v1"
-    assert url_entry.get_sensitive() is False
-
-    # Bypass preflight check
+    # Bypass preflight reachability check
     monkeypatch.setattr("grc_agent.agent_factory.preflight_connection", lambda *_a, **_kw: None)
 
     dlg.emit("response", Gtk.ResponseType.APPLY)
 
     persisted = load_settings()
-    assert persisted["ollama_base_url"] == "https://ollama.com/v1"
+    assert persisted["provider"] == "ollama_cloud"
+    # The fixed endpoint is canonical — no OLLAMA_BASE_URL line is written.
+    assert persisted["ollama_base_url"] == "http://localhost:11434"
 
 
 def test_badge_regex_matching():

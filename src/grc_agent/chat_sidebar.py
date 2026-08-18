@@ -209,16 +209,27 @@ def _ollama_context_length(model: str) -> int | None:
     return None
 
 
-def _openrouter_context_length(model: str) -> int | None:
-    """GET https://openrouter.ai/api/v1/models -> context_length for the model."""
+def _openai_shaped_context_length(provider: str, model: str) -> int | None:
+    """GET the provider's /v1/models catalog -> context_length for the model.
+    Works for OpenRouter and plain OpenAI (both expose context_length in the
+    OpenAI models shape); a custom endpoint without the field yields None."""
     import httpx
 
     from grc_agent.settings import get_env_value
 
-    api_key = get_env_value("OPENROUTER_API_KEY") or ""
+    if provider == "openrouter":
+        url = "https://openrouter.ai/api/v1/models"
+        key_var = "OPENROUTER_API_KEY"
+    elif provider == "openai":
+        url = "https://api.openai.com/v1/models"
+        key_var = "OPENAI_API_KEY"
+    else:  # openai_compatible (custom endpoint — OpenRouter is the known-good shape)
+        url = "https://openrouter.ai/api/v1/models"
+        key_var = "OPENAI_COMPATIBLE_API_KEY"
+    api_key = get_env_value(key_var) or ""
     headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
     with httpx.Client(timeout=3.0) as client:
-        r = client.get("https://openrouter.ai/api/v1/models", headers=headers)
+        r = client.get(url, headers=headers)
     if r.status_code != 200:
         return None
     for m in r.json().get("data", []):
@@ -283,14 +294,14 @@ def resolve_model_context_length(provider: str, model: str) -> int | None:
         return None
 
     try:
-        if provider == "ollama":
+        if provider in ("ollama", "ollama_local", "ollama_cloud"):
             ctx_len = _ollama_context_length(model)
         elif provider == "openai_codex":
             from grc_agent.providers.openai_codex.model import context_window
 
             ctx_len = context_window(model)
-        elif provider == "openai_compatible":
-            ctx_len = _openrouter_context_length(model)
+        elif provider in ("openrouter", "openai", "openai_compatible"):
+            ctx_len = _openai_shaped_context_length(provider, model)
         else:
             ctx_len = None
     except Exception as e:
@@ -1081,6 +1092,15 @@ class ChatSidebar(Gtk.Box):
             provider = getattr(model, "_provider", None) or getattr(model, "provider", None)
             base_url = str(getattr(provider, "base_url", "") or "")
             resolved_provider = _resolve_provider_from_base_url(base_url)
+            # A local Ollama on a custom port/LAN host has no ":11434" marker
+            # in its URL — the transport's own provider name is the authority
+            # (OllamaProvider.name is "ollama" for local and cloud alike, and
+            # the URL already split cloud from local above).
+            if (
+                resolved_provider == "openai_compatible"
+                and str(getattr(provider, "name", "")) == "ollama"
+            ):
+                resolved_provider = "ollama_local"
         try:
             cfg = load_settings()
             expected = cfg.get("provider", "")
@@ -2322,10 +2342,11 @@ class ChatSidebar(Gtk.Box):
         base_url: str,
         embed_backend: str,
     ) -> None:
-        """Write the new config to `.env`. The base-URL argument is routed to
-        the key belonging to the active provider — ChatGPT/Codex has neither a
-        base URL nor an API key, and passing one through would write whatever
-        the (hidden) URL entry still held over OLLAMA_BASE_URL."""
+        """Write the new config to `.env`. Base-URL routing: editable-URL
+        providers (ollama_local, openai_compatible) persist their URL var;
+        fixed-endpoint providers (ollama_cloud, openrouter, openai) have a
+        canonical URL that is never persisted; ChatGPT/Codex has neither a
+        base URL nor an API key."""
         if provider == "openai_codex":
             save_settings(provider, model, embed_backend=embed_backend)
         elif provider == "openai_compatible":
@@ -2335,13 +2356,15 @@ class ChatSidebar(Gtk.Box):
                 openai_compatible_base_url=base_url,
                 embed_backend=embed_backend,
             )
-        else:
+        elif provider == "ollama_local":
             save_settings(
                 provider,
                 model,
                 ollama_base_url=base_url,
                 embed_backend=embed_backend,
             )
+        else:
+            save_settings(provider, model, embed_backend=embed_backend)
         if key_var:
             upsert_env_key(key_var, key_val)
 
@@ -2351,7 +2374,7 @@ class ChatSidebar(Gtk.Box):
         model: str,
         key_var: str | None,
         key_val: str,
-        ollama_base_url: str = "http://localhost:11434",
+        base_url: str = "http://localhost:11434",
         embed_backend: str = "auto",
     ) -> None:
         """Post-Save flow: preflight → persist → live-swap.
@@ -2375,9 +2398,9 @@ class ChatSidebar(Gtk.Box):
         # 1. Pre-flight reachability BEFORE writing to .env (no save/restore
         #    dance if it fails). Bounded at 5s inside preflight_connection.
         self.set_status(f"Checking {provider_label}\u2026")
-        preflight_err = preflight_connection(provider, key_val, ollama_base_url=ollama_base_url)
+        preflight_err = preflight_connection(provider, key_val, base_url=base_url)
         if preflight_err and not self._confirm_unreachable(
-            provider, preflight_err, toplevel, ollama_base_url=ollama_base_url
+            provider, preflight_err, toplevel, base_url=base_url
         ):
             self.set_status("Settings not saved — provider unreachable.", error=True)
             return
@@ -2386,7 +2409,7 @@ class ChatSidebar(Gtk.Box):
         #    immediately after emitting the response signal.
         try:
             self._persist_settings(
-                provider, model, key_var, key_val, ollama_base_url, embed_backend
+                provider, model, key_var, key_val, base_url, embed_backend
             )
         except Exception as e:
             _log.exception("Failed to save settings")
@@ -2421,7 +2444,7 @@ class ChatSidebar(Gtk.Box):
         err: str,
         toplevel: Gtk.Window | None,
         *,
-        ollama_base_url: str = "http://localhost:11434",
+        base_url: str = "http://localhost:11434",
     ) -> bool:
         """Modal Yes/No confirm when the preflight ping fails. Returns True
         if the user wants to save anyway. Anchors the dialog on `self` so
@@ -2429,15 +2452,14 @@ class ChatSidebar(Gtk.Box):
         provider_label = _PROVIDER_LABELS.get(provider, provider)
         if provider == "openai_codex":
             hint = "• Click 'Sign in with ChatGPT' in Preferences.\n• Codex requires an active ChatGPT Plus or Pro subscription."
-        elif provider == "ollama":
-            hint = f"• Ensure local Ollama daemon is running ('ollama serve').\n• Verify host is reachable at {ollama_base_url}."
-        elif provider == "openai_compatible":
-            hint = f"• Ensure local OpenAI-compatible server (e.g. llama-server) is running.\n• Verify endpoint is reachable at {ollama_base_url}."
+        elif provider == "ollama_local":
+            hint = f"• Ensure local Ollama daemon is running ('ollama serve').\n• Verify host is reachable at {base_url}."
+        elif provider == "ollama_cloud":
+            hint = f"• Verify your Ollama Cloud API key.\n• Check reachability of {base_url}."
+        elif provider in ("openrouter", "openai"):
+            hint = f"• Verify your API key for {provider}.\n• Check reachability of {base_url}."
         else:
-            hint = "• Check provider configuration and network connectivity."
-        # A cloud Ollama user (provider normalized to "ollama", base URL
-        # ollama.com) gets the ollama hint above, which already names the
-        # reachable host — no separate cloud branch is needed.
+            hint = f"• Ensure your OpenAI-compatible server is running.\n• Verify endpoint is reachable at {base_url}."
 
         confirm = Gtk.MessageDialog(
             transient_for=toplevel,

@@ -20,7 +20,7 @@ from grc_agent.agent_factory import _build_compaction_capability
 def test_compaction_under_budget_preserves_exact_history():
     """When message history is well within target_tokens, TieredCompaction
     leaves all messages and parts untouched, ensuring 100% KV cache hit rate."""
-    compaction = _build_compaction_capability({"provider": "ollama", "ollama_base_url": "http://localhost:11434"})
+    compaction = _build_compaction_capability({"provider": "ollama_local", "ollama_base_url": "http://localhost:11434"})
 
     history: list[ModelMessage] = [
         ModelRequest(parts=[UserPromptPart(content="Add a throttle block")]),
@@ -50,7 +50,7 @@ def test_compaction_over_budget_evicts_old_tool_returns_keeps_last_n():
     """When token budget is exceeded, Tier 1 (ClearToolResults) clears older tool
     return contents to placeholder while preserving the most recent 2 pairs intact."""
     # Set a small target_tokens so compaction triggers
-    cfg = {"provider": "ollama", "ollama_base_url": "http://localhost:11434"}
+    cfg = {"provider": "ollama_local", "ollama_base_url": "http://localhost:11434"}
     os.environ["GRC_COMPACTION_TARGET_TOKENS"] = "500"
     try:
         compaction = _build_compaction_capability(cfg)
@@ -102,7 +102,7 @@ def test_compaction_over_budget_evicts_old_tool_returns_keeps_last_n():
 def test_sliding_window_preserves_first_user_prompt():
     """When history is exceptionally long, Tier 2 (SlidingWindowCompaction)
     preserves the original user prompt (preserve_first_user_message=True)."""
-    cfg = {"provider": "ollama", "ollama_base_url": "http://localhost:11434"}
+    cfg = {"provider": "ollama_local", "ollama_base_url": "http://localhost:11434"}
     os.environ["GRC_COMPACTION_TARGET_TOKENS"] = "200"
     try:
         compaction = _build_compaction_capability(cfg)
@@ -169,7 +169,7 @@ def test_compaction_target_resolves_real_window_for_https_endpoints(monkeypatch)
 def test_compaction_target_pins_conservative_window_for_localhost_ollama(monkeypatch):
     monkeypatch.delenv("GRC_COMPACTION_TARGET_TOKENS", raising=False)
     cap = _build_compaction_capability(
-        {"provider": "ollama", "ollama_base_url": "http://localhost:11434"}
+        {"provider": "ollama_local", "ollama_base_url": "http://localhost:11434"}
     )
     assert cap.target_fraction == 0.75
     assert cap.context_window == 32_000
@@ -185,7 +185,7 @@ def test_compaction_clamp_tier_guards_the_window(monkeypatch):
 
     monkeypatch.delenv("GRC_COMPACTION_TARGET_TOKENS", raising=False)
     local = _build_compaction_capability(
-        {"provider": "ollama", "ollama_base_url": "http://localhost:11434"}
+        {"provider": "ollama_local", "ollama_base_url": "http://localhost:11434"}
     )
     cloud = _build_compaction_capability(
         {"provider": "openai_compatible", "openai_compatible_base_url": "https://openrouter.ai/api/v1"}

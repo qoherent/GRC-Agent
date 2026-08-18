@@ -115,21 +115,23 @@ interpreter — a uv-managed build, or a `pyenv`/`conda` shim earlier on your
 `PATH` — will fail to `import gnuradio` even with `--system-site-packages`.
 
 ### 3. Setup LLM Backend
-Three chat providers, switchable anytime from the app's Settings dialog:
-1. **Ollama** (Local daemon or Ollama Cloud)
-2. **OpenAI-Compatible** (OpenRouter, llama.cpp, vLLM, LM Studio, OpenAI, Groq, etc.)
-3. **ChatGPT Plus/Pro (Codex)** — OAuth sign-in, no API key (see Option C below)
+Six concrete providers, switchable anytime from the app's Settings dialog:
+1. **Ollama (local)** — local or LAN daemon
+2. **Ollama Cloud** — ollama.com, API key required
+3. **OpenRouter** — API key required
+4. **OpenAI API** — API key required
+5. **Other (OpenAI-compatible)** — llama.cpp, vLLM, LM Studio, Groq, …
+6. **ChatGPT Plus/Pro (Codex)** — OAuth sign-in, no API key (see Option C below)
 
 The active provider, model name, base URL, and API keys persist in `.env` and apply immediately on Save (no restart needed).
 
-#### Option A: Ollama (Local Daemon or Cloud)
+#### Option A: Ollama (local / cloud)
 - **Local Ollama:**
   ```bash
   ollama pull qwen3.6:35b-a3b-q4_K_M   # chat model
   ollama pull embeddinggemma:latest    # embedding model (optional — FTS5 lexical search is used if unavailable)
   ```
-- **Ollama Cloud:**
-  Set Base URL to `https://ollama.com/v1`, Model to `deepseek-v4-flash:cloud`, and enter your [Ollama Cloud API Key](https://ollama.com/settings/keys).
+- **Ollama Cloud:** pick **Ollama Cloud** in Settings (the endpoint is fixed), Model `deepseek-v4-flash:cloud`, and enter your [Ollama Cloud API Key](https://ollama.com/settings/keys).
 
 <details>
 <summary>Required for local Ollama: increase context window (click to expand)</summary>
@@ -143,11 +145,10 @@ Set it to `120000`:
 - **Windows:** add `OLLAMA_CONTEXT_LENGTH` = `120000` to User Environment Variables, then restart Ollama.
 </details>
 
-#### Option B: OpenAI-Compatible Endpoint (Local or Cloud)
-Use any OpenAI-compatible server or cloud provider (e.g. `OpenRouter`, `llama.cpp` / `llama-server`, `vLLM`, `LM Studio`, `LocalAI`, `Groq`, `OpenAI`):
-- **OpenRouter:** Base URL `https://openrouter.ai/api/v1`, Model `deepseek/deepseek-v4-flash`, paste your [OpenRouter API Key](https://openrouter.ai/).
-- **Local Server (llama.cpp / vLLM / LM Studio):** Base URL `http://localhost:8080/v1` (or your server port), Model e.g. `qwen2.5-coder:32b`, API key optional.
-- **OpenAI / Cloud Providers:** Base URL e.g. `https://api.openai.com/v1`, Model e.g. `gpt-4o`, paste your API key.
+#### Option B: OpenRouter / OpenAI / Other OpenAI-compatible
+- **OpenRouter:** pick **OpenRouter** in Settings (endpoint fixed), Model `deepseek/deepseek-v4-flash`, paste your [OpenRouter API Key](https://openrouter.ai/).
+- **OpenAI API:** pick **OpenAI API** (endpoint fixed), Model e.g. `gpt-5.6-sol`, paste your API key.
+- **Other (local servers — llama.cpp / vLLM / LM Studio / Groq):** Base URL e.g. `http://localhost:8080/v1` (or your server port), Model e.g. `qwen2.5-coder:32b`, API key optional.
 
 #### Option C: ChatGPT Plus/Pro (Codex)
 Sign in with your ChatGPT account instead of an API key — OpenAI documents
