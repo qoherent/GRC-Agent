@@ -184,8 +184,9 @@ def _build_compaction_capability(cfg: dict) -> TieredCompaction:
     """Build a tiered context compaction capability tailored to the active provider.
 
     Evicts bulky older tool return contents (e.g. inspect_graph 10k JSONs, generate_python previews)
-    when the history exceeds a fraction of the model's context window, keeping the last 2 tool
-    return pairs and dialogue history intact.
+    when the history exceeds a fraction of the model's context window, keeping the last 3 tool
+    return pairs and dialogue history intact; small tool results (under 2000 tokens) are never
+    evicted.
 
     The target is one uniform fraction (75%) of the model's window, resolved per
     request from the genai-prices registry pydantic-ai-harness already ships
@@ -210,10 +211,24 @@ def _build_compaction_capability(cfg: dict) -> TieredCompaction:
     clamp_tokens = 16_000 if is_local else 64_000
     tiers = [
         ClampOversizedMessages(max_part_tokens=clamp_tokens),
+        # TieredCompaction drives the tiers itself (each tier's own trigger is
+        # bypassed), so the knobs that matter here are keep_pairs and
+        # min_clear_tokens — NOT max_tokens. Verified live (session-14 run,
+        # 2026-08-18): with keep_pairs=2 and no min_clear_tokens, a
+        # query_knowledge answer (~100-500 tokens) was blanked within one or
+        # two tool calls, so the model re-asked the same catalog question 18
+        # times and StopGracefully hit the 40-request ceiling. keep_pairs=3 is
+        # the harness default; min_clear_tokens=2000 is one uniform rule —
+        # small tool results are never worth reclaiming, only the bulky
+        # inspect_graph/generate_python JSONs are.
         ClearToolResults(
             max_tokens=1,
-            keep_pairs=2,
-            placeholder="[Flowgraph tool output cleared to conserve context window]",
+            keep_pairs=3,
+            min_clear_tokens=2_000,
+            placeholder=(
+                "[Flowgraph tool output cleared to conserve context — "
+                "call the tool again if you still need this data]"
+            ),
         ),
         SlidingWindowCompaction(
             max_tokens=1,

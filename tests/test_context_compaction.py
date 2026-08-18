@@ -65,7 +65,11 @@ def test_compaction_under_budget_preserves_exact_history():
 
 def test_compaction_over_budget_evicts_old_tool_returns_keeps_last_n():
     """When token budget is exceeded, Tier 1 (ClearToolResults) clears older tool
-    return contents to placeholder while preserving the most recent 2 pairs intact."""
+    return contents to placeholder while preserving the most recent 3 pairs
+    intact. Payloads must exceed min_clear_tokens (2000 tokens ~ 8000 chars) —
+    small results (query_knowledge answers) are never worth reclaiming, and the
+    model must not lose the answer to its own recent question mid-turn (the
+    session-14 40-request loop regression)."""
     # Set a small target_tokens so compaction triggers
     cfg = {"provider": "ollama_local", "ollama_base_url": "http://localhost:11434"}
     os.environ["GRC_COMPACTION_TARGET_TOKENS"] = "500"
@@ -74,7 +78,7 @@ def test_compaction_over_budget_evicts_old_tool_returns_keeps_last_n():
     finally:
         os.environ.pop("GRC_COMPACTION_TARGET_TOKENS", None)
 
-    # 3 turns of massive inspect_graph payloads (1,500 chars each)
+    # 4 turns of massive inspect_graph payloads (20,000 chars ~ 5k tokens each)
     history: list[ModelMessage] = [
         # Turn 1
         ModelRequest(parts=[UserPromptPart(content="Turn 1: inspect")]),
@@ -84,7 +88,7 @@ def test_compaction_over_budget_evicts_old_tool_returns_keeps_last_n():
         ModelRequest(
             parts=[
                 ToolReturnPart(
-                    tool_name="inspect_graph", content="A" * 1500, tool_call_id="call_t1"
+                    tool_name="inspect_graph", content="A" * 20000, tool_call_id="call_t1"
                 )
             ]
         ),
@@ -97,7 +101,7 @@ def test_compaction_over_budget_evicts_old_tool_returns_keeps_last_n():
         ModelRequest(
             parts=[
                 ToolReturnPart(
-                    tool_name="inspect_graph", content="B" * 1500, tool_call_id="call_t2"
+                    tool_name="inspect_graph", content="B" * 20000, tool_call_id="call_t2"
                 )
             ]
         ),
@@ -110,11 +114,24 @@ def test_compaction_over_budget_evicts_old_tool_returns_keeps_last_n():
         ModelRequest(
             parts=[
                 ToolReturnPart(
-                    tool_name="inspect_graph", content="C" * 1500, tool_call_id="call_t3"
+                    tool_name="inspect_graph", content="C" * 20000, tool_call_id="call_t3"
                 )
             ]
         ),
         ModelResponse(parts=[TextPart(content="Turn 3 done.")]),
+        # Turn 4
+        ModelRequest(parts=[UserPromptPart(content="Turn 4: inspect")]),
+        ModelResponse(
+            parts=[ToolCallPart(tool_name="inspect_graph", args={}, tool_call_id="call_t4")]
+        ),
+        ModelRequest(
+            parts=[
+                ToolReturnPart(
+                    tool_name="inspect_graph", content="D" * 20000, tool_call_id="call_t4"
+                )
+            ]
+        ),
+        ModelResponse(parts=[TextPart(content="Turn 4 done.")]),
     ]
 
     agent = Agent(TestModel(), capabilities=[compaction])
@@ -131,11 +148,12 @@ def test_compaction_over_budget_evicts_old_tool_returns_keeps_last_n():
         }
 
         # Turn 1's tool return (oldest) should be cleared to placeholder
-        assert "[Flowgraph tool output cleared to conserve context window]" in returns["call_t1"]
+        assert "[Flowgraph tool output cleared to conserve context" in returns["call_t1"]
 
-        # The last 2 tool returns (Turn 2 and Turn 3) must be preserved in full
-        assert returns["call_t2"] == "B" * 1500
-        assert returns["call_t3"] == "C" * 1500
+        # The last 3 tool returns (Turns 2-4) must be preserved in full
+        assert returns["call_t2"] == "B" * 20000
+        assert returns["call_t3"] == "C" * 20000
+        assert returns["call_t4"] == "D" * 20000
 
     asyncio.run(_run())
 
@@ -294,7 +312,7 @@ def test_chat_sidebar_renders_compacted_messages_cleanly():
             parts=[
                 ToolReturnPart(
                     tool_name="inspect_graph",
-                    content="[Flowgraph tool output cleared to conserve context window]",
+                    content="[Flowgraph tool output cleared to conserve context \u2014 call the tool again if you still need this data]",
                     tool_call_id="call_c1",
                 )
             ]

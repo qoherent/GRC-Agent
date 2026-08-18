@@ -12,9 +12,13 @@ import shutil
 import tempfile
 from pathlib import Path
 
+import gi
 import pytest
 
 from grc_agent.adapter import change_graph
+
+gi.require_version("Gtk", "3.0")
+gi.require_version("Gdk", "3.0")
 
 """Shared fixtures/helpers/constants split out of the former test_unit.py god
 file. The epy sources and dial-tone block names feed adapter/graph, layout,
