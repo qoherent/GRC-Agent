@@ -51,7 +51,7 @@ dependencies = [
     "gbulb>=0.6.6; python_version < '3.13'",
     "markdown-it-py>=3.0.0",
     "ddgs>=9.0",
-    "pydantic-ai-harness>=0.21.0",
+    "pydantic-ai-harness>=0.23.0",
     # Official provider SDKs for the pydantic-ai models the Settings UI
     # exposes (anthropic/google ship with pydantic-ai-slim's own extras;
     # these four are separate SDKs pydantic-ai wraps).

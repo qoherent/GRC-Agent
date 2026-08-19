@@ -1062,7 +1062,7 @@ requires-dist = [
     { name = "playwright", marker = "extra == 'dev'", specifier = ">=1.48" },
     { name = "pydantic", specifier = ">=2.0" },
     { name = "pydantic-ai", extras = ["web-fetch"], specifier = ">=2.7.0,<3" },
-    { name = "pydantic-ai-harness", specifier = ">=0.21.0" },
+    { name = "pydantic-ai-harness", specifier = ">=0.23.0" },
     { name = "pydantic-graph", specifier = ">=2.7.0,<3" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0.0" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=1.0" },
@@ -2438,16 +2438,16 @@ web-fetch = [
 
 [[package]]
 name = "pydantic-ai-harness"
-version = "0.21.0"
+version = "0.23.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "genai-prices" },
     { name = "httpx" },
     { name = "pydantic-ai-slim" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/57/91/637f34cfb65b9b1a627dc3e4500dff0740c3bd1d369259d40fa11d87e157/pydantic_ai_harness-0.21.0.tar.gz", hash = "sha256:5eb429d47977913ccec3e74e48479a6207863efebff9fa9afc4b20e52b01e44a", size = 2189073, upload-time = "2026-08-15T03:12:54.135Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/fa/6f/5528733bd89021aecfa1c04a4ee6ba71c513a79cd10ececd03f8f74b0e4d/pydantic_ai_harness-0.23.0.tar.gz", hash = "sha256:13474d1160ea4e18c1998531a6d9f8525ffedd3b28cdc9cbe523a52b19a1f3a5", size = 2226531, upload-time = "2026-08-19T04:01:52.978Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/6b/c1/dd669f17415da4d233581cbac8809ea1c2c3078d113289b96103362cdadc/pydantic_ai_harness-0.21.0-py3-none-any.whl", hash = "sha256:61c1facec51849adc2680569b5abe337e98836ad0e2adc8f79954d01aaa706e6", size = 632221, upload-time = "2026-08-15T03:12:52.466Z" },
+    { url = "https://files.pythonhosted.org/packages/a8/d0/1a498edb97fa2d15206a7eeff6fb313f7e13b6301683dc3761df3d52b051/pydantic_ai_harness-0.23.0-py3-none-any.whl", hash = "sha256:081252b7aa95ff52d40ff29880119463adb69e8241d72e2bff95b2e094207d8c", size = 642445, upload-time = "2026-08-19T04:01:50.866Z" },
 ]
 
 [[package]]

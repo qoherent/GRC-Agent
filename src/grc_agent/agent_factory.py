@@ -447,7 +447,8 @@ class ResilientSummarizingCompaction(SummarizingCompaction):
 
     D2: the harness does NOT catch summarizer failures — `_summarize` has no
     try/except and core re-raises hook errors, so an uncaught summary error
-    would hard-fail the turn (verified in pydantic-ai-harness 0.21.0:
+    would hard-fail the turn (verified in pydantic-ai-harness 0.21.0 and
+    0.23.0:
     `_summarizing_compaction.py:_summarize`, `_agent_graph.py:1515`,
     `capabilities/abstract.py:652`). On failure the pre-compact history is
     kept unchanged; TieredCompaction then escalates to the zero-LLM
