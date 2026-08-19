@@ -1812,3 +1812,41 @@ def test_compact_now_button_compacts_history_and_snapshots_first(tmp_path, monke
     assert snaps, "pre-compact snapshot unreadable via the store seam"
     snap_msgs = snaps[-1].messages
     assert len(snap_msgs) == len(history), "snapshot must hold the FULL pre-compact history"
+
+
+def test_compact_now_refuses_without_an_active_session(tmp_path, monkeypatch):
+    """The no-session guard (audit fix): with no session row there is no
+    conversation id, so the pre-compact snapshot cannot be registered and
+    compacting would destroy the only in-memory copy of the history. The
+    button must refuse with a status message and never touch the history."""
+    from unittest.mock import MagicMock
+
+    from pydantic_ai import Agent
+    from pydantic_ai.messages import (
+        ModelMessage,
+        ModelRequest,
+        ModelResponse,
+        TextPart,
+        UserPromptPart,
+    )
+    from pydantic_ai.models.test import TestModel
+
+    from grc_agent.chat_sidebar import ChatSidebar
+
+    monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
+
+    history: list[ModelMessage] = [
+        ModelRequest(parts=[UserPromptPart(content="u1")]),
+        ModelResponse(parts=[TextPart(content="r1")]),
+    ]
+    sidebar = ChatSidebar()
+    sidebar._agent = Agent(TestModel(), capabilities=[])
+    sidebar._message_history = history
+    sidebar._active_session_id = None
+    sidebar._render_history = MagicMock()
+
+    sidebar._on_compact_clicked(MagicMock())
+
+    assert sidebar._message_history is history, "history must be untouched"
+    assert sidebar._busy is False, "must not enter the busy state"
+    assert "not saved to a session" in sidebar._status_label.get_text()

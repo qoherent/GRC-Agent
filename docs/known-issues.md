@@ -38,10 +38,14 @@ built with, rather than inferring it from a URL. `build_agent_from_cfg` already
 knows the answer; pass it through instead of re-deriving it downstream. That
 removes the guess entirely rather than adding another branch to it.
 
-**Status**: a `chatgpt.com` branch was added so the ChatGPT provider reads
-correctly, but that is one more special case layered on the guess, not a fix.
-The next provider hits the same wall, and a local Ollama served on a
-non-11434 port is still mislabelled today.
+**RESOLVED.** The resolver now maps every concrete provider by host
+(`chatgpt.com` -> codex, `ollama.com` -> ollama_cloud, `openrouter.ai` ->
+openrouter, `api.openai.com` -> openai, `:11434` -> ollama_local, else
+openai_compatible), and `set_agent`'s provider-name remap (chat_sidebar.py)
+re-badges a custom-port local Ollama correctly. The remaining ambiguity — a
+local Ollama served on a non-11434 port resolving to `openai_compatible` —
+is covered by the remap, which compares the resolved provider against the
+configured one and applies the configured label.
 
 ---
 
@@ -74,10 +78,10 @@ endpoint was keyed on the dead `provider == "ollama_cloud"` string, so since
 the v0.1.5 consolidation a cloud user's context-length lookup silently went
 to `localhost:11434`. It now derives the endpoint from the resolved
 `ollama_base_url` (the same source of truth `_build_model` uses) and attaches
-the API key when that URL is ollama.com. (The lookup still lives in
-`chat_sidebar.resolve_model_context_length` for the context label; only the
-compaction path stopped using it when it moved to `TieredCompaction`'s
-genai-prices registry — see `AGENTS.md`.)
+the API key when that URL is ollama.com. (The lookup lives in
+`agent_factory.resolve_model_context_length` (moved from chat_sidebar in
+`b0370e8`) and now feeds BOTH the context label and the compaction window —
+see `AGENTS.md`.)
 
 Two earlier instances of the same trap, both fixed on branch `26`: the
 EmbeddingGemma task prefix keyed on `provider != "openrouter"` (permanently

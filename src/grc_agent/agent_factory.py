@@ -191,15 +191,6 @@ _context_negative_cache: dict[tuple[str, str], float] = {}
 _CONTEXT_NEGATIVE_TTL = 60.0
 
 
-def format_tokens(n: int) -> str:
-    """Format token count for display (e.g. 1.2k, 14.7k, 128k, 1M)."""
-    if n >= 1_000_000:
-        return f"{n / 1_000_000:.1f}M".replace(".0M", "M")
-    if n >= 1_000:
-        return f"{n / 1_000:.1f}k".replace(".0k", "k")
-    return str(n)
-
-
 def _ollama_context_length(model: str) -> int | None:
     """POST {base_url}/api/show -> model_info context_length, falling back to
     parsing num_ctx from the parameters blob. Returns None if unresolvable.
@@ -241,10 +232,15 @@ def _ollama_context_length(model: str) -> int | None:
 def _openai_shaped_context_length(provider: str, model: str) -> int | None:
     """GET the provider's /v1/models catalog -> context_length for the model.
     Works for OpenRouter and plain OpenAI (both expose context_length in the
-    OpenAI models shape); a custom endpoint without the field yields None."""
+    OpenAI models shape); a custom endpoint without the field yields None.
+
+    The openai_compatible branch probes the CONFIGURED endpoint (the same
+    source of truth `_preflight_target` uses) — never a hardcoded host, or a
+    LAN model's window would be silently overridden by OpenRouter's upstream
+    spec (the compaction target is now probe-driven)."""
     import httpx
 
-    from grc_agent.settings import get_env_value
+    from grc_agent.settings import get_env_value, load_settings
 
     if provider == "openrouter":
         url = "https://openrouter.ai/api/v1/models"
@@ -252,8 +248,13 @@ def _openai_shaped_context_length(provider: str, model: str) -> int | None:
     elif provider == "openai":
         url = "https://api.openai.com/v1/models"
         key_var = "OPENAI_API_KEY"
-    else:  # openai_compatible (custom endpoint — OpenRouter is the known-good shape)
-        url = "https://openrouter.ai/api/v1/models"
+    else:  # openai_compatible — the user's own endpoint
+        base = (
+            load_settings().get("openai_compatible_base_url")
+            or get_env_value("OPENAI_COMPATIBLE_BASE_URL")
+            or "http://localhost:8080/v1"
+        ).rstrip("/")
+        url = base if base.endswith("/models") else f"{base}/models"
         key_var = "OPENAI_COMPATIBLE_API_KEY"
     api_key = get_env_value(key_var) or ""
     headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
@@ -268,44 +269,6 @@ def _openai_shaped_context_length(provider: str, model: str) -> int | None:
             if isinstance(ctx_len, (int, float)):
                 return int(ctx_len)
     return None
-
-
-def _tokens_per_second(output_tokens: int | None, duration_ms: int | None) -> float | None:
-    """Generation rate for the last turn, or None when it cannot be measured.
-
-    `output_tokens` is the turn's VISIBLE output (total minus reasoning) and
-    `duration_ms` is the time the model was actually generating — computed
-    natively from pydantic-ai's ModelRequest/ModelResponse timestamps (see
-    _generation_ms_from_messages), so tool-call time is excluded and the
-    number is the rate the user watched text stream, not tokens per
-    wall-clock turn second.
-
-    Returns None rather than 0 for a turn that produced no tokens or took no
-    measurable time — showing "0 tok/s" would read as a stalled backend.
-    """
-    if not output_tokens or not duration_ms or duration_ms <= 0:
-        return None
-    return output_tokens / (duration_ms / 1000)
-
-
-def _generation_ms_from_messages(new_msgs: list[Any]) -> int:
-    """Sum of (ModelResponse.timestamp - ModelRequest.timestamp) per pair.
-
-    pydantic-ai stamps high-precision local timestamps on ModelRequest
-    (send) and ModelResponse (received) — the delta per (request, response)
-    pair is that request's model processing time (TTFT + generation). Tool
-    execution happens between a response and the next request, so summing
-    the pairs excludes it. `new_msgs` must be THIS run's own messages
-    (`result.new_messages()` — input history and older runs excluded), so
-    no prior-turn leakage. Verified live: a tool-calling turn's pair-sum
-    matched the measured generation time and excluded the tool sleep.
-    """
-    total_ms = 0.0
-    # The pairing is inherently (n, n-1): the last message has no successor.
-    for prev, m in zip(new_msgs, new_msgs[1:], strict=False):
-        if m.__class__.__name__ == "ModelResponse" and prev.__class__.__name__ == "ModelRequest":
-            total_ms += (m.timestamp - prev.timestamp).total_seconds() * 1000
-    return int(total_ms)
 
 
 def resolve_model_context_length(provider: str, model: str) -> int | None:
@@ -426,9 +389,10 @@ def _build_compaction_capability(cfg: dict) -> TieredCompaction:
         # query_knowledge answer (~100-500 tokens) was blanked within one or
         # two tool calls, so the model re-asked the same catalog question 18
         # times and StopGracefully hit the 40-request ceiling. keep_pairs=3 is
-        # the harness default; min_clear_tokens=2000 is one uniform rule —
-        # small tool results are never worth reclaiming, only the bulky
-        # inspect_graph/generate_python JSONs are.
+        # the harness default (the model keeps 3 tool pairs of working room);
+        # min_clear_tokens=2000 is a TOTAL-reclaim gate (harness semantics:
+        # nothing is cleared when the clearable set's combined size is
+        # trivial — a turn of only small answers keeps them all).
         ClearToolResults(
             max_tokens=1,
             keep_pairs=3,

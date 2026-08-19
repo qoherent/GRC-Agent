@@ -171,13 +171,19 @@ def test_sliding_window_preserves_first_user_prompt():
     finally:
         os.environ.pop("GRC_COMPACTION_TARGET_TOKENS", None)
 
-    # 15 conversation turns
+    # 15 conversation turns, each ~40 chars so the estimate (~4 chars/token)
+    # clears the 200-token target — the tier must actually fire, not pass
+    # vacuously because the history never exceeded the budget.
     history: list[ModelMessage] = [
         ModelRequest(parts=[UserPromptPart(content="INITIAL_USER_GOAL: Build an FM receiver")]),
         ModelResponse(parts=[TextPart(content="I will help you build an FM receiver.")]),
     ]
     for i in range(1, 15):
-        history.append(ModelRequest(parts=[UserPromptPart(content=f"Step {i}: Add component {i}")]))
+        history.append(
+            ModelRequest(
+                parts=[UserPromptPart(content=f"Step {i}: Add component {i} " + ("x" * 30))]
+            )
+        )
         history.append(ModelResponse(parts=[TextPart(content=f"Added component {i}.")]))
 
     agent = Agent(TestModel(), capabilities=[compaction])
@@ -389,7 +395,13 @@ def test_summarizing_tier_fires_over_budget_and_replaces_old_turns():
             if isinstance(p, SystemPromptPart) and p.content.startswith(_SUMMARY_PREFIX)
         ]
         assert summaries, "summarizing tier never fired"
-        assert all(s for s in summaries), "summary must be non-empty"
+        # The summary message leads the compacted history (structural — the
+        # canned TestModel summary text itself is not meaningful).
+        first = all_msgs[0]
+        assert any(
+            isinstance(p, SystemPromptPart) and p.content.startswith(_SUMMARY_PREFIX)
+            for p in first.parts
+        ), "summary must be the first message of the compacted history"
 
         # The turn-1 MODEL RESPONSE is gone from the live context (the user
         # prompt itself survives by design as a D3 retention copy).
@@ -449,6 +461,8 @@ def test_conversation_search_recalls_compacted_detail(tmp_path, monkeypatch):
     drops an old turn, ConversationSearch (scope="conversation") recovers a
     unique phrase from the pre-compact snapshot."""
 
+    from pydantic_ai import UsageLimits
+    from pydantic_ai.exceptions import UserError
     from pydantic_ai_harness.compaction import ClearToolResults, TieredCompaction
     from pydantic_ai_harness.conversation_search import ConversationSearch, SnapshotHistorySource
 
@@ -462,14 +476,28 @@ def test_conversation_search_recalls_compacted_detail(tmp_path, monkeypatch):
                 max_messages=1, keep_messages=2, keep_user_messages=True
             ),
         ],
-        target_tokens=400,
+        # Small target + padded turn-1 prompt so the summarizing tier ACTUALLY
+        # fires (the auditor proved the old 400-token target never triggered —
+        # the test passed with compaction never running).
+        target_tokens=100,
     )
+
     # TestModel(call_tools=[...]) calls the search tool on every step, which
     # is exactly what we need: the turn-1 tool boundary lands the pre-compact
     # snapshot (StepPersistence saves only at settled tool boundaries), and
-    # turn 3's call searches the union.
+    # turn 3's call searches the union. The lenient subclass is required for
+    # the D1-inherited summarizer: the nested summary agent has NO tools, and
+    # stock TestModel raises UserError for a configured-but-absent tool —
+    # which would trip the D2 wrapper and silently skip the summary.
+    class _LenientTestModel(TestModel):
+        def _get_tool_calls(self, model_request_parameters):
+            try:
+                return super()._get_tool_calls(model_request_parameters)
+            except UserError:
+                return []
+
     agent = Agent(
-        TestModel(call_tools=["search_conversation_history"]),
+        _LenientTestModel(call_tools=["search_conversation_history"]),
         capabilities=[
             StepPersistence(store=store, agent_name="grc_chat"),
             ConversationSearch(SnapshotHistorySource(store), scope="conversation"),
@@ -480,14 +508,19 @@ def test_conversation_search_recalls_compacted_detail(tmp_path, monkeypatch):
     async def _run():
         conv = "session-1"
         r1 = await agent.run(
-            "Remember the phrase MAGIC_721 and inspect the graph.",
+            "Remember the phrase MAGIC_721 and inspect the graph. "
+            + ("This is padding to push the estimate over the tiny target. " * 6),
             message_history=[],
             deps=None,
             conversation_id=conv,
+            usage_limits=UsageLimits(request_limit=200),
         )
         h1 = r1.all_messages()
         await agent.run(
-            "Continue; set the throttle to 0.005.", message_history=h1, conversation_id=conv
+            "Continue; set the throttle to 0.005.",
+            message_history=h1,
+            conversation_id=conv,
+            usage_limits=UsageLimits(request_limit=200),
         )
         # Turn 3 must be a FRESH run: TestModel calls its configured tools
         # only when the message history contains no ModelResponse yet
@@ -498,7 +531,19 @@ def test_conversation_search_recalls_compacted_detail(tmp_path, monkeypatch):
             message_history=[],
             deps=None,
             conversation_id=conv,
+            usage_limits=UsageLimits(request_limit=200),
         )
+        # The summarizing tier really fired: a summary artifact exists in the
+        # final history (the "compacted detail" claim is only meaningful if
+        # compaction actually happened).
+        from pydantic_ai_harness.compaction._summarizing_compaction import _SUMMARY_PREFIX
+
+        final_parts = [p for m in r3.all_messages() for p in getattr(m, "parts", [])]
+        assert any(
+            isinstance(p, SystemPromptPart) and p.content.startswith(_SUMMARY_PREFIX)
+            for p in final_parts
+        ), "summarizing tier never fired — recall test is vacuous"
+
         returns = [
             p.content
             for m in r3.all_messages()
@@ -514,6 +559,7 @@ def test_conversation_search_recalls_compacted_detail(tmp_path, monkeypatch):
             "Call back to search_conversation_history for MAGIC_721.",
             message_history=[],
             deps=None,
+            usage_limits=UsageLimits(request_limit=200),
         )
         h4 = r4.all_messages()
         fails = [
@@ -528,11 +574,13 @@ def test_conversation_search_recalls_compacted_detail(tmp_path, monkeypatch):
     asyncio.run(_run())
 
 
-def test_unbounded_snapshots_keep_all_boundaries():
+def test_unbounded_snapshots_keep_all_boundaries(tmp_path, monkeypatch):
     """D3: max_snapshots_per_run=None must retain every settled snapshot, so
-    a pre-compaction snapshot always survives for ConversationSearch."""
+    a pre-compaction snapshot always survives for ConversationSearch. Runs on
+    a fresh GRC_AGENT_ENV so it never writes into the developer's real chat DB."""
     from pydantic_ai_harness.step_persistence import ContinuableSnapshot, RunRecord
 
+    monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
     store = get_step_store()
     rid = "grc_chat-test-unbounded"
     asyncio.run(
@@ -572,3 +620,62 @@ def test_compaction_target_probes_the_real_window(monkeypatch):
     assert cap.context_window == 1_048_576, "probed window must win"
     assert cap.target_fraction == 0.85
     assert cap.target_tokens is None
+
+
+def test_clear_tool_results_min_clear_tokens_gates_on_total_reclaim():
+    """The session-14 regression pin, with the REAL harness semantics:
+    min_clear_tokens is a TOTAL-reclaim gate — when the clearable set's
+    combined size is trivial (< 2000 tokens), NOTHING is cleared (a turn of
+    only small query_knowledge answers keeps them all); when a bulky
+    inspect_graph result is present, the gate passes and it is blanked."""
+    from pydantic_ai_harness.compaction import ClearToolResults
+    from pydantic_ai_harness.compaction._manual import compact_now
+
+    strat = ClearToolResults(
+        max_tokens=1, keep_pairs=0, min_clear_tokens=2_000, placeholder="[CLEARED]"
+    )
+
+    async def _run():
+        # Case A: only small results -> total reclaim trivial -> nothing cleared.
+        small_history: list[ModelMessage] = [
+            ModelRequest(parts=[UserPromptPart(content="u1")]),
+            ModelResponse(
+                parts=[ToolCallPart(tool_name="query_knowledge", args={}, tool_call_id="c1")]
+            ),
+            ModelRequest(
+                parts=[
+                    ToolReturnPart(
+                        tool_name="query_knowledge", content="small answer", tool_call_id="c1"
+                    )
+                ]
+            ),
+            ModelResponse(parts=[TextPart(content="r1")]),
+        ]
+        out = await compact_now(strat, small_history, model=TestModel())
+        returns = {
+            p.tool_call_id: p.content for m in out for p in m.parts if isinstance(p, ToolReturnPart)
+        }
+        assert returns["c1"] == "small answer", "trivial reclaim must clear nothing"
+
+        # Case B: a bulky result present -> gate passes -> it is blanked.
+        bulky_history: list[ModelMessage] = [
+            ModelRequest(parts=[UserPromptPart(content="u1")]),
+            ModelResponse(
+                parts=[ToolCallPart(tool_name="inspect_graph", args={}, tool_call_id="c2")]
+            ),
+            ModelRequest(
+                parts=[
+                    ToolReturnPart(
+                        tool_name="inspect_graph", content="B" * 20_000, tool_call_id="c2"
+                    )
+                ]
+            ),
+            ModelResponse(parts=[TextPart(content="r1")]),
+        ]
+        out = await compact_now(strat, bulky_history, model=TestModel())
+        returns = {
+            p.tool_call_id: p.content for m in out for p in m.parts if isinstance(p, ToolReturnPart)
+        }
+        assert "[CLEARED]" in str(returns["c2"]), "bulky result must be cleared"
+
+    asyncio.run(_run())

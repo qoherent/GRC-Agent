@@ -33,7 +33,7 @@ def test_settings_custom_ollama_url(tmp_path, monkeypatch):
     assert cfg2["ollama_base_url"] == "http://192.168.1.100:11434"
 
 
-def test_agent_factory_custom_ollama_url():
+def test_agent_factory_custom_ollama_url(monkeypatch):
     """Test build_agent_from_cfg passes custom base_url to the provider."""
     from grc_agent.agent_factory import build_agent_from_cfg, probe_backend
 
@@ -43,6 +43,10 @@ def test_agent_factory_custom_ollama_url():
         "ollama_base_url": "http://192.168.1.200:11434",
     }
 
+    # The compaction window probe must not hit the network in a fast test.
+    monkeypatch.setattr(
+        "grc_agent.agent_factory.resolve_model_context_length", lambda *_a, **_k: None
+    )
     agent, err = build_agent_from_cfg(cfg)
     assert err is None
     # No thinking request knobs: the provider's native default stands.
@@ -78,6 +82,9 @@ def test_openai_compatible_provider_and_factory(tmp_path, monkeypatch):
     assert cfg["model"] == "llama3.3:70b-gguf"
     assert cfg["openai_compatible_base_url"] == "http://localhost:8080/v1"
 
+    monkeypatch.setattr(
+        "grc_agent.agent_factory.resolve_model_context_length", lambda *_a, **_k: None
+    )
     agent, err = build_agent_from_cfg(cfg)
     assert err is None
 

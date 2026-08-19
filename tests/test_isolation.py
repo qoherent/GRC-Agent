@@ -858,6 +858,10 @@ def test_build_agent_from_cfg_produces_correct_model_type_per_provider(tmp_path,
 
     from grc_agent.agent_factory import build_agent_from_cfg
 
+    monkeypatch.setattr(
+        "grc_agent.agent_factory.resolve_model_context_length", lambda *_a, **_k: None
+    )
+
     # ollama (local default)
     save_settings("ollama_local", "qwen3.6:35b-a3b-q4_K_M")
     agent_local, _ = build_agent_from_cfg(load_settings())
