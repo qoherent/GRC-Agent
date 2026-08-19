@@ -120,6 +120,8 @@ _DENIED_PATTERNS = [
     "**/.grc_agent/*",
     ".git/*",
     "**/.git/*",
+    ".envrc",
+    "**/.envrc",
 ]
 
 # The one uniform write rule: a file's suffix decides whether it may be
@@ -266,6 +268,8 @@ class GrcFileSystemToolset(FileSystemToolset[AgentDepsT]):
         """
         resolved = self._safe_resolve(path)
         if _is_grc_name(resolved.name):
+            if not resolved.is_file():
+                raise FileNotFoundError(f"File not found: {path}")
             return self._inspect_grc_file(resolved)
         return await super().read_file(path, offset=offset, limit=limit)
 
@@ -401,8 +405,9 @@ class GrcFileSystem(AbstractCapability[AgentDepsT]):
 
     Configuration mirrors the harness ``FileSystem`` capability with this
     app's defaults: reads capped at 1000 lines per call, directory listings
-    at 200 entries, `.env*`/`.grc_agent/` denied outright (the harness's
-    own protected defaults — ``.git/``, keys, secrets — remain in force).
+    at 200 entries, and `.env`/`.env.*`/`.envrc`/`.grc_agent/`/`.git/` denied
+    outright — root-level AND nested (`**/` forms) — on top of the
+    harness-protected defaults (keys, secrets).
     """
 
     max_read_lines: int = 1000

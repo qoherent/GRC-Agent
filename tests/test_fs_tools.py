@@ -224,14 +224,61 @@ def test_walkers_do_not_surface_env_or_git(toolset, _saved):
     pkg = root / "pkg"
     pkg.mkdir()
     (pkg / ".env").write_text("X=2\n", encoding="utf-8")
+    (root / ".envrc").write_text("export A=1\n", encoding="utf-8")
     (root / ".git").mkdir()
     (root / ".git" / "config").write_text("[core]\n", encoding="utf-8")
     listing = run(toolset.list_directory("."))
-    assert ".env" not in listing and "pkg/" in listing
+    assert ".env" not in listing and "pkg/" in listing and ".envrc" not in listing
     pkg_listing = run(toolset.list_directory("pkg"))
     assert ".env" not in pkg_listing
-    found = run(toolset.find_files("*.env"))
+    # '**/*' — pathlib glob needs the recursive form to reach pkg/.env
+    found = run(toolset.find_files("**/*.env"))
     assert found == "No matches found."
+
+
+def test_envrc_denied_read(toolset, _saved):
+    (_saved.parent / ".envrc").write_text("export SECRET=x\n", encoding="utf-8")
+    with pytest.raises(ModelRetry, match="denied"):
+        read(toolset, ".envrc")
+
+
+def test_deny_branch_write_not_just_suffix_gate(toolset, _saved):
+    """Allowed-suffix paths that MATCH a deny pattern — the deny branch is the
+    only thing that can reject these (the suffix gate passes .py)."""
+    for denied_path in (".env.local.py", ".grc_agent/state.py", ".git/hooks/h.py"):
+        # .env.*/.git/* are also harness-PROTECTED patterns, which fire first
+        # for writes — either layer rejecting is the correct outcome here.
+        with pytest.raises(ModelRetry, match="denied|protected"):
+            write(toolset, denied_path, "x = 1\n")
+    assert not (_saved.parent / ".env.local.py").exists()
+
+
+def test_root_switch_follows_active_graph(toolset, _saved, tmp_path, monkeypatch):
+    """The dynamic-root core: one toolset object re-roots per call from the
+    provider — a tab switch moves the sandbox between tool calls."""
+    other_dir = tmp_path / "other_project"
+    other_dir.mkdir()
+    other_grc = other_dir / "other.grc"
+    shutil.copy(FIXTURES / "dial_tone.grc", other_grc)
+    (other_dir / "only_here.py").write_text("other = 1\n", encoding="utf-8")
+    (tmp_path / "only_here.py").unlink(missing_ok=True)
+
+    # Root 1: tmp_path (via the _saved fixture)
+    out = read(toolset, "proj.grc")  # exists only in root 1
+    assert "structural view" in out
+    # Switch the provider (what a tab switch does)
+    monkeypatch.setattr(fs_tools, "_active_grc_path_fn", lambda: other_grc)
+    # Same toolset: the sandbox moved — root-1-only files vanish, root-2 files appear
+    out = read(toolset, "only_here.py")
+    assert "other = 1" in out
+    with pytest.raises(ModelRetry, match="File not found"):
+        read(toolset, "proj.grc")
+    with pytest.raises(ModelRetry, match="File not found"):
+        read(toolset, "missing.grc")  # missing .grc must say File not found, not a parse error
+    # And switching back re-roots again
+    grc = _saved
+    monkeypatch.setattr(fs_tools, "_active_grc_path_fn", lambda: grc)
+    assert "structural view" in read(toolset, "proj.grc")
 
 
 def test_symlink_alias_to_grc_write_bypass_denied(toolset, _saved):

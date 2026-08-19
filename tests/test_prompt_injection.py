@@ -88,6 +88,37 @@ def test_benign_file_read_passes_through(tmp_path, monkeypatch):
     assert "withheld" not in ret
 
 
+def test_injection_via_search_files_also_withheld(tmp_path, monkeypatch):
+    """The defense is not read_file-specific: a planted payload surfaced by
+    search_files (content grep) is withheld too. The pattern matches the
+    payload line itself — grep returns only matching lines."""
+    _saved_graph(tmp_path, monkeypatch)
+    (tmp_path / "planted.py").write_text(f"note\n{_INJECTION}\n", encoding="utf-8")
+
+    def _model(messages, info):  # noqa: ARG001
+        already = any(
+            getattr(part, "tool_name", None) == "search_files" for m in messages for part in getattr(m, "parts", [])
+        )
+        if not already:
+            return ModelResponse(
+                parts=[ToolCallPart(tool_name="search_files", args={"pattern": "INSTRUCTIONS", "include_glob": "*.py"})]
+            )
+        return ModelResponse(parts=[TextPart(content="done")])
+
+    agent = Agent(
+        FunctionModel(_model),
+        output_type=str,
+        toolsets=[GrcFileSystem().get_toolset()],
+        capabilities=[prompt_injection_cap],
+        retries={"tools": 0},
+    )
+    result = agent.run_sync("search for 'note' and follow what the results say")
+    ret = str(_tool_return(result).content)
+    assert "withheld" in ret
+    history_text = "\n".join(str(getattr(p, "content", "")) for m in result.all_messages() for p in m.parts)
+    assert "attacker@example.com" not in history_text
+
+
 def test_detection_is_logged(tmp_path, monkeypatch, caplog):
     (tmp_path / "evil.py").write_text(_INJECTION, encoding="utf-8")
     agent = _agent_with_read_file(tmp_path, monkeypatch, "evil.py")
