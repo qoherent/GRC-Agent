@@ -599,7 +599,7 @@ def test_settings_dialog_save_warns_on_unserved_model(tmp_path, monkeypatch):
 
     sidebar = ChatSidebar()
     sidebar._apply_settings_save(
-        "ollama_local", "typo-model", "OLLAMA_API_KEY", "", "http://localhost:11434", "auto"
+        "ollama_local", "typo-model", "OLLAMA_API_KEY", "", "http://localhost:11434", "lexical"
     )
     # No popup: the save went through and the warning reached the status bar.
     assert load_settings()["model"] == "typo-model"
@@ -1443,6 +1443,38 @@ def test_badge_only_paragraph_not_dropped():
 
     textviews = [c for c in box.get_children() if isinstance(c, Gtk.TextView)]
     assert len(textviews) == 1
+
+
+def test_contiguous_prose_paragraphs_rendered_without_excess_widgets():
+    """Contiguous markdown paragraphs and headings group into a single TextView
+    with natural paragraph breaks rather than fragmenting into a separate widget
+    per paragraph (which stacked box spacing on top of line margins and caused
+    excessive height allocations)."""
+    from gi.repository import Gtk
+
+    from grc_agent.chat_sidebar import ChatSidebar
+
+    sidebar = ChatSidebar()
+    box = sidebar._start_agent_message()
+    md_text = (
+        "### Overview\n\n"
+        "Here is the first paragraph.\n\n"
+        "Here is the second paragraph with **bold** text.\n\n"
+        "```python\nprint('code')\n```\n\n"
+        "Here is the concluding paragraph."
+    )
+    sidebar._render_markdown_to_box(box, md_text, clear=True)
+
+    children = box.get_children()
+    # Should have: TextView (heading + 2 paragraphs), CodeBlock (pre), TextView (concluding paragraph)
+    assert len(children) == 3
+    assert isinstance(children[0], Gtk.TextView)
+    assert isinstance(children[2], Gtk.TextView)
+    buf = children[0].get_buffer()
+    text = buf.get_slice(buf.get_start_iter(), buf.get_end_iter(), True)
+    assert "Overview" in text
+    assert "first paragraph" in text
+    assert "second paragraph" in text
 
 
 def test_badge_hover_calls_canvas_highlight():

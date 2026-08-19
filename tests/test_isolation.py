@@ -49,92 +49,61 @@ def test_settings_isolation_and_defaults(tmp_path, monkeypatch):
 def test_db_and_model_isolation(tmp_path, monkeypatch):
     """Verify database filenames and embedding model settings are disjoint.
 
-    Ollama queries/embeddings should only target *_ollama.db.
-    OpenRouter queries/embeddings should only target *_openrouter.db.
+    "lexical" queries/indexes target *_lexical.db with model=None.
+    "llamacpp" queries/embeddings target *_llamacpp.db with EMBED_MODEL_ID.
     """
+    from grc_agent import embed_runtime
+
     tmp_env_file = tmp_path / ".env"
     monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_env_file))
 
-    # Test under Ollama provider
-    save_settings("ollama_local", "qwen3.6:35b-a3b-q4_K_M")
-    db_path_ollama, model_ollama = get_db_and_model("catalog")
-    assert db_path_ollama.endswith("catalog_ollama.db")
-    assert "catalog_openai_compatible.db" not in db_path_ollama
+    # Test under lexical backend (default)
+    save_settings("ollama_local", "qwen3.6:35b-a3b-q4_K_M", embed_backend="lexical")
+    db_path_lex, model_lex = get_db_and_model("catalog")
+    assert db_path_lex.endswith("catalog_lexical.db")
+    assert model_lex is None
 
-    # Test under OpenAI-Compatible provider
-    save_settings(
-        "openai_compatible",
-        "openai/gpt-4o-mini",
-        openai_compatible_base_url="https://openrouter.ai/api/v1",
-    )
-    db_path_compat, model_compat = get_db_and_model("catalog")
-    assert db_path_compat.endswith("catalog_openai_compatible.db")
-    assert "catalog_ollama.db" not in db_path_compat
+    # Test under Local Vector Search (llamacpp)
+    save_settings("ollama_local", "qwen3.6:35b-a3b-q4_K_M", embed_backend="llamacpp")
+    db_path_vec, model_vec = get_db_and_model("catalog")
+    assert db_path_vec.endswith("catalog_llamacpp.db")
+    assert model_vec == embed_runtime.EMBED_MODEL_ID
 
 
 def test_embed_endpoint_isolation(tmp_path, monkeypatch):
-    """Verify API endpoints and keys do not leak or overlap.
+    """Verify local llama.cpp endpoint returns socket and token."""
+    from grc_agent import embed_runtime
 
-    When Ollama is selected, it must target localhost:11434 and use 'not-needed'.
-    When OpenAI-compatible is selected, it must target configured endpoint and use key.
-    """
-    tmp_env_file = tmp_path / ".env"
-    monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_env_file))
-    monkeypatch.setenv("OPENAI_COMPATIBLE_API_KEY", "dummy-openrouter-key")
+    monkeypatch.setenv("GRC_AGENT_RUNTIME_DIR", str(tmp_path / "runtime"))
+    monkeypatch.setattr(embed_runtime, "ensure_server", lambda: "fake-token")
 
-    # Ollama provider check
-    save_settings("ollama_local", "qwen3.6:35b-a3b-q4_K_M")
-    base_url, api_key, _uds = _embed_endpoint()
-    assert base_url == "http://localhost:11434/v1"
-    assert api_key == "not-needed"
-
-    # OpenAI-compatible provider check
-    save_settings(
-        "openai_compatible",
-        "openai/gpt-4o-mini",
-        openai_compatible_base_url="https://openrouter.ai/api/v1",
-    )
-    base_url, api_key, _uds = _embed_endpoint()
-    assert base_url == "https://openrouter.ai/api/v1"
-    assert api_key == "dummy-openrouter-key"
+    base_url, api_key, uds = _embed_endpoint()
+    assert base_url == "http://llamacpp/v1"
+    assert api_key == "fake-token"
+    assert uds == str(embed_runtime.socket_path())
 
 
 def test_get_embed_client_never_returns_mismatched_client_for_key(tmp_path, monkeypatch):
-    """Regression: _embed_client/_embed_client_key used to be two separate
-    globals updated in two statements — a thread race between two different
-    endpoints (e.g. a provider switch overlapping a cold catalog+docs query)
-    could leave a NEW client paired with the OLD key-tag, so a later caller
-    computing the old key would see it "match" and silently reuse the wrong
-    endpoint/credentials. Bundled into one atomically-assigned tuple; this
-    verifies the client returned always matches the endpoint it was built
-    for, across repeated endpoint changes (a structural check that the
-    cache-key and the cached client can never be observed out of sync,
-    which the single-tuple design guarantees regardless of thread timing)."""
+    """Regression: _embed_client_state is updated atomically as a single tuple."""
     import grc_agent.adapter.rag as rag_mod
+    from grc_agent import embed_runtime
 
-    tmp_env_file = tmp_path / ".env"
-    monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_env_file))
-    monkeypatch.setenv("OPENAI_COMPATIBLE_API_KEY", "dummy-openrouter-key")
+    monkeypatch.setenv("GRC_AGENT_RUNTIME_DIR", str(tmp_path / "runtime"))
+    tokens = ["token-1", "token-2"]
+    monkeypatch.setattr(
+        embed_runtime, "ensure_server", lambda: tokens.pop(0) if tokens else "token-x"
+    )
     rag_mod._embed_client_state = None
 
     try:
-        save_settings("ollama_local", "qwen3.6:35b-a3b-q4_K_M")
-        client_ollama = rag_mod._get_embed_client()
-        assert str(client_ollama.base_url).rstrip("/") == "http://localhost:11434/v1"
+        client1 = rag_mod._get_embed_client()
+        assert client1.api_key == "token-1"
 
-        save_settings(
-            "openai_compatible",
-            "openai/gpt-4o-mini",
-            openai_compatible_base_url="https://openrouter.ai/api/v1",
-        )
-        client_openrouter = rag_mod._get_embed_client()
-        assert str(client_openrouter.base_url).rstrip("/") == "https://openrouter.ai/api/v1"
-        assert client_openrouter is not client_ollama
-
-        # Switch back — must rebuild again
-        save_settings("ollama_local", "qwen3.6:35b-a3b-q4_K_M")
-        client_ollama_again = rag_mod._get_embed_client()
-        assert str(client_ollama_again.base_url).rstrip("/") == "http://localhost:11434/v1"
+        # Force state invalidation to simulate token/server cycle
+        rag_mod._embed_client_state = None
+        client2 = rag_mod._get_embed_client()
+        assert client2.api_key == "token-2"
+        assert client2 is not client1
     finally:
         rag_mod._embed_client_state = None
 
@@ -596,7 +565,7 @@ def test_query_catalog_falls_back_to_lexical_when_embedding_unreachable(tmp_path
     tmp_vectors.mkdir()
     monkeypatch.setenv("GRC_AGENT_VECTORS_DIR", str(tmp_vectors))
     monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
-    save_settings("ollama_local", "qwen3.6:35b-a3b-q4_K_M")
+    save_settings("ollama_local", "qwen3.6:35b-a3b-q4_K_M", embed_backend="llamacpp")
     db_path, model = get_db_and_model("catalog")
 
     def fail_embed(text, model):  # noqa: ARG001
@@ -625,6 +594,31 @@ def test_query_catalog_falls_back_to_lexical_when_embedding_unreachable(tmp_path
         _FRESHNESS_CACHE.pop("catalog", None)
 
 
+def test_query_catalog_native_lexical_mode_has_no_fallback_message(tmp_path, monkeypatch):
+    """When the user explicitly chooses 'lexical' search, query_catalog runs in
+    lexical mode natively and does NOT attach an error or fallback message."""
+    from grc_agent.adapter import query_catalog
+    from grc_agent.adapter.rag import _FRESHNESS_CACHE
+
+    tmp_vectors = tmp_path / "vectors"
+    tmp_vectors.mkdir()
+    monkeypatch.setenv("GRC_AGENT_VECTORS_DIR", str(tmp_vectors))
+    monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
+    save_settings("ollama_local", "qwen3.6:35b-a3b-q4_K_M", embed_backend="lexical")
+
+    try:
+        res = query_catalog("low pass filter")
+        assert res["ok"] is True
+        assert res["search_mode"] == "lexical"
+        assert "message" not in res, (
+            "native lexical search should not attach a fallback/error message"
+        )
+        assert res["results"]
+        assert any("low_pass_filter" in r["block_id"] for r in res["results"])
+    finally:
+        _FRESHNESS_CACHE.pop("catalog", None)
+
+
 def test_query_catalog_lexical_message_present_even_when_embed_succeeds(tmp_path, monkeypatch):
     """Regression: a DB that's lexical-only (built during a past embedding
     outage) must still explain itself via "message" even when the CURRENT
@@ -641,7 +635,7 @@ def test_query_catalog_lexical_message_present_even_when_embed_succeeds(tmp_path
     tmp_vectors.mkdir()
     monkeypatch.setenv("GRC_AGENT_VECTORS_DIR", str(tmp_vectors))
     monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
-    save_settings("ollama_local", "qwen3.6:35b-a3b-q4_K_M")
+    save_settings("ollama_local", "qwen3.6:35b-a3b-q4_K_M", embed_backend="llamacpp")
     db_path, model = get_db_and_model("catalog")
 
     def fail_embed(text, model):  # noqa: ARG001
@@ -680,7 +674,7 @@ def test_query_docs_falls_back_to_lexical_when_embedding_unreachable(tmp_path, m
     tmp_vectors.mkdir()
     monkeypatch.setenv("GRC_AGENT_VECTORS_DIR", str(tmp_vectors))
     monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
-    save_settings("ollama_local", "qwen3.6:35b-a3b-q4_K_M")
+    save_settings("ollama_local", "qwen3.6:35b-a3b-q4_K_M", embed_backend="llamacpp")
     db_path, model = get_db_and_model("docs")
     docs_calls = []
 
@@ -1043,27 +1037,22 @@ def test_probe_backend_returns_none_on_success_and_error_on_failure():
 
 
 def test_embed_backend_is_independent_of_chat_provider(tmp_path, monkeypatch):
-    """The embeddings backend must be selectable on its own.
-
-    A chat endpoint that speaks the OpenAI API need not implement
-    /v1/embeddings — llama-server started without `--embeddings` answers 501 —
-    so pinning embeddings to the chat provider silently degrades the knowledge
-    base to lexical search with no way to fix it.
-    """
+    """The embeddings backend is independent of the chat provider:
+    "lexical" is the default, and "llamacpp" provides local vector search."""
     from grc_agent.settings import resolve_embed_backend
 
     monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
 
-    # "auto" (the default) keeps the historical behaviour: follow the chat provider.
+    # "lexical" is the default
     save_settings("openai_compatible", "some/model")
     cfg = load_settings()
-    assert cfg["embed_backend"] == "auto"
-    assert resolve_embed_backend(cfg) == "openai_compatible"
+    assert cfg["embed_backend"] == "lexical"
+    assert resolve_embed_backend(cfg) == "lexical"
 
     save_settings("ollama_local", "qwen3.6:35b-a3b-q4_K_M")
-    assert resolve_embed_backend(load_settings()) == "ollama"
+    assert resolve_embed_backend(load_settings()) == "lexical"
 
-    # Pinned explicitly, the chat provider no longer has any say.
+    # Pinned explicitly to llamacpp
     save_settings("openai_compatible", "some/model", embed_backend="llamacpp")
     cfg = load_settings()
     assert resolve_embed_backend(cfg) == "llamacpp"
@@ -1227,7 +1216,7 @@ def test_partial_embedding_failure_yields_no_vector_index(tmp_path, monkeypatch)
 
     monkeypatch.setenv("GRC_AGENT_VECTORS_DIR", str(tmp_path / "vectors"))
     monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
-    save_settings("ollama_local", "qwen3.6:35b-a3b-q4_K_M")
+    save_settings("ollama_local", "qwen3.6:35b-a3b-q4_K_M", embed_backend="llamacpp")
     db_path, model = get_db_and_model("catalog")
 
     calls = {"n": 0}
@@ -1289,14 +1278,13 @@ def test_codex_is_a_real_third_provider(tmp_path, monkeypatch):
     assert cfg["openai_codex_model"] == "gpt-5.1-codex"
 
 
-def test_codex_auto_embeddings_do_not_follow_a_backend_without_embeddings(tmp_path, monkeypatch):
-    """The Codex transport exposes no /v1/embeddings, so "auto" must not
-    resolve to it — every embed call would fail."""
+def test_codex_defaults_to_lexical_embeddings(tmp_path, monkeypatch):
+    """Codex defaults to lexical embeddings and supports llamacpp."""
     from grc_agent.settings import resolve_embed_backend
 
     monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
-    save_settings("openai_codex", "gpt-5.1-codex", embed_backend="auto")
-    assert resolve_embed_backend(load_settings()) == "ollama"
+    save_settings("openai_codex", "gpt-5.1-codex")
+    assert resolve_embed_backend(load_settings()) == "lexical"
 
     save_settings("openai_codex", "gpt-5.1-codex", embed_backend="llamacpp")
     assert resolve_embed_backend(load_settings()) == "llamacpp"

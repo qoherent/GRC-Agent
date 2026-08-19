@@ -26,7 +26,7 @@ def test_vector_db_dimension_check_is_cached(tmp_path, monkeypatch):
 
     from grc_agent.settings import save_settings
 
-    save_settings("ollama_local", "qwen3.6:35b-a3b-q4_K_M")
+    save_settings("ollama_local", "qwen3.6:35b-a3b-q4_K_M", embed_backend="llamacpp")
     db_path, model = get_db_and_model("catalog")
 
     # Build a minimal valid sqlite-vec DB with a known dimension so

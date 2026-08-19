@@ -52,11 +52,12 @@ def _open_db(db_path: str) -> sqlite3.Connection:
     return conn
 
 
-def _write_meta(conn: sqlite3.Connection, model: str, domain: str) -> None:
+def _write_meta(conn: sqlite3.Connection, model: str | None, domain: str) -> None:
     conn.execute("CREATE TABLE IF NOT EXISTS _db_meta (key TEXT PRIMARY KEY, value TEXT)")
-    conn.execute(
-        "INSERT OR REPLACE INTO _db_meta (key, value) VALUES ('embedding_model', ?)", (model,)
-    )
+    if model is not None:
+        conn.execute(
+            "INSERT OR REPLACE INTO _db_meta (key, value) VALUES ('embedding_model', ?)", (model,)
+        )
     conn.execute(
         "INSERT OR REPLACE INTO _db_meta (key, value) VALUES ('corpus_version', ?)",
         (_corpus_version(domain),),
@@ -64,7 +65,7 @@ def _write_meta(conn: sqlite3.Connection, model: str, domain: str) -> None:
 
 
 def ingest_catalog(  # noqa: C901
-    db_path: str, model: str, on_progress: Any = None
+    db_path: str, model: str | None, on_progress: Any = None
 ) -> int:
     platform = get_platform()
     block_ids = sorted(b for b in platform.blocks if not b.startswith("_"))
@@ -78,18 +79,19 @@ def ingest_catalog(  # noqa: C901
     fts_rows: list[tuple[str, str]] = []
     vec_rows: list[tuple[str, list[float]]] = []
 
-    # Probe embedding availability before the loop. If the embedding backend
-    # is unreachable or the model is not found, skip per-block embedding calls
-    # and build a lexical-only (FTS5) index cleanly without spamming failed requests.
-    can_embed = True
-    try:
-        embed_document("probe", model)
-    except Exception as exc:
-        _log.info(
-            "catalog: embedding backend unavailable (%s) — building lexical-only (FTS5) index",
-            exc,
-        )
-        can_embed = False
+    # Probe embedding availability before the loop. If in lexical mode (model is
+    # None), or if the embedding backend is unreachable / model is missing,
+    # skip per-block embedding calls and build a lexical-only (FTS5) index cleanly.
+    can_embed = bool(model)
+    if can_embed:
+        try:
+            embed_document("probe", model)  # type: ignore[arg-type]
+        except Exception as exc:
+            _log.info(
+                "catalog: embedding backend unavailable (%s) — building lexical-only (FTS5) index",
+                exc,
+            )
+            can_embed = False
 
     for i, block_id in enumerate(block_ids):
         # Render + embed; a failure for one block skips it without aborting the
@@ -211,7 +213,7 @@ def _chunk_markdown(text: str) -> list[tuple[str, str]]:
 
 
 def ingest_docs(  # noqa: C901
-    db_path: str, model: str, on_progress: Any = None
+    db_path: str, model: str | None, on_progress: Any = None
 ) -> int:
     corpus_dir = docs_dir()
     md_files = sorted(corpus_dir.glob("*.md"))
@@ -234,18 +236,19 @@ def ingest_docs(  # noqa: C901
     composed_list: list[str] = []
     vec_rows: list[tuple[int, list[float]]] = []
 
-    # Probe embedding availability before the loop. If the embedding backend
-    # is unreachable or the model is not found, skip per-chunk embedding calls
-    # and build a lexical-only (FTS5) index cleanly without spamming failed requests.
-    can_embed = True
-    try:
-        embed_document("probe", model)
-    except Exception as exc:
-        _log.info(
-            "docs: embedding backend unavailable (%s) — building lexical-only (FTS5) index",
-            exc,
-        )
-        can_embed = False
+    # Probe embedding availability before the loop. If in lexical mode (model is
+    # None), or if the embedding backend is unreachable / model is missing,
+    # skip per-chunk embedding calls and build a lexical-only (FTS5) index cleanly.
+    can_embed = bool(model)
+    if can_embed:
+        try:
+            embed_document("probe", model)  # type: ignore[arg-type]
+        except Exception as exc:
+            _log.info(
+                "docs: embedding backend unavailable (%s) — building lexical-only (FTS5) index",
+                exc,
+            )
+            can_embed = False
 
     for i, (path, heading, body) in enumerate(chunk_list):
         composed = f"path: {path}\nheading: {heading}\n{body}"

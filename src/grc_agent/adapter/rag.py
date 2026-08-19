@@ -13,7 +13,7 @@ from openai import APIConnectionError, APIStatusError, OpenAI
 
 from grc_agent import embed_runtime
 from grc_agent._paths import vectors_dir
-from grc_agent.settings import get_env_value, load_settings, resolve_embed_backend
+from grc_agent.settings import load_settings, resolve_embed_backend
 
 _log = logging.getLogger(__name__)
 
@@ -21,76 +21,37 @@ _log = logging.getLogger(__name__)
 def get_db_and_model(domain: str) -> tuple[str, str | None]:
     """Vector-DB path and embedding model name for `domain`.
 
-    The DB filename is keyed on the embedding *backend*, so switching backends
-    never queries one model's index with another model's vectors — and because
-    `_db_meta.embedding_model` records the model name, changing only the model
-    within a backend is caught as stale and triggers a rebuild.
+    "llamacpp" uses the bundled local EmbeddingGemma runtime with
+    `f"{domain}_llamacpp.db"`. "lexical" uses `f"{domain}_lexical.db"`
+    with model=None (pure FTS5/BM25 keyword search, zero dependencies).
     """
     cfg = load_settings()
     backend = resolve_embed_backend(cfg)
 
     if backend == "llamacpp":
-        model = embed_runtime.EMBED_MODEL_ID
+        model: str | None = embed_runtime.EMBED_MODEL_ID
         db_name = f"{domain}_llamacpp.db"
-    elif backend == "openai_compatible":
-        model = (
-            get_env_value("OPENAI_COMPATIBLE_EMBEDDING_MODEL")
-            or os.getenv("OPENAI_COMPATIBLE_EMBEDDING_MODEL")
-            or "perplexity/pplx-embed-v1-0.6b"
-        )
-        db_name = f"{domain}_openai_compatible.db"
     else:
-        model = get_env_value("OLLAMA_EMBEDDING_MODEL") or os.getenv(
-            "OLLAMA_EMBEDDING_MODEL", "embeddinggemma:latest"
-        )
-        db_name = f"{domain}_ollama.db"
+        model = None
+        db_name = f"{domain}_lexical.db"
 
     db_path = vectors_dir() / db_name
     return str(db_path), model
 
 
 def _embed_endpoint() -> tuple[str, str, str | None]:
-    """Shared (base_url, api_key, uds_path) selection for both query- and
-    document-side embedding calls.
+    """Shared (base_url, api_key, uds_path) selection for local llama.cpp
+    embedding calls.
 
-    `uds_path` is set only for the local llama.cpp backend, which listens on a
+    `uds_path` is set for the local llama.cpp backend, which listens on a
     UNIX socket rather than a TCP port — see `embed_runtime` for why.
     """
-    cfg = load_settings()
-    backend = resolve_embed_backend(cfg)
-
-    if backend == "llamacpp":
-        # Blocking: starts the server on first use and waits for /health.
-        # Every caller of this is already on a worker thread (query_knowledge
-        # dispatches via asyncio.to_thread, ingestion runs off-loop), so this
-        # never stalls the GTK main loop.
-        token = embed_runtime.ensure_server()
-        return "http://llamacpp/v1", token, str(embed_runtime.socket_path())
-
-    if backend == "openai_compatible":
-        url = (
-            cfg.get("openai_compatible_base_url")
-            or get_env_value("OPENAI_COMPATIBLE_BASE_URL")
-            or "https://openrouter.ai/api/v1"
-        ).rstrip("/")
-        base_url = url if url.endswith("/v1") else f"{url}/v1"
-        key = (
-            get_env_value("OPENAI_COMPATIBLE_API_KEY")
-            or os.getenv("OPENAI_COMPATIBLE_API_KEY")
-            or "not-needed"
-        )
-        return base_url, key, None
-
-    # ollama (local or remote)
-    raw_url = (
-        cfg.get("ollama_base_url") or get_env_value("OLLAMA_BASE_URL") or "http://localhost:11434"
-    ).rstrip("/")
-    base_url = raw_url if raw_url.endswith("/v1") else f"{raw_url}/v1"
-    if "ollama.com" in base_url:
-        key = get_env_value("OLLAMA_API_KEY") or os.getenv("OLLAMA_API_KEY") or "not-needed"
-    else:
-        key = "not-needed"
-    return base_url, key, None
+    # Blocking: starts the server on first use and waits for /health.
+    # Every caller of this is already on a worker thread (query_knowledge
+    # dispatches via asyncio.to_thread, ingestion runs off-loop), so this
+    # never stalls the GTK main loop.
+    token = embed_runtime.ensure_server()
+    return "http://llamacpp/v1", token, str(embed_runtime.socket_path())
 
 
 # (base_url, api_key, uds, client) as ONE tuple, replaced by a single atomic
@@ -137,46 +98,22 @@ def _get_embed_client() -> OpenAI:
 
 def _embed(model: str, input_text: str | list[str]) -> list[float] | list[list[float]]:
     client = _get_embed_client()
-    if resolve_embed_backend(load_settings()) == "llamacpp":
-        # The upstream word cap is an estimate; this backend has a hard token
-        # limit we can measure exactly, and exceeding it fails the request —
-        # which, under ingest.py's all-or-nothing rule, costs the whole vector
-        # index rather than one chunk. Done here rather than in embed_document
-        # because the limit belongs to the transport, not to how a document
-        # was composed.
-        input_text = (
-            [embed_runtime.fit_to_context(t) for t in input_text]
-            if isinstance(input_text, list)
-            else embed_runtime.fit_to_context(input_text)
-        )
+    input_text = (
+        [embed_runtime.fit_to_context(t) for t in input_text]
+        if isinstance(input_text, list)
+        else embed_runtime.fit_to_context(input_text)
+    )
     try:
         response = client.embeddings.create(model=model, input=input_text, encoding_format="float")
     except APIConnectionError as exc:
-        base_url, _, uds = _embed_endpoint()
-        if uds is not None:
-            hint = (
-                "The local llama.cpp embedding server is not answering; reinstall it from Settings."
-            )
-        elif "localhost" in base_url:
-            hint = f"Is `ollama serve` running locally, with `ollama pull {model}` done?"
-        else:
-            hint = "Check the API key and network connectivity."
+        base_url, _, _uds = _embed_endpoint()
+        hint = (
+            "The local llama.cpp embedding server is not answering; reinstall it from Settings."
+        )
         raise RuntimeError(f"Cannot reach the embeddings endpoint at {base_url}. {hint}") from exc
     except APIStatusError as exc:
         base_url, _, _uds = _embed_endpoint()
-        if exc.status_code == 404 and "localhost" in base_url:
-            hint = f"Model '{model}' not found in Ollama. Run `ollama pull {model}` to enable vector search."
-        elif exc.status_code in (404, 501):
-            # A chat endpoint that speaks the OpenAI API need not implement
-            # /v1/embeddings — llama-server started without `--embeddings`
-            # answers 501 here. Say so, rather than reporting a bare status.
-            hint = (
-                f"HTTP {exc.status_code}: this endpoint does not serve embeddings. "
-                "Pick a different embeddings backend in Settings (the bundled local "
-                "llama.cpp runtime needs nothing installed system-wide)."
-            )
-        else:
-            hint = f"HTTP {exc.status_code}: {exc.message}"
+        hint = f"HTTP {exc.status_code}: {exc.message}"
         raise RuntimeError(f"Embeddings request failed at {base_url}. {hint}") from exc
     if isinstance(input_text, list):
         return [d.embedding for d in response.data]
@@ -189,19 +126,8 @@ _QUERY_PREFIX = "task: search result | query: "
 def _uses_gemma_prefix(model: str | None) -> bool:
     """EmbeddingGemma is trained with task prefixes and is measurably worse
     without them; every other model is measurably worse *with* them, since the
-    prefix is just unexplained tokens.
-
-    One uniform rule, keyed on the resolved embedding model — the only thing
-    that determines whether the prefix is correct. This previously keyed on
-    `provider != "openrouter"`, but `load_settings()` normalizes "openrouter"
-    to "openai_compatible" and can no longer return it, so the condition was
-    always true and the Gemma prefix was being prepended for every backend,
-    including OpenAI-compatible endpoints serving non-Gemma models.
-
-    Applied identically by `embed_query` and `embed_document`, so a document
-    indexed one way is never queried the other.
-    """
-    return "embeddinggemma" in (model or "").lower()
+    prefix is just unexplained tokens."""
+    return bool(model and "embeddinggemma" in model.lower())
 
 
 def embed_query(query: str, domain: str = "catalog") -> list[float]:
@@ -344,7 +270,7 @@ def _build_lock_for(domain: str) -> threading.Lock:
     return _BUILD_LOCKS.setdefault(domain, threading.Lock())
 
 
-def _ensure_db_built(domain: str, db_path: str, model: str) -> None:
+def _ensure_db_built(domain: str, db_path: str, model: str | None) -> None:
     with _build_lock_for(domain):
         # The implementation re-checks os.path.exists + validity under the
         # lock, so a concurrent builder that finished first makes a waiting
@@ -352,7 +278,7 @@ def _ensure_db_built(domain: str, db_path: str, model: str) -> None:
         _build_db(domain, db_path, model)
 
 
-def _build_db(domain: str, db_path: str, model: str) -> None:  # noqa: C901
+def _build_db(domain: str, db_path: str, model: str | None) -> None:  # noqa: C901
     global _rag_building
 
     # Once a (domain, db_path, model) combo has been verified fresh in this
@@ -395,6 +321,9 @@ def _build_db(domain: str, db_path: str, model: str) -> None:  # noqa: C901
             if not fts_exists:
                 # Pre-lexical-fallback DB, built before FTS5 support existed.
                 reason = "missing lexical (FTS5) fallback index"
+            elif model is None:
+                if not meta or meta.get("corpus_version") != _corpus_version(domain):
+                    reason = "lexical DB is stale or missing metadata"
             elif sql_row and sql_row[0]:
                 match = re.search(r"float\[(\d+)\]", sql_row[0])
                 if match:
@@ -586,14 +515,15 @@ def _query_index(
     own response shape (catalog's block list vs docs' joined answer
     string).
     """
+    db_path, model = get_db_and_model(domain)
     embed_error: str | None = None
     query_vec: list[float] | None = None
-    try:
-        query_vec = embed_query(q, domain)
-    except Exception as exc:
-        embed_error = str(exc)
+    if model is not None:
+        try:
+            query_vec = embed_query(q, domain)
+        except Exception as exc:
+            embed_error = str(exc)
 
-    db_path, model = get_db_and_model(domain)
     try:
         _ensure_db_built(domain, db_path, model)
     except Exception as exc:
@@ -699,7 +629,7 @@ def query_catalog(query: str, limit: int = 5) -> dict[str, Any]:
         "output_truncated": result["output_truncated"],
         "search_mode": result["search_mode"],
     }
-    if result["search_mode"] == "lexical":
+    if result["search_mode"] == "lexical" and resolve_embed_backend(load_settings()) == "llamacpp":
         response["message"] = _lexical_fallback_message(result["embed_error"])
     return response
 
@@ -796,6 +726,6 @@ def query_docs(query: str, limit: int = 5) -> dict[str, Any]:
         "answer": answer,
         "search_mode": result["search_mode"],
     }
-    if result["search_mode"] == "lexical":
+    if result["search_mode"] == "lexical" and resolve_embed_backend(load_settings()) == "llamacpp":
         response["message"] = _lexical_fallback_message(result["embed_error"])
     return response

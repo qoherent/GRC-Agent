@@ -202,7 +202,7 @@ class SettingsDialog(Gtk.Dialog):
         self.embed_combo = Gtk.ComboBoxText()
         for backend in EMBED_BACKEND_ORDER:
             self.embed_combo.append_text(EMBED_BACKEND_LABELS[backend])
-        current = self._cfg.get("embed_backend", "auto")
+        current = self._cfg.get("embed_backend", "lexical")
         self.embed_combo.set_active(
             EMBED_BACKEND_ORDER.index(current) if current in EMBED_BACKEND_ORDER else 0
         )
@@ -227,17 +227,18 @@ class SettingsDialog(Gtk.Dialog):
 
     def _sync_embed_fields(self) -> None:
         idx = self.embed_combo.get_active()
-        backend = EMBED_BACKEND_ORDER[idx] if idx >= 0 else "auto"
+        backend = EMBED_BACKEND_ORDER[idx] if idx >= 0 else "lexical"
         is_local = backend == "llamacpp"
         self.embed_install_button.set_visible(is_local)
-        self.embed_status.set_visible(is_local)
+        self.embed_status.set_visible(True)
         if not is_local:
+            self.embed_status.set_text("Using SQLite FTS5/BM25 keyword search (no runtime required).")
             return
         if embed_runtime.is_provisioned():
             self.embed_status.set_text(f"Installed at {embed_runtime.data_dir()}")
             self.embed_install_button.set_label("Reinstall…")
         else:
-            self.embed_status.set_text("Not installed — vector search stays lexical until it is.")
+            self.embed_status.set_text("Not installed — vector search stays lexical until installed.")
             self.embed_install_button.set_label("Install local runtime…")
 
     def _on_install_embed_runtime(self, _btn: Gtk.Button) -> None:
@@ -322,7 +323,7 @@ class SettingsDialog(Gtk.Dialog):
         else:
             base_url = self.url_entry.get_text().strip() or "https://openrouter.ai/api/v1"
         eidx = self.embed_combo.get_active()
-        embed_backend = EMBED_BACKEND_ORDER[eidx] if eidx >= 0 else "auto"
+        embed_backend = EMBED_BACKEND_ORDER[eidx] if eidx >= 0 else "lexical"
         return provider, model, key_var, key_val, base_url, embed_backend
 
     def _on_response(self, _dlg: Gtk.Dialog, response: int) -> None:

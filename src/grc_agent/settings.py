@@ -11,8 +11,8 @@ Env vars (resolved by env_path(): GRC_AGENT_ENV override -> repo-root `.env`
   GRC_PROVIDER              active chat provider: ollama_local |
                             ollama_cloud | openrouter | openai |
                             openai_compatible | openai_codex
-  GRC_EMBED_BACKEND         embeddings backend: auto | ollama | llamacpp |
-                            openai_compatible ("auto" follows GRC_PROVIDER)
+  GRC_EMBED_BACKEND         embeddings backend: lexical | llamacpp
+                            (default: lexical)
   OLLAMA_CHAT_MODEL         Ollama chat model (local and cloud share it)
   OPENROUTER_MODEL          OpenRouter chat model
   OPENAI_MODEL              OpenAI API chat model
@@ -52,14 +52,11 @@ _VALID_PROVIDERS = (
     "openai_codex",
 )
 
-# Which backend serves RAG embeddings. Deliberately independent of the chat
-# provider: a chat endpoint that speaks the OpenAI API does not necessarily
-# implement /v1/embeddings (llama-server started without `--embeddings`
-# answers 501), and when it does not, vector search silently degrades to
-# lexical BM25. "auto" keeps the historical behaviour of following the chat
-# provider; the others pin it explicitly.
-_VALID_EMBED_BACKENDS = ("auto", "ollama", "llamacpp", "openai_compatible")
-_DEFAULT_EMBED_BACKEND = "auto"
+# Which backend serves RAG embeddings: "lexical" (SQLite FTS5/BM25 keyword
+# search, zero dependencies/runtime) or "llamacpp" (local llama.cpp runtime
+# serving EmbeddingGemma over a private UNIX socket).
+_VALID_EMBED_BACKENDS = ("lexical", "llamacpp")
+_DEFAULT_EMBED_BACKEND = "lexical"
 
 # Per-provider chat-model env var name + settings dict key.
 _PROVIDER_ENV_VAR = {
@@ -157,23 +154,13 @@ def env_path() -> Path:
 def resolve_embed_backend(cfg: dict) -> str:
     """The backend that actually serves embeddings for this config.
 
-    Resolves "auto" to the chat provider. Single source of truth so `rag.py`
-    (which picks the endpoint and the vector-DB filename) and the Settings
-    dialog can never disagree about which backend is in use.
+    Either "lexical" (SQLite FTS5/BM25, no runtime required) or "llamacpp"
+    (local llama.cpp runtime serving EmbeddingGemma).
     """
     backend = cfg.get("embed_backend", _DEFAULT_EMBED_BACKEND)
-    if backend != "auto":
+    if backend in _VALID_EMBED_BACKENDS:
         return backend
-    provider = cfg.get("provider", _DEFAULT_PROVIDER)
-    # "auto" can only follow a chat provider that also serves embeddings. The
-    # ChatGPT/Codex transport does not expose /v1/embeddings at all, so it
-    # falls back to the default rather than resolving to a backend that would
-    # fail every call.
-    if provider in ("ollama_local", "ollama_cloud"):
-        return "ollama"
-    if provider in ("openrouter", "openai", "openai_compatible"):
-        return "openai_compatible"
-    return "ollama"
+    return _DEFAULT_EMBED_BACKEND
 
 
 def default_settings() -> dict:

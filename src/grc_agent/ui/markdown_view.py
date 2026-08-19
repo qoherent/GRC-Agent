@@ -207,13 +207,13 @@ class MarkdownView:
                 self._insert_plain_tagged(buffer, f"  {prefix}  ", active_tags)
                 for child in li.children:
                     self._element_to_buffer(child, buffer, tv, active_tags)
-                self._insert_plain_tagged(buffer, "\n", active_tags)
+                if i < len(li_children):
+                    self._insert_plain_tagged(buffer, "\n", active_tags)
             return
 
         if tag in ("p", "div"):
             for child in element.children:
                 self._element_to_buffer(child, buffer, tv, active_tags)
-            self._insert_plain_tagged(buffer, "\n", active_tags)
         elif tag in ("strong", "b"):
             for child in element.children:
                 self._element_to_buffer(child, buffer, tv, active_tags + ["bold"])
@@ -226,7 +226,6 @@ class MarkdownView:
         elif tag in ("h1", "h2", "h3", "h4", "h5", "h6"):
             for child in element.children:
                 self._element_to_buffer(child, buffer, tv, active_tags + ["heading"])
-            self._insert_plain_tagged(buffer, "\n", active_tags)
         elif tag == "a":
             href = element.get("href", "")
             # Theme fg + underline + hover pointer (see _on_prose_motion_notify).
@@ -243,7 +242,6 @@ class MarkdownView:
             self._insert_plain_tagged(buffer, "  \u2022  ", active_tags)
             for child in element.children:
                 self._element_to_buffer(child, buffer, tv, active_tags)
-            self._insert_plain_tagged(buffer, "\n", active_tags)
         elif tag in ("table", "thead", "tbody", "tr", "td", "th", "pre"):
             # Never reached — render() intercepts <table>/<pre> at the top level.
             return
@@ -286,9 +284,14 @@ class MarkdownView:
         width and wraps one word per line. Measure the text's unwrapped Pango
         extent, cap it at the available column width, and floor it at the badges'
         own widths so a badge-heavy bubble still fits its pills."""
-        layout = tv.create_pango_layout(plain_text)
+        layout = tv.create_pango_layout(plain_text.strip())
         _ink, logical = layout.get_pixel_extents()
-        available = self._listbox.get_allocated_width() or 320
+        allocated = self._listbox.get_allocated_width()
+        available = (
+            allocated
+            if allocated > 160
+            else (self._last_listbox_width if self._last_listbox_width > 160 else 320)
+        )
         max_width = max(160, available - 90)
         width = min(logical.width, max_width)
         badges = [c for c in tv.get_children() if getattr(c, "grc_is_badge", False)]
@@ -299,7 +302,7 @@ class MarkdownView:
 
     def _on_listbox_size_allocate(self, _listbox: Gtk.ListBox, allocation: Any) -> None:
         width = allocation.width
-        if width == self._last_listbox_width:
+        if width <= 160 or width == self._last_listbox_width:
             return
         self._last_listbox_width = width
         # Defer — multiple allocates during a drag schedule one idle source,
@@ -342,27 +345,51 @@ class MarkdownView:
             html = md.render(text)
             soup = BeautifulSoup(html, "html.parser")
 
+            current_tv: Gtk.TextView | None = None
+            current_buffer: Gtk.TextBuffer | None = None
+            current_plain: list[str] = []
+
+            def _flush_prose():
+                nonlocal current_tv, current_buffer, current_plain
+                if current_tv is None or current_buffer is None:
+                    return
+                content = current_buffer.get_slice(
+                    current_buffer.get_start_iter(), current_buffer.get_end_iter(), True
+                ).strip()
+                if content:
+                    plain_text = "".join(current_plain).strip()
+                    current_tv.grc_plain_for_size = plain_text
+                    self._size_prose_textview_to_content(current_tv, plain_text)
+                    box.pack_start(current_tv, False, False, 0)
+                current_tv = None
+                current_buffer = None
+                current_plain = []
+
             for element in soup.contents:
                 if not element.name:
                     t = str(element).strip()
                     if t:
-                        tv = self._make_prose_textview()
-                        buffer = tv.get_buffer()
-                        self._ensure_buffer_tags(buffer)
-                        self._insert_prose_text_with_badges(buffer, t, [], tv)
-                        tv.grc_plain_for_size = t
-                        self._size_prose_textview_to_content(tv, t)
-                        box.pack_start(tv, False, False, 0)
+                        if current_tv is None:
+                            current_tv = self._make_prose_textview()
+                            current_buffer = current_tv.get_buffer()
+                            self._ensure_buffer_tags(current_buffer)
+                        elif current_buffer.get_char_count() > 0:
+                            self._insert_plain_tagged(current_buffer, "\n\n", [])
+                            current_plain.append("\n\n")
+                        self._insert_prose_text_with_badges(current_buffer, t, [], current_tv)
+                        current_plain.append(t)
                     continue
 
                 tag = element.name
                 if tag == "table":
+                    _flush_prose()
                     headers, rows = parse_table(element)
                     if headers or rows:
                         box.pack_start(
                             TableBlock(headers, rows, self.render_inline), False, False, 0
                         )
                 elif tag == "pre":
+                    _flush_prose()
                     code_text = element.get_text().replace("\u00a0", " ").replace("\xa0", " ")
                     lang = ""
                     code_child = element.find("code")
@@ -373,22 +400,20 @@ class MarkdownView:
                                 break
                     box.pack_start(CodeBlock(lang, code_text), False, False, 0)
                 else:
-                    tv = self._make_prose_textview()
-                    buffer = tv.get_buffer()
-                    self._ensure_buffer_tags(buffer)
-                    self._element_to_buffer(element, buffer, tv, active_tags=[])
-                    # get_slice (not get_text) — get_text() drops the U+FFFC
-                    # child-anchor placeholder, so a badge-only paragraph would
-                    # look "empty" and get silently dropped.
-                    content = buffer.get_slice(
-                        buffer.get_start_iter(), buffer.get_end_iter(), True
-                    ).strip()
-                    if content:
-                        tv.grc_plain_for_size = element.get_text()
-                        self._size_prose_textview_to_content(tv, element.get_text())
-                        box.pack_start(tv, False, False, 0)
+                    if current_tv is None:
+                        current_tv = self._make_prose_textview()
+                        current_buffer = current_tv.get_buffer()
+                        self._ensure_buffer_tags(current_buffer)
+                    elif current_buffer.get_char_count() > 0:
+                        self._insert_plain_tagged(current_buffer, "\n\n", [])
+                        current_plain.append("\n\n")
+                    self._element_to_buffer(element, current_buffer, current_tv, active_tags=[])
+                    current_plain.append(element.get_text())
 
+            _flush_prose()
             box.show_all()
+            if self._rewrap_idle_id is None and not self._shutting_down:
+                self._rewrap_idle_id = GLib.idle_add(self._do_idle_rewrap)
         except Exception as e:
             _log.warning("MarkdownView.render failed: %s", e)
             lbl = self._make_plain_label(text)

@@ -2300,7 +2300,7 @@ class ChatSidebar(Gtk.Box):
         key_var: str | None,
         key_val: str,
         base_url: str = "http://localhost:11434",
-        embed_backend: str = "auto",
+        embed_backend: str = "lexical",
     ) -> None:
         """Post-Save flow: preflight → persist → live-swap.
 

@@ -7,6 +7,23 @@ Versioning starts fresh at `0.1.0` for the current native GTK3 architecture —
 earlier `v1.0.0`/`v2.0.0` tags belonged to an unrelated, since-rewritten
 web-dashboard codebase and are not part of this history.
 
+## [Unreleased]
+
+### Added
+- Consolidated Search Architecture: knowledge base search is consolidated into two first-class options — default Lexical Search (instant SQLite FTS5 with BM25 ranking, zero external dependencies or background processes) and Local Vector Search (in-tree `llama.cpp` + `EmbeddingGemma-300M-QAT` over a private UNIX domain socket).
+- `ResilientSummarizingCompaction` and manual `compact_now` toolbar button: summarizes aging turns when approaching context limits while preserving all user prompts (`keep_user_messages=True`) and degrading gracefully if summarization fails.
+- `ConversationSearch` capability over `SnapshotHistorySource(store)`: allows the agent to search through prior turn snapshots even after context compaction.
+- Continuous prose grouping in `MarkdownView`: contiguous markdown paragraphs, headings, and lists stream into a single `Gtk.TextBuffer` for unified selection and natural paragraph spacing.
+
+### Changed
+- Unbounded snapshot retention (`max_snapshots_per_run=None`) across all settled tool boundaries to ensure `ConversationSearch` has access to uncompacted history.
+- Settings dialog simplified to the 2 clean search options with inline status and installation triggers.
+- Replaced blocking modal warning dialogs on model mismatch with non-blocking status-bar notifications backed by `probe_backend`.
+
+### Fixed
+- Fixed ghost vertical gaps below chat markdown paragraphs in GTK3 caused by unallocated initial listbox widths (`allocated_width <= 1`) forcing a 160px wrap calculation and excessive height allocations.
+- Fixed widget fragmentation in markdown rendering by keeping specialized container widgets (`CodeBlock`, `TableBlock`) distinct while consolidating plain prose.
+
 ## [0.2.0] - 2026-08-17
 
 ### Added

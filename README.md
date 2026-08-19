@@ -135,7 +135,6 @@ The active provider, model name, base URL, and API keys persist in `.env` and ap
 - **Local Ollama:**
   ```bash
   ollama pull qwen3.6:35b-a3b-q4_K_M   # chat model
-  ollama pull embeddinggemma:latest    # embedding model (optional — FTS5 lexical search is used if unavailable)
   ```
 - **Ollama Cloud:** pick **Ollama Cloud** in Settings (the endpoint is fixed), Model `deepseek-v4-flash:cloud`, and enter your [Ollama Cloud API Key](https://ollama.com/settings/keys).
 
@@ -180,28 +179,14 @@ Requires an active ChatGPT Plus or Pro subscription. Tokens are stored in
 `.env`, and there is no base URL or API key to configure. Codex serves no
 embeddings endpoint, so choose an embeddings backend below.
 
-#### Embeddings for vector search
-Vector search (`query_knowledge`) needs an embeddings endpoint, and that is
-chosen **independently of the chat provider** in the Settings dialog — many
-chat endpoints do not serve embeddings at all (`llama-server` started without
-`--embeddings` answers HTTP 501). Options:
+#### Embeddings for knowledge base search
+The knowledge base search (`query_knowledge`) backend is chosen in the Settings dialog:
 
-- **Local llama.cpp (bundled)** — click *Install local runtime…* in Settings.
-  Downloads a pinned `llama.cpp` build and the EmbeddingGemma GGUF (~345 MB
-  total, less if you already have `llama-server` on your `PATH`) into
-  `~/.local/share/grc-agent`. Nothing is installed system-wide, and it needs
-  no Ollama.
-- **Ollama** — `ollama pull embeddinggemma:latest`.
-- **OpenAI-Compatible** — uses your configured chat endpoint, if it serves
-  `/v1/embeddings`.
-- **Follow chat provider** (default) — whichever of the two above matches your
-  chat provider.
+- **Lexical Search (default)** — fast SQLite FTS5 (BM25) keyword search over GNU Radio blocks and documentation with zero extra downloads or background processes.
+- **Local Vector Search (llama.cpp + EmbeddingGemma)** — click *Install local runtime…* in Settings. Downloads a pinned `llama.cpp` build and the quantized `EmbeddingGemma-300M-QAT` GGUF (~345 MB total download) into `~/.local/share/grc-agent` running over a private UNIX socket. Nothing is installed system-wide.
 
 > [!NOTE]
-> If the embeddings backend is unreachable, search falls back to local SQLite
-> FTS5 (BM25) keyword search over the same corpus with no manual setup — the
-> tool result always reports `"search_mode": "lexical"` (vs. `"vector"`), so
-> the degradation is never silent.
+> If Local Vector Search is selected but the local runtime is not yet installed or is unreachable, search automatically falls back to local SQLite FTS5 (BM25) keyword search with a clear status message.
 
 ---
 

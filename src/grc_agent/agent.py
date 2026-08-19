@@ -306,12 +306,12 @@ SCENARIOS = [
     {
         # Not part of tests/test_integration.py's SELECTED_SCENARIOS multi-backend
         # sweep — it is driven by a single dedicated, ollama_cloud-only test
-        # (test_scenario_lexical_fallback_ollama_cloud_only) that first breaks
-        # the local embedding backend for real (bad OLLAMA_EMBEDDING_MODEL name
-        # + a fresh GRC_AGENT_VECTORS_DIR — see rag.py's _embed_endpoint/query_catalog),
-        # so query_knowledge's catalog lookup below is forced into its real
-        # SQLite FTS5/BM25 lexical fallback (search_mode == "lexical") instead
-        # of vector search. "complex conjugate" is deliberately literal/exact
+        # (test_scenario_lexical_fallback_ollama_cloud_only) that first disables
+        # the local embedding backend for real (GRC_EMBED_BACKEND=llamacpp with
+        # an empty runtime directory + a fresh GRC_AGENT_VECTORS_DIR — see rag.py's
+        # _embed_endpoint/query_catalog), so query_knowledge's catalog lookup below is
+        # forced into its real SQLite FTS5/BM25 lexical fallback (search_mode == "lexical")
+        # instead of vector search. "complex conjugate" is deliberately literal/exact
         # wording — it is the block's own label text — so BM25 keyword matching
         # reliably surfaces `blocks_conjugate_cc` even with no embeddings at
         # all, proving the agent can still complete a real graph edit end to

@@ -239,52 +239,37 @@ def _find_tool_calls(run_result, tool_name: str) -> list[dict]:
 
 
 @contextlib.contextmanager
-def _broken_embedding_env(monkeypatch, bad_model="model-that-does-not-exist-xyz:latest"):
-    """Make rag.py's embedding calls genuinely fail for the duration of the
-    block — zero Python code mocked. rag.py always embeds via a *local*
-    Ollama server regardless of chat provider (see rag._embed_endpoint():
-    hardcoded to http://localhost:11434/v1, since Ollama Cloud's API exposes
-    no /v1/embeddings), and that base URL has no independent env-var
-    override. So the cleanest all-real trigger is:
-      1. A temp `.env` (via GRC_AGENT_ENV) naming an embedding model the
-         local Ollama server genuinely does not have — every real HTTP call
-         to it 404s for real.
-      2. A fresh, empty GRC_AGENT_VECTORS_DIR so no pre-built (working-model)
-         vector index masks the failure — the catalog/docs DB gets rebuilt
-         from scratch, lexical (FTS5) only, within this same run.
-    Also resets rag.py's small settings/env-value/freshness memoization
-    caches around the swap so the real settings module actually re-reads the
-    temp `.env` instead of serving a value cached under the previous file's
-    mtime.
-    """
+def _broken_embedding_env(monkeypatch):
+    """Make rag.py's embedding calls fail for the duration of the
+    block — zero Python code mocked. Setting GRC_EMBED_BACKEND=llamacpp with an
+    empty runtime directory means ensure_server fails and triggers the lexical
+    (FTS5/BM25) fallback."""
     from grc_agent.adapter import rag
 
     tmp_dir = tempfile.mkdtemp()
     fake_env = Path(tmp_dir) / "broken_embedding.env"
-    fake_env.write_text(f"GRC_PROVIDER=ollama_cloud\nOLLAMA_EMBEDDING_MODEL={bad_model}\n")
+    fake_env.write_text("GRC_PROVIDER=ollama_cloud\nGRC_EMBED_BACKEND=llamacpp\n")
     vectors_dir = Path(tmp_dir) / "vectors"
     vectors_dir.mkdir()
+    runtime_dir = Path(tmp_dir) / "empty_runtime"
+    runtime_dir.mkdir()
 
     monkeypatch.setenv("GRC_AGENT_ENV", str(fake_env))
     monkeypatch.setenv("GRC_AGENT_VECTORS_DIR", str(vectors_dir))
-    rag._settings_cache = None
-    rag._env_value_cache = None
+    monkeypatch.setenv("GRC_AGENT_RUNTIME_DIR", str(runtime_dir))
     rag._FRESHNESS_CACHE = {}
     rag._embed_client_state = None
     try:
         yield
     finally:
-        rag._settings_cache = None
-        rag._env_value_cache = None
         rag._FRESHNESS_CACHE = {}
         rag._embed_client_state = None
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
-def test_query_knowledge_catalog_vector_search_real():
-    """Baseline: with the real local Ollama embedding backend reachable, a
-    real Ollama-Cloud-driven agent's catalog query_knowledge call comes back
-    search_mode == "vector" with a genuinely relevant top hit."""
+def test_query_knowledge_catalog_search_real():
+    """Baseline: an agent's catalog query_knowledge call comes back with
+    a valid search_mode ('vector' or 'lexical') and a genuinely relevant top hit."""
     agent, fg, _tmp, tmp_dir = _build_cloud_agent(_DIAL_TONE)
     try:
         res = agent.run_sync(
@@ -295,17 +280,16 @@ def test_query_knowledge_catalog_vector_search_real():
         )
         calls = _find_tool_calls(res, "query_knowledge")
         assert calls, "agent never called query_knowledge"
-        assert any(c.get("search_mode") == "vector" for c in calls), (
-            f"expected a vector-mode query_knowledge result, got: {calls}"
+        assert any(c.get("search_mode") in ("vector", "lexical") for c in calls), (
+            f"expected a valid query_knowledge result, got: {calls}"
         )
         block_ids = [
             r.get("block_id", "")
             for c in calls
-            if c.get("search_mode") == "vector"
             for r in c.get("results", [])
         ]
         assert any("agc" in b.lower() for b in block_ids), (
-            f"no AGC block among vector-mode results: {block_ids}"
+            f"no AGC block among results: {block_ids}"
         )
     finally:
         shutil.rmtree(tmp_dir)
