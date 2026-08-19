@@ -35,6 +35,7 @@ from grc_agent.agent import (
     web_search_cap,
 )
 from grc_agent.db import get_step_store
+from grc_agent.fs_tools import GrcFileSystem
 from grc_agent.prompts import build_system_prompt
 from grc_agent.settings import default_settings, get_env_value, load_settings
 
@@ -641,6 +642,7 @@ def build_agent_from_cfg(cfg: dict) -> tuple[Agent, str | None]:
             _build_compaction_capability(cfg),
             web_search_cap,
             web_fetch_cap,
+            GrcFileSystem(),
         ],
         model_settings=model_settings,
         retries={"tools": 3, "output": 3},

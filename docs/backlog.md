@@ -13,22 +13,11 @@ Active feature requests, architectural improvements, and planned capabilities. C
   2. **Implementation**: Writing and editing block processing logic in Python or C++.
   3. **Block Descriptors**: Creating and updating companion block YAML configuration files (`.yml`).
   4. **Build & Install**: Orchestrating `cmake`, `make`, and installation workflows so GRC discovers the new block.
-* **Current State**: Confined to flowgraph layout/configuration and native hier-block library export via [`save_block`](../src/grc_agent/adapter/block_library.py). Direct compiler, shell, and `gr-modtool` orchestration is not yet supported.
+* **Current State**: Confined to flowgraph layout/configuration and native hier-block library export via [`save_block`](../src/grc_agent/adapter/block_library.py). Direct compiler, shell, and `gr-modtool` orchestration is not yet supported — but the filesystem tools ([`fs_tools.py`](../src/grc_agent/fs_tools.py)) already let the agent scaffold and edit OOT source/config files (`.py`/`.yml`/CMake/C++ all pass the write-suffix allowlist) inside the flowgraph's folder; building/installing remains the user's job.
 
 ---
 
-### 2. FileSystem Tools for `.grc` Project Folders
-* **Status**: ⏳ Approved in principle — Design open
-* **Scope**: Give the agent filesystem tools (`pydantic_ai_harness.filesystem`) to inspect and edit helper files in the user's active flowgraph directory (e.g. calibration data, Python scripts, sample files).
-* **Key Design Decisions**:
-  - **Dynamic Root Scope**: Bind `root_dir` dynamically to the active `.grc` file's directory (following tab switches).
-  - **Handling `untitled.grc`**: Gate filesystem access on the flowgraph being saved to disk at least once.
-  - **Safety Envelope**: Read/write permissions with strict path exclusions (`.env`, `~/.config`, `.grc_gnuradio`, `.git`).
-  - **Save Discipline**: File mutations must follow the atomic-save pattern established in [`adapter/graph.py`](../src/grc_agent/adapter/graph.py).
-
----
-
-### 3. Durable Planner → Executor Handoff (`SqlitePlanStore`)
+### 2. Durable Planner → Executor Handoff (`SqlitePlanStore`)
 * **Status**: ⏳ Approved in concept
 * **Scope**: Make the harness `Planning` capability durable across user turns within the same chat session.
 * **Key Design Decisions**:

@@ -10,6 +10,8 @@ web-dashboard codebase and are not part of this history.
 ## [Unreleased]
 
 ### Added
+- Filesystem tools (`fs_tools.py`, harness `FileSystemToolset` subclass): eight sandboxed tools (`read_file`, `write_file`, `edit_file`, `list_directory`, `search_files`, `find_files`, `create_directory`, `file_info`) scoped to the active flowgraph's project folder, re-resolved per tool call (tab switches and saves are followed; unsaved tabs gate with a clear "save first" error). `.grc` files never reach the model as raw XML — `read_file` routes them through the structural `inspect_graph` engine — and can never be written (`change_graph` owns flowgraph edits); writes are limited to a source/config suffix allowlist (OOT-module-ready) and are atomic (temp → fsync → rename). Reads capped at 1000 lines, listings at 200 entries; `.env*` and `.grc_agent/` denied outright.
+- Upgraded `pydantic-ai-harness` 0.21.0 → 0.23.0 (adds the `list_directory` result cap and symlink-hardened walker authorization we rely on).
 - Consolidated Search Architecture: knowledge base search is consolidated into two first-class options — default Lexical Search (instant SQLite FTS5 with BM25 ranking, zero external dependencies or background processes) and Local Vector Search (in-tree `llama.cpp` + `EmbeddingGemma-300M-QAT` over a private UNIX domain socket).
 - `ResilientSummarizingCompaction` and manual `compact_now` toolbar button: summarizes aging turns when approaching context limits while preserving all user prompts (`keep_user_messages=True`) and degrading gracefully if summarization fails.
 - `ConversationSearch` capability over `SnapshotHistorySource(store)`: allows the agent to search through prior turn snapshots even after context compaction.

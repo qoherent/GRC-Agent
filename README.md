@@ -76,6 +76,7 @@ flowchart TB
 | `db.py` | SQLite chat-session persistence (save/load/delete, recent-sessions list) plus the harness `SqliteStepStore` (runs/events/snapshots, created lazily) on the same file, with session-scoped cascade cleanup. |
 | `adapter/` | Sole `gnuradio` importer. Flowgraph load/save, `change_graph`, param filtering, RAG (vector search with an SQLite FTS5 lexical fallback) with cached embed client, codegen. |
 | `agent.py` | PydanticAI tools (`inspect_graph`, `query_knowledge`, `generate_python`, `change_graph`, `get_run_log`, `save_block`), capabilities, scenario harness. |
+| `fs_tools.py` | Filesystem tools sandboxed to the active flowgraph's folder — `.grc` reads route through the inspect engine, writes are suffix-allowlisted + atomic. |
 | `prompts.py` | The agent's system prompt — one uniform rule per concern. |
 | `settings.py` | Persisted preferences (provider, models, API keys) in `.env` via `python-dotenv`. |
 | `ingest.py` | Builds the catalog/docs vector databases on first use. |
@@ -228,6 +229,7 @@ uv run ruff check                             # lint
 - `Find a low-pass filter block.`
 - `Change samp_rate to 48000 and validate.`
 - `Change the signal source frequency from 440 to 1000.`
+- `Read helper.py in this flowgraph's folder and explain what it does.`
 
 ---
 

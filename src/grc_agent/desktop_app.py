@@ -10,7 +10,7 @@ import gi
 gi.require_version("Gtk", "3.0")
 gi.require_version("Gdk", "3.0")
 
-from grc_agent import embed_runtime, event_loop
+from grc_agent import embed_runtime, event_loop, fs_tools
 
 event_loop.install()
 
@@ -255,6 +255,15 @@ def build_app() -> tuple[Gtk.Window, NativeCanvasManager, ChatSidebar, NativeFlo
     canvas.setup_signal_handlers()
     proxy = NativeFlowgraphProxy(canvas, exec_monitor=exec_monitor)
     sidebar.set_flowgraph_proxy(proxy)
+
+    # Filesystem tools sandbox root: the active flowgraph's folder, resolved
+    # lazily per tool call (tab switches and saves are followed). Installed
+    # after the agent build because the canvas manager exists only here — the
+    # tools are gated on a saved flowgraph until then.
+    fs_tools.set_active_graph_providers(
+        grc_path_fn=lambda: canvas.path,
+        flow_graph_fn=lambda: canvas.current_flow_graph,
+    )
 
     _sync_sidebar(canvas, sidebar)
 
