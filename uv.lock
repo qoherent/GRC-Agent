@@ -1029,7 +1029,7 @@ dependencies = [
     { name = "openai" },
     { name = "pydantic" },
     { name = "pydantic-ai", extra = ["web-fetch"] },
-    { name = "pydantic-ai-harness" },
+    { name = "pydantic-ai-harness", extra = ["prompt-injection-defender"] },
     { name = "pydantic-graph" },
     { name = "python-dotenv" },
     { name = "sqlite-vec" },
@@ -1062,7 +1062,7 @@ requires-dist = [
     { name = "playwright", marker = "extra == 'dev'", specifier = ">=1.48" },
     { name = "pydantic", specifier = ">=2.0" },
     { name = "pydantic-ai", extras = ["web-fetch"], specifier = ">=2.7.0,<3" },
-    { name = "pydantic-ai-harness", specifier = ">=0.23.0" },
+    { name = "pydantic-ai-harness", extras = ["prompt-injection-defender"], specifier = ">=0.23.0" },
     { name = "pydantic-graph", specifier = ">=2.7.0,<3" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0.0" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=1.0" },
@@ -2450,6 +2450,11 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/a8/d0/1a498edb97fa2d15206a7eeff6fb313f7e13b6301683dc3761df3d52b051/pydantic_ai_harness-0.23.0-py3-none-any.whl", hash = "sha256:081252b7aa95ff52d40ff29880119463adb69e8241d72e2bff95b2e094207d8c", size = 642445, upload-time = "2026-08-19T04:01:50.866Z" },
 ]
 
+[package.optional-dependencies]
+prompt-injection-defender = [
+    { name = "stackone-defender" },
+]
+
 [[package]]
 name = "pydantic-ai-slim"
 version = "2.31.0"
@@ -3116,6 +3121,15 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/f8/00/b42a44342a054d58cb1115d7c8aa9cb4290dd9442f9c1b91a4b8173dba22/sse_starlette-3.4.8.tar.gz", hash = "sha256:ed89ffbb75cbf78a5fe2f2109cd584792ee7f9dfac96f791db546df8f15f3f9c", size = 32548, upload-time = "2026-08-05T11:19:49.982Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/dd/3a/764912c58293d95b6dcdf4cc255f9d10de310580ced547b082eb9d72018c/sse_starlette-3.4.8-py3-none-any.whl", hash = "sha256:6e82314c786709a3cd9520f2285cf9fff90e181e598e8a357b0cf80f66afba0d", size = 16516, upload-time = "2026-08-05T11:19:48.748Z" },
+]
+
+[[package]]
+name = "stackone-defender"
+version = "0.7.4"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/1d/26/964ccaa630c8ca1d2c55bc7a5981b3972a7325519d53a11613c3ac980e74/stackone_defender-0.7.4.tar.gz", hash = "sha256:cf0e5c0fd4fffec21f33849740b2b05ef9e7ad288cb4f343cc12ad5690f51c2d", size = 18830684, upload-time = "2026-08-14T09:25:55.531Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ac/d9/4abb92ae181c3aa86e0c9569ec79bc5c66d04ca3328bb1934ea57b5cd858/stackone_defender-0.7.4-py3-none-any.whl", hash = "sha256:2c8061475ea934daf6ae5eb2f60e047ce37654b740ddb1e9758641ffe0b0150f", size = 18777035, upload-time = "2026-08-14T09:25:51.732Z" },
 ]
 
 [[package]]

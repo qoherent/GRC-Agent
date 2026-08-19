@@ -30,6 +30,7 @@ from grc_agent.agent import (
     GrcAgentResponse,
     StopGracefully,
     grc_tools,
+    prompt_injection_cap,
     validate_flowgraph_state,
     web_fetch_cap,
     web_search_cap,
@@ -453,7 +454,11 @@ class ResilientSummarizingCompaction(SummarizingCompaction):
     `_summarizing_compaction.py:_summarize`, `_agent_graph.py:1515`,
     `capabilities/abstract.py:652`). On failure the pre-compact history is
     kept unchanged; TieredCompaction then escalates to the zero-LLM
-    SlidingWindow backstop. Also covers Codex: its transport only accepts
+    SlidingWindow backstop (verified: `_tiered_compaction.py:_escalate`
+    re-measures after each tier and continues past an unchanged one — also
+    why upstream `FallbackCompaction` was evaluated and not adopted: no
+    semantic gain over this return-unchanged path, only added nesting).
+    Also covers Codex: its transport only accepts
     streaming requests, so the non-streaming summarizer always fails there —
     graceful by design.
     """
@@ -643,6 +648,7 @@ def build_agent_from_cfg(cfg: dict) -> tuple[Agent, str | None]:
             web_search_cap,
             web_fetch_cap,
             GrcFileSystem(),
+            prompt_injection_cap,
         ],
         model_settings=model_settings,
         retries={"tools": 3, "output": 3},

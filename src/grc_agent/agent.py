@@ -30,6 +30,7 @@ from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.providers.ollama import OllamaProvider
 from pydantic_ai.providers.openai import OpenAIProvider
 from pydantic_ai.result import FinalResult
+from pydantic_ai_harness import PromptInjectionDefender
 from pydantic_graph import End
 
 # Local imports
@@ -472,6 +473,35 @@ class StopGracefully(AbstractCapability[Any]):
 # agent_factory.py / tests so every Agent shares the same instances.
 web_search_cap = WebSearch(local=duckduckgo_search_tool(max_results=5))
 web_fetch_cap = WebFetch(local=True)
+
+
+def _log_injection_detection(ctx, call, verdict) -> None:  # noqa: ARG001
+    """Observability for flagged tool results — never raises (an exception
+    here would fail the run per the capability contract)."""
+    _log.warning(
+        "prompt-injection: tool=%s risk=%s detections=%s",
+        call.tool_name,
+        verdict.risk_level,
+        list(verdict.detections),
+    )
+
+
+# Indirect prompt-injection defense over tool results. The agent now ingests
+# untrusted text from two directions — user project files (read_file/
+# search_files over the flowgraph's folder) and web content (web_fetch local
+# fallback) — and it can WRITE files, so a planted instruction is not just a
+# context hazard. One uniform rule: every client-executed tool result is
+# classified with stackone-defender tier-1 pattern detection (no ML extra, no
+# network); a high/critical-risk result is withheld and replaced with a short
+# notice telling the model the content was blocked. Known scope limits,
+# accepted: provider-native web tools run server-side and never transit the
+# client; ModelRetry failure text is our own strings. Tier-1 runs on the event
+# loop (~0.5ms/KB measured: 6ms for a 40KB inspect_graph, 48ms for a 100KB
+# read) — same cost class as the app's existing sync file I/O on that loop.
+prompt_injection_cap = PromptInjectionDefender(
+    block_high_risk=True,
+    on_detection=_log_injection_detection,
+)
 
 
 def fresh_agent(fixture):
