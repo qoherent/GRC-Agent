@@ -307,6 +307,53 @@ class GrcFileSystemToolset(FileSystemToolset[AgentDepsT]):
         lines = len(content.splitlines())
         return f"Wrote {len(content)} chars ({lines} lines) to {path}. [hash:{new_hash}]"
 
+    # -- edit_file: same write rule, exact-string replacement -----------------
+
+    @_recoverable
+    async def edit_file(self, path: str, old_text: str, new_text: str, *, expected_hash: str | None = None) -> str:
+        """Edit a file by exact string replacement with conflict detection.
+
+        Same extension allowlist as write_file (never `.grc` — flowgraph edits
+        go through the change_graph tool). The old_text must appear exactly
+        once in the file; include surrounding context to ensure uniqueness.
+        The replacement is written atomically.
+
+        Args:
+            path: File path relative to the root directory.
+            old_text: The exact text to find (must appear exactly once).
+            new_text: The replacement text.
+            expected_hash: If provided, rejects the edit when the file's
+                current hash doesn't match (optimistic concurrency).
+
+        Returns:
+            Summary with new hash for subsequent operations.
+        """
+        self._assert_writable_suffix(path)
+        resolved = self._safe_resolve(path, write=True)
+        if not resolved.is_file():
+            raise FileNotFoundError(f"File not found: {path}")
+
+        text = resolved.read_text(encoding="utf-8")
+        current_hash = _content_hash(text)
+
+        if expected_hash is not None and current_hash != expected_hash:
+            raise ValueError(
+                f"Conflict: file {path!r} has changed (expected hash:{expected_hash}, "
+                f"got hash:{current_hash}). Re-read the file and retry."
+            )
+
+        count = text.count(old_text)
+        if count == 0:
+            raise ValueError(f"old_text not found in {path}.")
+        if count > 1:
+            raise ValueError(
+                f"old_text found {count} times in {path}. Include more surrounding context to make the match unique."
+            )
+
+        new_content = text.replace(old_text, new_text, 1)
+        _atomic_write_text(new_content, resolved)
+        return f"Edited {path}. [hash:{_content_hash(new_content)}]"
+
 
 @dataclass
 class GrcFileSystem(AbstractCapability[AgentDepsT]):

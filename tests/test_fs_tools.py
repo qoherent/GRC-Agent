@@ -245,6 +245,64 @@ def test_write_gated_when_unsaved(toolset):
         write(toolset, "helper.py", "x")
 
 
+# -- edit_file ----------------------------------------------------------------
+
+
+def edit(toolset, path, old, new, **kwargs):
+    return run(toolset.edit_file(path, old, new, **kwargs))
+
+
+def test_edit_exact_replacement_atomic(toolset, _saved):
+    f = _saved.parent / "helper.py"
+    f.write_text("a = 1\nb = 2\nc = 3\n", encoding="utf-8")
+    out = edit(toolset, "helper.py", "b = 2", "b = 42")
+    assert "Edited helper.py" in out and "hash:" in out
+    assert f.read_text(encoding="utf-8") == "a = 1\nb = 42\nc = 3\n"
+    assert [p.name for p in _saved.parent.iterdir() if p.name.startswith("helper.py.")] == []
+
+
+def test_edit_old_text_not_found(toolset, _saved):
+    (_saved.parent / "helper.py").write_text("a = 1\n", encoding="utf-8")
+    with pytest.raises(ModelRetry, match="not found"):
+        edit(toolset, "helper.py", "zzz", "y")
+
+
+def test_edit_ambiguous_old_text(toolset, _saved):
+    (_saved.parent / "helper.py").write_text("x = 1\nx = 1\n", encoding="utf-8")
+    with pytest.raises(ModelRetry, match="2 times"):
+        edit(toolset, "helper.py", "x = 1", "y")
+
+
+def test_edit_grc_rejected(toolset, _saved):
+    with pytest.raises(ModelRetry, match="change_graph"):
+        edit(toolset, "proj.grc", "<block>", "<block>")
+
+
+def test_edit_unknown_suffix_rejected(toolset, _saved):
+    (_saved.parent / "run.sh").write_text("echo hi\n", encoding="utf-8")
+    with pytest.raises(ModelRetry, match="Allowed extensions"):
+        edit(toolset, "run.sh", "hi", "bye")
+
+
+def test_edit_missing_file(toolset, _saved):
+    with pytest.raises(ModelRetry, match="File not found"):
+        edit(toolset, "ghost.py", "a", "b")
+
+
+def test_edit_stale_hash_conflict(toolset, _saved):
+    f = _saved.parent / "helper.py"
+    f.write_text("current", encoding="utf-8")
+    with pytest.raises(ModelRetry, match="Conflict"):
+        edit(toolset, "helper.py", "current", "new", expected_hash="badbadbadbad")
+    assert f.read_text(encoding="utf-8") == "current"
+
+
+def test_edit_cannot_create_files(toolset, _saved):
+    # edit_file requires an existing file with exactly one old_text match
+    with pytest.raises(ModelRetry, match="File not found"):
+        edit(toolset, "brand_new.py", "", "content")
+
+
 # -- toolset registration ------------------------------------------------------
 
 
