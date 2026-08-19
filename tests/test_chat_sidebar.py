@@ -1282,13 +1282,13 @@ def test_context_label_updates_with_pydantic_ai_usage():
         UserPromptPart,
     )
 
-    from grc_agent.chat_sidebar import (
-        ChatSidebar,
+    import grc_agent.agent_factory as _af
+    from grc_agent.agent_factory import (
         _context_length_cache,
         _context_negative_cache,
-        format_tokens,
         resolve_model_context_length,
     )
+    from grc_agent.chat_sidebar import ChatSidebar, format_tokens
 
     assert format_tokens(1200) == "1.2k"
     assert format_tokens(14710) == "14.7k"
@@ -1298,16 +1298,15 @@ def test_context_label_updates_with_pydantic_ai_usage():
     # The HTTP call itself is stubbed: this test exercises the resolution →
     # cache → label pipeline, not ollama.com's availability, and a live call
     # made it machine/network dependent.
-    import grc_agent.chat_sidebar
 
     _context_length_cache.clear()
     _context_negative_cache.clear()
-    original = grc_agent.chat_sidebar._ollama_context_length
-    grc_agent.chat_sidebar._ollama_context_length = lambda _model: 1024 * 1024
+    original = _af._ollama_context_length
+    _af._ollama_context_length = lambda _model: 1024 * 1024
     try:
         assert resolve_model_context_length("ollama", "deepseek-v4-flash:cloud") == 1_048_576
     finally:
-        grc_agent.chat_sidebar._ollama_context_length = original
+        _af._ollama_context_length = original
         _context_length_cache.clear()
         _context_negative_cache.clear()
 

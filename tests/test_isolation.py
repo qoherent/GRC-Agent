@@ -1767,7 +1767,7 @@ def test_ollama_context_length_targets_cloud_url_for_cloud_users(tmp_path, monke
     uses."""
     import httpx
 
-    import grc_agent.chat_sidebar as cs
+    import grc_agent.agent_factory as cs
 
     monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
     (tmp_path / ".env").write_text("OLLAMA_CLOUD_API_KEY=test-cloud-key\n")

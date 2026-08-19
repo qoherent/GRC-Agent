@@ -1,5 +1,6 @@
 import logging
 import os
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -182,6 +183,173 @@ class ModelRequestLogger(AbstractCapability[Any]):
         return request_context
 
 
+_context_length_cache: dict[tuple[str, str], int] = {}
+# Failed/unresolvable probes are negative-cached with a TTL so a down backend
+# doesn't re-block the main loop (each probe is a sync HTTP call) on every
+# label update during a turn. Entries age out so a recovered backend is re-tried.
+_context_negative_cache: dict[tuple[str, str], float] = {}
+_CONTEXT_NEGATIVE_TTL = 60.0
+
+
+def format_tokens(n: int) -> str:
+    """Format token count for display (e.g. 1.2k, 14.7k, 128k, 1M)."""
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.1f}M".replace(".0M", "M")
+    if n >= 1_000:
+        return f"{n / 1_000:.1f}k".replace(".0k", "k")
+    return str(n)
+
+
+def _ollama_context_length(model: str) -> int | None:
+    """POST {base_url}/api/show -> model_info context_length, falling back to
+    parsing num_ctx from the parameters blob. Returns None if unresolvable.
+
+    The endpoint is the resolved `ollama_base_url` from load_settings() —
+    the same source of truth `_build_model` uses — so a cloud user (no local
+    URL configured, OLLAMA_CLOUD_API_KEY present) hits ollama.com with the
+    key, and a local user hits their own daemon. Never keyed on a provider
+    name: `load_settings()` normalizes "ollama_cloud" away, and the old
+    name-keyed branch left cloud users silently querying localhost since
+    the backends were consolidated.
+    """
+    import httpx
+
+    from grc_agent.settings import get_env_value, load_settings
+
+    cfg = load_settings()
+    base_url = (cfg.get("ollama_base_url") or "http://localhost:11434").rstrip("/")
+    api_key = ""
+    if "ollama.com" in base_url:
+        api_key = get_env_value("OLLAMA_API_KEY") or get_env_value("OLLAMA_CLOUD_API_KEY") or ""
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+    with httpx.Client(timeout=3.0) as client:
+        r = client.post(f"{base_url}/api/show", json={"name": model}, headers=headers)
+    if r.status_code != 200:
+        return None
+    data = r.json()
+    for k, v in data.get("model_info", {}).items():
+        if "context_length" in k and isinstance(v, (int, float)):
+            return int(v)
+    for line in str(data.get("parameters", "")).splitlines():
+        if "num_ctx" in line:
+            parts = line.split()
+            if len(parts) >= 2 and parts[1].isdigit():
+                return int(parts[1])
+    return None
+
+
+def _openai_shaped_context_length(provider: str, model: str) -> int | None:
+    """GET the provider's /v1/models catalog -> context_length for the model.
+    Works for OpenRouter and plain OpenAI (both expose context_length in the
+    OpenAI models shape); a custom endpoint without the field yields None."""
+    import httpx
+
+    from grc_agent.settings import get_env_value
+
+    if provider == "openrouter":
+        url = "https://openrouter.ai/api/v1/models"
+        key_var = "OPENROUTER_API_KEY"
+    elif provider == "openai":
+        url = "https://api.openai.com/v1/models"
+        key_var = "OPENAI_API_KEY"
+    else:  # openai_compatible (custom endpoint — OpenRouter is the known-good shape)
+        url = "https://openrouter.ai/api/v1/models"
+        key_var = "OPENAI_COMPATIBLE_API_KEY"
+    api_key = get_env_value(key_var) or ""
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+    with httpx.Client(timeout=3.0) as client:
+        r = client.get(url, headers=headers)
+    if r.status_code != 200:
+        return None
+    for m in r.json().get("data", []):
+        m_id = m.get("id", "")
+        if m_id == model or m_id.endswith(model):
+            ctx_len = m.get("context_length")
+            if isinstance(ctx_len, (int, float)):
+                return int(ctx_len)
+    return None
+
+
+def _tokens_per_second(output_tokens: int | None, duration_ms: int | None) -> float | None:
+    """Generation rate for the last turn, or None when it cannot be measured.
+
+    `output_tokens` is the turn's VISIBLE output (total minus reasoning) and
+    `duration_ms` is the time the model was actually generating — computed
+    natively from pydantic-ai's ModelRequest/ModelResponse timestamps (see
+    _generation_ms_from_messages), so tool-call time is excluded and the
+    number is the rate the user watched text stream, not tokens per
+    wall-clock turn second.
+
+    Returns None rather than 0 for a turn that produced no tokens or took no
+    measurable time — showing "0 tok/s" would read as a stalled backend.
+    """
+    if not output_tokens or not duration_ms or duration_ms <= 0:
+        return None
+    return output_tokens / (duration_ms / 1000)
+
+
+def _generation_ms_from_messages(new_msgs: list[Any]) -> int:
+    """Sum of (ModelResponse.timestamp - ModelRequest.timestamp) per pair.
+
+    pydantic-ai stamps high-precision local timestamps on ModelRequest
+    (send) and ModelResponse (received) — the delta per (request, response)
+    pair is that request's model processing time (TTFT + generation). Tool
+    execution happens between a response and the next request, so summing
+    the pairs excludes it. `new_msgs` must be THIS run's own messages
+    (`result.new_messages()` — input history and older runs excluded), so
+    no prior-turn leakage. Verified live: a tool-calling turn's pair-sum
+    matched the measured generation time and excluded the tool sleep.
+    """
+    total_ms = 0.0
+    # The pairing is inherently (n, n-1): the last message has no successor.
+    for prev, m in zip(new_msgs, new_msgs[1:], strict=False):
+        if m.__class__.__name__ == "ModelResponse" and prev.__class__.__name__ == "ModelRequest":
+            total_ms += (m.timestamp - prev.timestamp).total_seconds() * 1000
+    return int(total_ms)
+
+
+def resolve_model_context_length(provider: str, model: str) -> int | None:
+    """Dynamically query the active provider's API for the model's exact context
+    length. Cached in-memory per (provider, model) pair; returns None if
+    unresolvable, so callers render exact token counts without hardcoded guesses.
+    """
+    key = (provider or "", model or "")
+    if key in _context_length_cache:
+        return _context_length_cache[key]
+    if not provider or not model:
+        return None
+    neg_at = _context_negative_cache.get(key)
+    if neg_at is not None and time.monotonic() - neg_at < _CONTEXT_NEGATIVE_TTL:
+        return None
+
+    try:
+        if provider in ("ollama", "ollama_local", "ollama_cloud"):
+            ctx_len = _ollama_context_length(model)
+        elif provider == "openai_codex":
+            from grc_agent.providers.openai_codex.model import context_window
+
+            ctx_len = context_window(model)
+        elif provider in ("openrouter", "openai", "openai_compatible"):
+            ctx_len = _openai_shaped_context_length(provider, model)
+        else:
+            ctx_len = None
+    except Exception as e:
+        _log.debug(
+            "Failed to resolve dynamic context length for provider=%s model=%s: %s",
+            provider,
+            model,
+            e,
+        )
+        _context_negative_cache[key] = time.monotonic()
+        return None
+
+    if ctx_len is None:
+        _context_negative_cache[key] = time.monotonic()
+        return None
+    _context_length_cache[key] = ctx_len
+    return ctx_len
+
+
 class ResilientSummarizingCompaction(SummarizingCompaction):
     """SummarizingCompaction whose summary-call failures degrade gracefully.
 
@@ -227,10 +395,11 @@ def _build_compaction_capability(cfg: dict) -> TieredCompaction:
     return pairs and dialogue history intact; small tool results (under 2000 tokens) are never
     evicted.
 
-    The target is one uniform fraction (75%) of the model's window, resolved per
-    request from the genai-prices registry pydantic-ai-harness already ships
-    with. Only models the registry cannot resolve use a fallback denominator
-    — no more hand-picked absolute budgets per deployment class.
+    The target is one uniform fraction (85%) of the model's REAL context
+    window, probed from the backend itself (Ollama /api/show, OpenRouter/
+    OpenAI /v1/models, Codex context_window) — the same probe the sidebar's
+    context label uses. The genai-prices registry and the old 128k/32k
+    guesses are only fallbacks when the probe cannot answer.
     """
     base_url = _provider_base_url(cfg)
     # One uniform rule: any plain-HTTP endpoint is a self-hosted server
@@ -292,22 +461,28 @@ def _build_compaction_capability(cfg: dict) -> TieredCompaction:
     if target_tokens is not None:
         return TieredCompaction(tiers=tiers, target_tokens=target_tokens)
 
-    if is_local:
-        # A self-hosted model id says nothing about the window the server
-        # actually serves — a registry entry describes the upstream spec,
-        # not this deployment's --ctx / num_ctx — so pin the conservative
-        # 32k local window outright: 0.75 x 32k = 24k target, the previous
-        # fixed local budget, for every plain-HTTP endpoint.
-        return TieredCompaction(tiers=tiers, target_fraction=0.75, context_window=32_000)
-    # Cloud: the model's real window from the pricing registry (gpt-5.x,
-    # claude, gemini, ... all carry one), corrected where the registry is
-    # documented wrong; models the registry does not know fall back to 128k
-    # — 0.75 x 128k = 96k, the previous fixed cloud budget.
+    # One uniform rule: the REAL context window, probed from the backend
+    # itself (Ollama /api/show -> model_info.context_length, OpenRouter/OpenAI
+    # /v1/models -> context_length, Codex -> context_window), cached per
+    # (provider, model). The genai-prices registry is only a secondary source
+    # for models the probe cannot answer (e.g. a custom OpenAI-compatible
+    # endpoint without the field), and the old hardcoded 128k/32k guesses are
+    # now the LAST resort, used only when the probe fails (backend down at
+    # build time) — never the primary path.
     model_id = str(cfg.get("model", ""))
     for key, window in _MODEL_WINDOW_OVERRIDES.items():
         if key in model_id:
-            return TieredCompaction(tiers=tiers, target_fraction=0.75, context_window=window)
-    return TieredCompaction(tiers=tiers, target_fraction=0.75, fallback_context_window=128_000)
+            return TieredCompaction(tiers=tiers, target_fraction=0.85, context_window=window)
+
+    probed = resolve_model_context_length(str(cfg.get("provider", "")), model_id)
+    if probed is not None:
+        return TieredCompaction(tiers=tiers, target_fraction=0.85, context_window=probed)
+
+    # Probe failed or impossible: let the harness resolve the registry per
+    # request, with the old conservative guesses as the fallback denominator.
+    if is_local:
+        return TieredCompaction(tiers=tiers, target_fraction=0.85, context_window=32_000)
+    return TieredCompaction(tiers=tiers, target_fraction=0.85, fallback_context_window=128_000)
 
 
 def build_agent_from_cfg(cfg: dict) -> tuple[Agent, str | None]:

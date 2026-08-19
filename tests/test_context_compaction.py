@@ -196,7 +196,7 @@ def test_sliding_window_preserves_first_user_prompt():
 
 def test_compaction_target_pins_conservative_window_for_lan_openai_compatible_endpoint(monkeypatch):
     """Regression: an openai_compatible endpoint on a LAN IP (plain http://)
-    must pin the conservative 32k local window (0.75 x 32k = 24k target), not
+    must pin the conservative 32k local window (0.85 x 32k = 27k target), not
     resolve from the pricing registry — a registry entry describes the
     upstream spec, not this deployment's --ctx, so a 32k-window LAN model
     would otherwise never compact and overflow its context."""
@@ -207,7 +207,7 @@ def test_compaction_target_pins_conservative_window_for_lan_openai_compatible_en
             "openai_compatible_base_url": "http://192.168.1.5:8000/v1",
         }
     )
-    assert cap.target_fraction == 0.75
+    assert cap.target_fraction == 0.85
     assert cap.context_window == 32_000
     assert cap.target_tokens is None
 
@@ -215,8 +215,8 @@ def test_compaction_target_pins_conservative_window_for_lan_openai_compatible_en
 def test_compaction_target_resolves_real_window_for_https_endpoints(monkeypatch):
     """https endpoints (ollama.com, openrouter.ai, custom proxies) resolve the
     model's real window from the genai-prices registry per request; models the
-    registry doesn't know fall back to 128k (0.75 x 128k = 96k — the old fixed
-    cloud budget). The one uniform rule is the scheme, not the hostname."""
+    registry doesn't know fall back to 128k (0.85 x 128k = 109k). The one
+    uniform rule is the scheme, not the hostname."""
     monkeypatch.delenv("GRC_COMPACTION_TARGET_TOKENS", raising=False)
     for base_url in (
         "https://openrouter.ai/api/v1",
@@ -226,7 +226,7 @@ def test_compaction_target_resolves_real_window_for_https_endpoints(monkeypatch)
         cap = _build_compaction_capability(
             {"provider": "openai_compatible", "openai_compatible_base_url": base_url}
         )
-        assert cap.target_fraction == 0.75, f"{base_url} should be cloud"
+        assert cap.target_fraction == 0.85, f"{base_url} should be cloud"
         assert cap.context_window is None
         assert cap.fallback_context_window == 128_000, f"{base_url} should be cloud"
 
@@ -236,7 +236,7 @@ def test_compaction_target_pins_conservative_window_for_localhost_ollama(monkeyp
     cap = _build_compaction_capability(
         {"provider": "ollama_local", "ollama_base_url": "http://localhost:11434"}
     )
-    assert cap.target_fraction == 0.75
+    assert cap.target_fraction == 0.85
     assert cap.context_window == 32_000
     assert cap.target_tokens is None
 
@@ -279,8 +279,11 @@ def test_compaction_window_override_for_documented_registry_errors(monkeypatch):
         }
     )
     assert cap.context_window == 200_000
-    assert cap.target_fraction == 0.75
-    # An unknown cloud model still gets the 128k fallback.
+    assert cap.target_fraction == 0.85
+    # An unknown cloud model whose probe fails still gets the 128k fallback.
+    monkeypatch.setattr(
+        "grc_agent.agent_factory.resolve_model_context_length", lambda *_a, **_k: None
+    )
     cap2 = _build_compaction_capability(
         {
             "provider": "openai_compatible",
@@ -551,3 +554,21 @@ def test_unbounded_snapshots_keep_all_boundaries():
         )
     snaps = asyncio.run(store.list_snapshots(run_id=rid))
     assert len(snaps) >= 5, f"expected >=5 snapshots, got {len(snaps)}"
+
+
+def test_compaction_target_probes_the_real_window(monkeypatch):
+    """The REAL context window comes from the backend probe (Ollama /api/show,
+    OpenRouter/OpenAI /v1/models, Codex context_window) — the same probe the
+    sidebar's context label uses — NOT a registry guess. deepseek-v4-flash
+    serves a 1M window; the probe must win over the 128k fallback."""
+    monkeypatch.delenv("GRC_COMPACTION_TARGET_TOKENS", raising=False)
+    monkeypatch.setattr(
+        "grc_agent.agent_factory.resolve_model_context_length",
+        lambda *_a, **_k: 1_048_576,
+    )
+    cap = _build_compaction_capability(
+        {"provider": "ollama_cloud", "model": "deepseek-v4-flash:cloud"}
+    )
+    assert cap.context_window == 1_048_576, "probed window must win"
+    assert cap.target_fraction == 0.85
+    assert cap.target_tokens is None

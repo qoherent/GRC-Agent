@@ -55,6 +55,7 @@ from pydantic_ai.messages import (
 )
 from pydantic_graph import End
 
+from .agent_factory import resolve_model_context_length
 from .db import (
     conversation_id_for_session,
     delete_all_sessions,
@@ -138,14 +139,6 @@ def _parse_final_summary(args: Any) -> tuple[list[str], str] | None:
     return actions, explanation
 
 
-_context_length_cache: dict[tuple[str, str], int] = {}
-# Failed/unresolvable probes are negative-cached with a TTL so a down backend
-# doesn't re-block the main loop (each probe is a sync HTTP call) on every
-# label update during a turn. Entries age out so a recovered backend is re-tried.
-_context_negative_cache: dict[tuple[str, str], float] = {}
-_CONTEXT_NEGATIVE_TTL = 60.0
-
-
 def format_tokens(n: int) -> str:
     """Format token count for display (e.g. 1.2k, 14.7k, 128k, 1M)."""
     if n >= 1_000_000:
@@ -153,76 +146,6 @@ def format_tokens(n: int) -> str:
     if n >= 1_000:
         return f"{n / 1_000:.1f}k".replace(".0k", "k")
     return str(n)
-
-
-def _ollama_context_length(model: str) -> int | None:
-    """POST {base_url}/api/show -> model_info context_length, falling back to
-    parsing num_ctx from the parameters blob. Returns None if unresolvable.
-
-    The endpoint is the resolved `ollama_base_url` from load_settings() —
-    the same source of truth `_build_model` uses — so a cloud user (no local
-    URL configured, OLLAMA_CLOUD_API_KEY present) hits ollama.com with the
-    key, and a local user hits their own daemon. Never keyed on a provider
-    name: `load_settings()` normalizes "ollama_cloud" away, and the old
-    name-keyed branch left cloud users silently querying localhost since
-    the backends were consolidated.
-    """
-    import httpx
-
-    from grc_agent.settings import get_env_value, load_settings
-
-    cfg = load_settings()
-    base_url = (cfg.get("ollama_base_url") or "http://localhost:11434").rstrip("/")
-    api_key = ""
-    if "ollama.com" in base_url:
-        api_key = get_env_value("OLLAMA_API_KEY") or get_env_value("OLLAMA_CLOUD_API_KEY") or ""
-    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
-    with httpx.Client(timeout=3.0) as client:
-        r = client.post(f"{base_url}/api/show", json={"name": model}, headers=headers)
-    if r.status_code != 200:
-        return None
-    data = r.json()
-    for k, v in data.get("model_info", {}).items():
-        if "context_length" in k and isinstance(v, (int, float)):
-            return int(v)
-    for line in str(data.get("parameters", "")).splitlines():
-        if "num_ctx" in line:
-            parts = line.split()
-            if len(parts) >= 2 and parts[1].isdigit():
-                return int(parts[1])
-    return None
-
-
-def _openai_shaped_context_length(provider: str, model: str) -> int | None:
-    """GET the provider's /v1/models catalog -> context_length for the model.
-    Works for OpenRouter and plain OpenAI (both expose context_length in the
-    OpenAI models shape); a custom endpoint without the field yields None."""
-    import httpx
-
-    from grc_agent.settings import get_env_value
-
-    if provider == "openrouter":
-        url = "https://openrouter.ai/api/v1/models"
-        key_var = "OPENROUTER_API_KEY"
-    elif provider == "openai":
-        url = "https://api.openai.com/v1/models"
-        key_var = "OPENAI_API_KEY"
-    else:  # openai_compatible (custom endpoint — OpenRouter is the known-good shape)
-        url = "https://openrouter.ai/api/v1/models"
-        key_var = "OPENAI_COMPATIBLE_API_KEY"
-    api_key = get_env_value(key_var) or ""
-    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
-    with httpx.Client(timeout=3.0) as client:
-        r = client.get(url, headers=headers)
-    if r.status_code != 200:
-        return None
-    for m in r.json().get("data", []):
-        m_id = m.get("id", "")
-        if m_id == model or m_id.endswith(model):
-            ctx_len = m.get("context_length")
-            if isinstance(ctx_len, (int, float)):
-                return int(ctx_len)
-    return None
 
 
 def _tokens_per_second(output_tokens: int | None, duration_ms: int | None) -> float | None:
@@ -261,48 +184,6 @@ def _generation_ms_from_messages(new_msgs: list[Any]) -> int:
         if m.__class__.__name__ == "ModelResponse" and prev.__class__.__name__ == "ModelRequest":
             total_ms += (m.timestamp - prev.timestamp).total_seconds() * 1000
     return int(total_ms)
-
-
-def resolve_model_context_length(provider: str, model: str) -> int | None:
-    """Dynamically query the active provider's API for the model's exact context
-    length. Cached in-memory per (provider, model) pair; returns None if
-    unresolvable, so callers render exact token counts without hardcoded guesses.
-    """
-    key = (provider or "", model or "")
-    if key in _context_length_cache:
-        return _context_length_cache[key]
-    if not provider or not model:
-        return None
-    neg_at = _context_negative_cache.get(key)
-    if neg_at is not None and time.monotonic() - neg_at < _CONTEXT_NEGATIVE_TTL:
-        return None
-
-    try:
-        if provider in ("ollama", "ollama_local", "ollama_cloud"):
-            ctx_len = _ollama_context_length(model)
-        elif provider == "openai_codex":
-            from grc_agent.providers.openai_codex.model import context_window
-
-            ctx_len = context_window(model)
-        elif provider in ("openrouter", "openai", "openai_compatible"):
-            ctx_len = _openai_shaped_context_length(provider, model)
-        else:
-            ctx_len = None
-    except Exception as e:
-        _log.debug(
-            "Failed to resolve dynamic context length for provider=%s model=%s: %s",
-            provider,
-            model,
-            e,
-        )
-        _context_negative_cache[key] = time.monotonic()
-        return None
-
-    if ctx_len is None:
-        _context_negative_cache[key] = time.monotonic()
-        return None
-    _context_length_cache[key] = ctx_len
-    return ctx_len
 
 
 def _format_turn_error(e: Exception) -> str:
