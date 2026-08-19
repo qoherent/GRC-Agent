@@ -160,6 +160,91 @@ def test_malformed_grc_is_model_retry(toolset, _saved):
         read(toolset, "broken.grc")
 
 
+# -- write_file -------------------------------------------------------------
+
+
+def write(toolset, path, content, **kwargs):
+    return run(toolset.write_file(path, content, **kwargs))
+
+
+def test_write_allowed_suffix_atomic(toolset, _saved):
+    out = write(toolset, "helper.py", "print('hi')\n")
+    assert "Wrote" in out and "hash:" in out
+    assert (_saved.parent / "helper.py").read_text(encoding="utf-8") == "print('hi')\n"
+    # atomic replace leaves no temp strays
+    assert [p.name for p in _saved.parent.iterdir() if p.name.startswith("helper.py.")] == []
+
+
+def test_write_overwrite_existing(toolset, _saved):
+    f = _saved.parent / "helper.py"
+    f.write_text("old", encoding="utf-8")
+    write(toolset, "helper.py", "new")
+    assert f.read_text(encoding="utf-8") == "new"
+
+
+def test_write_grc_rejected_points_to_change_graph(toolset, _saved):
+    with pytest.raises(ModelRetry, match="change_graph"):
+        write(toolset, "evil.grc", "<?xml?>")
+
+
+def test_write_unknown_suffix_rejected_lists_allowed(toolset, _saved):
+    with pytest.raises(ModelRetry, match="Allowed extensions"):
+        write(toolset, "run.sh", "echo hi\n")
+
+
+def test_write_no_extension_rejected(toolset, _saved):
+    with pytest.raises(ModelRetry, match="without an extension"):
+        write(toolset, "Makefile", "all:\n")
+
+
+def test_write_suffix_case_insensitive(toolset, _saved):
+    out = write(toolset, "script.PY", "x = 1\n")
+    assert "Wrote" in out
+    assert (_saved.parent / "script.PY").exists()
+
+
+def test_write_missing_parent_requires_create_directory(toolset, _saved):
+    with pytest.raises(ModelRetry, match="create_directory"):
+        write(toolset, "scripts/helper.py", "x = 1\n")
+
+
+def test_write_stale_hash_conflict(toolset, _saved):
+    f = _saved.parent / "helper.py"
+    f.write_text("current", encoding="utf-8")
+    with pytest.raises(ModelRetry, match="Conflict"):
+        write(toolset, "helper.py", "new", expected_hash="deadbeefdead")
+    assert f.read_text(encoding="utf-8") == "current"  # unchanged
+
+
+def test_write_matching_hash_succeeds(toolset, _saved):
+    f = _saved.parent / "helper.py"
+    f.write_text("current", encoding="utf-8")
+    import hashlib
+
+    good = hashlib.sha256(b"current").hexdigest()[:12]
+    out = write(toolset, "helper.py", "new", expected_hash=good)
+    assert "Wrote" in out
+
+
+def test_write_env_denied(toolset, _saved):
+    # `.env` has no extension, so the suffix allowlist rejects it before the
+    # deny pattern is even consulted — either way it can never be written.
+    with pytest.raises(ModelRetry, match="not allowed"):
+        write(toolset, ".env", "X=1")
+
+
+def test_write_protected_secrets_rejected(toolset, _saved):
+    # `.pem`/`.key` are already rejected by the suffix allowlist; secrets.py
+    # has an ALLOWED suffix but matches the harness-protected '**/secrets*'.
+    with pytest.raises(ModelRetry, match="protected"):
+        write(toolset, "secrets.py", "API_KEY = 'x'")
+
+
+def test_write_gated_when_unsaved(toolset):
+    with pytest.raises(ModelRetry, match="save the flowgraph"):
+        write(toolset, "helper.py", "x")
+
+
 # -- toolset registration ------------------------------------------------------
 
 

@@ -41,9 +41,13 @@ from pydantic_ai.tools import AgentDepsT
 # accept back as ``expected_hash`` — reusing it keeps the hash contract
 # identical across the parent tools and this subclass.
 from pydantic_ai_harness.filesystem._capability import _DEFAULT_PROTECTED
-from pydantic_ai_harness.filesystem._toolset import FileSystemToolset, _recoverable
+from pydantic_ai_harness.filesystem._toolset import (
+    FileSystemToolset,
+    _content_hash,
+    _recoverable,
+)
 
-from grc_agent.adapter.graph import inspect_graph, load_flow_graph
+from grc_agent.adapter.graph import _atomic_write_text, inspect_graph, load_flow_graph
 
 # --------------------------------------------------------------------------
 # Active-graph providers (installed by desktop_app once the canvas exists).
@@ -102,6 +106,39 @@ _NO_ACTIVE_GRAPH_MSG = (
 # every provider API key, and .grc_agent/ holds our own lock/snapshot state.
 _DENIED_PATTERNS = [".env", ".env.*", ".grc_agent/*"]
 
+# The one uniform write rule: a file's suffix decides whether it may be
+# created or edited. `.grc` is deliberately absent — flowgraph writes are
+# change_graph's exclusive province — and everything OOT-module work needs
+# (gr-modtool emits CMake, C/C++/Python, YAML, XML, conf, RST) is present.
+WRITE_SUFFIXES = frozenset(
+    {
+        ".py",
+        ".cmake",
+        ".txt",
+        ".md",
+        ".m",
+        ".json",
+        ".yml",
+        ".yaml",
+        ".c",
+        ".cc",
+        ".cpp",
+        ".cxx",
+        ".h",
+        ".hh",
+        ".hpp",
+        ".xml",
+        ".conf",
+        ".rst",
+        ".i",
+    }
+)
+
+_WRITE_GRC_MSG = (
+    "Writing .grc files is not allowed — flowgraphs are edited through the "
+    "change_graph tool (add/remove blocks and connections, set parameter values)."
+)
+
 
 class GrcFileSystemToolset(FileSystemToolset[AgentDepsT]):
     """Harness filesystem toolset with a per-call dynamic root and `.grc` routing.
@@ -119,11 +156,13 @@ class GrcFileSystemToolset(FileSystemToolset[AgentDepsT]):
         allowed_patterns: Sequence[str] = (),
         denied_patterns: Sequence[str] = _DENIED_PATTERNS,
         protected_patterns: Sequence[str] | None = None,
+        write_suffixes: frozenset[str] = WRITE_SUFFIXES,
         max_read_lines: int = 1000,
         max_list_results: int = 200,
         max_search_results: int = 1000,
         max_find_results: int = 1000,
     ) -> None:
+        self._write_suffixes = frozenset(write_suffixes)
         super().__init__(
             root_dir=_UNSAVED_ROOT,
             allowed_patterns=list(allowed_patterns),
@@ -159,6 +198,16 @@ class GrcFileSystemToolset(FileSystemToolset[AgentDepsT]):
         if active_grc_path() is None:
             raise ValueError(_NO_ACTIVE_GRAPH_MSG)
         return super()._safe_resolve(path, write=write, check_allowed=check_allowed)
+
+    def _assert_writable_suffix(self, path: str) -> None:
+        """One uniform write rule: the suffix allowlist. `.grc` never passes."""
+        suffix = Path(path).suffix.lower()
+        if suffix == ".grc":
+            raise ValueError(_WRITE_GRC_MSG)
+        if suffix not in self._write_suffixes:
+            what = f"{suffix!r} files" if suffix else "files without an extension"
+            allowed = ", ".join(sorted(self._write_suffixes))
+            raise ValueError(f"Writing {what} is not allowed. Allowed extensions: {allowed}.")
 
     # -- read_file with .grc routing ---------------------------------------
 
@@ -213,6 +262,51 @@ class GrcFileSystemToolset(FileSystemToolset[AgentDepsT]):
             raise ValueError(f"Could not parse {resolved.name!r} as a flowgraph: {exc}") from exc
         return inspect_graph(fg, targets=None, view="overview")
 
+    # -- write_file with a suffix allowlist and atomic replacement ----------
+
+    @_recoverable
+    async def write_file(self, path: str, content: str, *, expected_hash: str | None = None) -> str:
+        """Create or overwrite a file with conflict detection.
+
+        Writes are restricted by extension to source/config formats (.py,
+        .cmake, .txt, .md, .m, .json, .yml/.yaml, C/C++ headers and sources,
+        .xml, .conf, .rst, .i). `.grc` can never be written — flowgraph edits
+        go through the change_graph tool. The write is atomic (temp file →
+        fsync → rename), and the parent directory must already exist (use
+        create_directory first).
+
+        Args:
+            path: File path relative to the root directory (the active
+                flowgraph's folder).
+            content: The text content to write.
+            expected_hash: If provided, the write is rejected when the file exists
+                and its current hash doesn't match (optimistic concurrency).
+
+        Returns:
+            Confirmation message with new hash.
+        """
+        self._assert_writable_suffix(path)
+        resolved = self._safe_resolve(path, write=True)
+
+        # Optimistic concurrency: reject stale writes
+        if expected_hash is not None and resolved.is_file():
+            current = resolved.read_text(encoding="utf-8")
+            if _content_hash(current) != expected_hash:
+                raise ValueError(
+                    f"Conflict: file {path!r} has changed (expected hash:{expected_hash}, "
+                    f"got hash:{_content_hash(current)}). Re-read the file and retry."
+                )
+
+        if not resolved.parent.exists():
+            parent_rel = str(resolved.parent.relative_to(self._root))
+            raise FileNotFoundError(
+                f"Parent directory '{parent_rel}' does not exist. Use create_directory first."
+            )
+        _atomic_write_text(content, resolved)
+        new_hash = _content_hash(content)
+        lines = len(content.splitlines())
+        return f"Wrote {len(content)} chars ({lines} lines) to {path}. [hash:{new_hash}]"
+
 
 @dataclass
 class GrcFileSystem(AbstractCapability[AgentDepsT]):
@@ -229,11 +323,13 @@ class GrcFileSystem(AbstractCapability[AgentDepsT]):
     max_search_results: int = 1000
     max_find_results: int = 1000
     denied_patterns: Sequence[str] = field(default_factory=lambda: list(_DENIED_PATTERNS))
+    write_suffixes: frozenset[str] = WRITE_SUFFIXES
 
     def get_toolset(self) -> GrcFileSystemToolset[AgentDepsT]:
         return GrcFileSystemToolset[AgentDepsT](
             denied_patterns=self.denied_patterns,
             protected_patterns=list(_DEFAULT_PROTECTED),
+            write_suffixes=self.write_suffixes,
             max_read_lines=self.max_read_lines,
             max_list_results=self.max_list_results,
             max_search_results=self.max_search_results,
