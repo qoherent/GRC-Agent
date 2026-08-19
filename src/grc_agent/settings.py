@@ -43,6 +43,12 @@ _VALID_PROVIDERS = (
     "openrouter",
     "openai",
     "openai_compatible",
+    "anthropic",
+    "google",
+    "groq",
+    "mistral",
+    "cohere",
+    "xai",
     "openai_codex",
 )
 
@@ -62,6 +68,12 @@ _PROVIDER_ENV_VAR = {
     "openrouter": "OPENROUTER_MODEL",
     "openai": "OPENAI_MODEL",
     "openai_compatible": "OPENAI_COMPATIBLE_MODEL",
+    "anthropic": "ANTHROPIC_MODEL",
+    "google": "GOOGLE_MODEL",
+    "groq": "GROQ_MODEL",
+    "mistral": "MISTRAL_MODEL",
+    "cohere": "COHERE_MODEL",
+    "xai": "XAI_MODEL",
     "openai_codex": "OPENAI_CODEX_MODEL",
 }
 _PROVIDER_MODEL_KEY = {
@@ -70,6 +82,12 @@ _PROVIDER_MODEL_KEY = {
     "openrouter": "openrouter_model",
     "openai": "openai_model",
     "openai_compatible": "openai_compatible_model",
+    "anthropic": "anthropic_model",
+    "google": "google_model",
+    "groq": "groq_model",
+    "mistral": "mistral_model",
+    "cohere": "cohere_model",
+    "xai": "xai_model",
     "openai_codex": "openai_codex_model",
 }
 
@@ -78,6 +96,12 @@ _DEFAULT_MODELS = {
     "openrouter_model": "deepseek/deepseek-v4-flash",
     "openai_model": "gpt-5.6-sol",
     "openai_compatible_model": "deepseek/deepseek-v4-flash",
+    "anthropic_model": "claude-sonnet-4-5",
+    "google_model": "gemini-2.5-pro",
+    "groq_model": "llama-3.3-70b-versatile",
+    "mistral_model": "mistral-large-latest",
+    "cohere_model": "command-r-plus",
+    "xai_model": "grok-4",
     "openai_codex_model": "gpt-5.6-luna",
 }
 _DEFAULT_PROVIDER = "ollama_local"
@@ -212,6 +236,12 @@ def load_settings() -> dict:
         vals.get("OPENAI_COMPATIBLE_MODEL") or _DEFAULT_MODELS["openai_compatible_model"]
     )
     openai_codex_model = vals.get("OPENAI_CODEX_MODEL") or _DEFAULT_MODELS["openai_codex_model"]
+    anthropic_model = vals.get("ANTHROPIC_MODEL") or _DEFAULT_MODELS["anthropic_model"]
+    google_model = vals.get("GOOGLE_MODEL") or _DEFAULT_MODELS["google_model"]
+    groq_model = vals.get("GROQ_MODEL") or _DEFAULT_MODELS["groq_model"]
+    mistral_model = vals.get("MISTRAL_MODEL") or _DEFAULT_MODELS["mistral_model"]
+    cohere_model = vals.get("COHERE_MODEL") or _DEFAULT_MODELS["cohere_model"]
+    xai_model = vals.get("XAI_MODEL") or _DEFAULT_MODELS["xai_model"]
 
     ollama_url = vals.get("OLLAMA_BASE_URL")
     if not ollama_url:
@@ -236,6 +266,12 @@ def load_settings() -> dict:
         "openrouter_model": openrouter_model,
         "openai_model": openai_model,
         "openai_compatible_model": openai_compatible_model,
+        "anthropic_model": anthropic_model,
+        "google_model": google_model,
+        "groq_model": groq_model,
+        "mistral_model": mistral_model,
+        "cohere_model": cohere_model,
+        "xai_model": xai_model,
         "openai_codex_model": openai_codex_model,
         "ollama_base_url": ollama_url,
         "openai_compatible_base_url": openai_url,

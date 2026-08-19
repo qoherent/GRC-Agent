@@ -880,20 +880,65 @@ def test_build_agent_from_cfg_produces_correct_model_type_per_provider(tmp_path,
         f"ollama cloud base_url must be ollama.com, got {agent_cloud.model._provider.base_url}"
     )
 
-    # openai_compatible (pointing at OpenRouter endpoint)
+    # openai_compatible (a neutral custom endpoint — an openrouter.ai URL
+    # normalizes to the openrouter provider, which now builds OpenRouterModel)
     save_settings(
         "openai_compatible",
         "openai/gpt-4o-mini",
-        openai_compatible_base_url="https://openrouter.ai/api/v1",
+        openai_compatible_base_url="http://localhost:8080/v1",
     )
     upsert_env_key("OPENAI_COMPATIBLE_API_KEY", "sk-or-dummy-key-for-build-test")
     agent_or, _ = build_agent_from_cfg(load_settings())
     assert isinstance(agent_or.model, OpenAIChatModel), (
         f"openai_compatible cfg must produce OpenAIChatModel, got {type(agent_or.model).__name__}"
     )
-    assert "openrouter.ai" in str(agent_or.model._provider.base_url), (
-        f"openrouter base_url must be openrouter.ai, got {agent_or.model._provider.base_url}"
+    assert "localhost:8080" in str(agent_or.model._provider.base_url), (
+        f"openai_compatible base_url must be the configured endpoint, got {agent_or.model._provider.base_url}"
     )
+
+    # openrouter: pydantic-ai's dedicated OpenRouterModel (provider-purity).
+    from pydantic_ai.models.openrouter import OpenRouterModel
+
+    save_settings("openrouter", "deepseek/deepseek-v4-flash")
+    upsert_env_key("OPENROUTER_API_KEY", "sk-or-dummy-key-for-build-test")
+    agent_ro, _ = build_agent_from_cfg(load_settings())
+    assert isinstance(agent_ro.model, OpenRouterModel), (
+        f"openrouter cfg must produce OpenRouterModel, got {type(agent_ro.model).__name__}"
+    )
+
+    # The native cloud providers: each must produce pydantic-ai's dedicated
+    # model class (the provider-purity rule — no generic OpenAI fallback).
+    import importlib
+
+    native = {
+        "anthropic": (
+            "pydantic_ai.models.anthropic",
+            "AnthropicModel",
+            "ANTHROPIC_API_KEY",
+            "claude-sonnet-4-5",
+        ),
+        "google": ("pydantic_ai.models.google", "GoogleModel", "GOOGLE_API_KEY", "gemini-2.5-pro"),
+        "groq": ("pydantic_ai.models.groq", "GroqModel", "GROQ_API_KEY", "llama-3.3-70b-versatile"),
+        "mistral": (
+            "pydantic_ai.models.mistral",
+            "MistralModel",
+            "MISTRAL_API_KEY",
+            "mistral-large-latest",
+        ),
+        "cohere": ("pydantic_ai.models.cohere", "CohereModel", "COHERE_API_KEY", "command-r-plus"),
+        "xai": ("pydantic_ai.models.xai", "XaiModel", "XAI_API_KEY", "grok-4"),
+    }
+    for prov, (mod, cls, key_var, model_id) in native.items():
+        # Real model ids: XaiModel (and friends) validate the name against a
+        # strict Literal, so a fake id would raise and fall back to a default
+        # agent instead of proving the provider mapping.
+        save_settings(prov, model_id)
+        upsert_env_key(key_var, "dummy-key-for-build-test")
+        agent_n, _ = build_agent_from_cfg(load_settings())
+        expected = getattr(importlib.import_module(mod), cls)
+        assert isinstance(agent_n.model, expected), (
+            f"{prov} cfg must produce {cls}, got {type(agent_n.model).__name__}"
+        )
 
 
 def test_live_swap_rebuilds_agent_with_new_provider(tmp_path, monkeypatch):
@@ -1821,3 +1866,38 @@ def test_run_usage_output_override_uses_run_totals():
     assert _run_usage_output_override(run, 9, 0) == (13, 5)
     assert _run_usage_output_override(None, 9, 0) == (9, 0)
     assert _run_usage_output_override(SimpleNamespace(usage=None), 9, 0) == (9, 0)
+
+
+def test_provider_catalog_is_complete_and_consistent():
+    """Every provider in PROVIDER_ORDER must have an entry in every parallel
+    catalog dict (the dialog KeyErrors otherwise), and the fixed-endpoint
+    providers must carry a real URL while editable ones carry None."""
+    from grc_agent.ui.providers import (
+        PROVIDER_API_KEY,
+        PROVIDER_BADGE_LABEL,
+        PROVIDER_BASE_URL,
+        PROVIDER_KEY_PLACEHOLDER,
+        PROVIDER_LABELS,
+        PROVIDER_MODEL_KEY,
+        PROVIDER_MODEL_PLACEHOLDER,
+        PROVIDER_ORDER,
+    )
+
+    for p in PROVIDER_ORDER:
+        for table in (
+            PROVIDER_LABELS,
+            PROVIDER_MODEL_KEY,
+            PROVIDER_API_KEY,
+            PROVIDER_MODEL_PLACEHOLDER,
+            PROVIDER_KEY_PLACEHOLDER,
+            PROVIDER_BADGE_LABEL,
+            PROVIDER_BASE_URL,
+        ):
+            assert p in table, f"{p} missing from {table.__name__}"
+
+    # Fixed-endpoint providers (everything except the two editable-URL ones
+    # and Codex) must carry a real endpoint.
+    for p in PROVIDER_ORDER:
+        if p in ("ollama_local", "openai_compatible", "openai_codex"):
+            continue
+        assert PROVIDER_BASE_URL[p], f"{p} must have a fixed endpoint"

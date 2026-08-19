@@ -86,6 +86,61 @@ def _retrying_http_client() -> httpx.AsyncClient:
     )
 
 
+# pydantic-ai's dedicated model/provider classes for the native cloud
+# providers the Settings UI exposes. One uniform row per provider: model
+# module/class, provider module/class, and the .env key for the API key.
+_NATIVE_MODEL_BUILDERS = {
+    "anthropic": (
+        "pydantic_ai.models.anthropic",
+        "AnthropicModel",
+        "pydantic_ai.providers.anthropic",
+        "AnthropicProvider",
+        "ANTHROPIC_API_KEY",
+        True,
+    ),
+    "google": (
+        "pydantic_ai.models.google",
+        "GoogleModel",
+        "pydantic_ai.providers.google",
+        "GoogleProvider",
+        "GOOGLE_API_KEY",
+        True,
+    ),
+    "groq": (
+        "pydantic_ai.models.groq",
+        "GroqModel",
+        "pydantic_ai.providers.groq",
+        "GroqProvider",
+        "GROQ_API_KEY",
+        True,
+    ),
+    "mistral": (
+        "pydantic_ai.models.mistral",
+        "MistralModel",
+        "pydantic_ai.providers.mistral",
+        "MistralProvider",
+        "MISTRAL_API_KEY",
+        True,
+    ),
+    "cohere": (
+        "pydantic_ai.models.cohere",
+        "CohereModel",
+        "pydantic_ai.providers.cohere",
+        "CohereProvider",
+        "COHERE_API_KEY",
+        True,
+    ),
+    "xai": (
+        "pydantic_ai.models.xai",
+        "XaiModel",
+        "pydantic_ai.providers.xai",
+        "XaiProvider",
+        "XAI_API_KEY",
+        False,  # XaiProvider takes xai_client, not http_client
+    ),
+}
+
+
 def _build_model(cfg: dict, http_client: httpx.AsyncClient):
     provider = cfg.get("provider", "ollama_local")
     if provider == "openai_codex":
@@ -113,6 +168,22 @@ def _build_model(cfg: dict, http_client: httpx.AsyncClient):
             cfg["model"],
             provider=OpenAIProvider(api_key=key, http_client=http_client),
         )
+    if provider in _NATIVE_MODEL_BUILDERS:
+        # pydantic-ai's dedicated model/provider classes, one uniform table
+        # row per provider (lazy importlib so startup stays light). The API
+        # key is read from the provider's own env var (see ui/providers.py).
+        mod_name, cls_name, prov_mod, prov_cls, key_var, http_client_ok = _NATIVE_MODEL_BUILDERS[
+            provider
+        ]
+        key = get_env_value(key_var) or os.environ.get(key_var) or None
+        import importlib
+
+        model_cls = getattr(importlib.import_module(mod_name), cls_name)
+        provider_cls = getattr(importlib.import_module(prov_mod), prov_cls)
+        kwargs = {"api_key": key}
+        if http_client_ok:
+            kwargs["http_client"] = http_client
+        return model_cls(cfg["model"], provider=provider_cls(**kwargs))
     if provider == "openai_compatible":
         # The user's own endpoint; api_key=None lets OpenAIProvider apply its
         # own 'api-key-not-set' placeholder instead of our hand-rolled
@@ -203,6 +274,29 @@ _context_negative_cache: dict[tuple[str, str], float] = {}
 _CONTEXT_NEGATIVE_TTL = 60.0
 
 
+def _google_context_length(model: str) -> int | None:
+    """GET the Gemini /v1beta/models catalog -> inputTokenLimit for the model
+    (the context window). Returns None if unresolvable."""
+    import httpx
+
+    from grc_agent.settings import get_env_value
+
+    api_key = get_env_value("GOOGLE_API_KEY") or ""
+    if not api_key:
+        return None
+    url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
+    with httpx.Client(timeout=3.0) as client:
+        r = client.get(url)
+    if r.status_code != 200:
+        return None
+    for m in r.json().get("models", []):
+        if m.get("name", "").endswith(model):
+            limit = m.get("inputTokenLimit")
+            if isinstance(limit, (int, float)):
+                return int(limit)
+    return None
+
+
 def _ollama_context_length(model: str) -> int | None:
     """POST {base_url}/api/show -> model_info context_length, falling back to
     parsing num_ctx from the parameters blob. Returns None if unresolvable.
@@ -241,6 +335,17 @@ def _ollama_context_length(model: str) -> int | None:
     return None
 
 
+# OpenAI-shaped /v1/models endpoints that carry context_length per model.
+_OPENAI_SHAPED_PROVIDERS = {
+    "openrouter": ("https://openrouter.ai/api/v1/models", "OPENROUTER_API_KEY"),
+    "openai": ("https://api.openai.com/v1/models", "OPENAI_API_KEY"),
+    "groq": ("https://api.groq.com/openai/v1/models", "GROQ_API_KEY"),
+    "mistral": ("https://api.mistral.ai/v1/models", "MISTRAL_API_KEY"),
+    "cohere": ("https://api.cohere.com/v1/models", "COHERE_API_KEY"),
+    "xai": ("https://api.x.ai/v1/models", "XAI_API_KEY"),
+}
+
+
 def _openai_shaped_context_length(provider: str, model: str) -> int | None:
     """GET the provider's /v1/models catalog -> context_length for the model.
     Works for OpenRouter and plain OpenAI (both expose context_length in the
@@ -254,12 +359,8 @@ def _openai_shaped_context_length(provider: str, model: str) -> int | None:
 
     from grc_agent.settings import get_env_value, load_settings
 
-    if provider == "openrouter":
-        url = "https://openrouter.ai/api/v1/models"
-        key_var = "OPENROUTER_API_KEY"
-    elif provider == "openai":
-        url = "https://api.openai.com/v1/models"
-        key_var = "OPENAI_API_KEY"
+    if provider in _OPENAI_SHAPED_PROVIDERS:
+        url, key_var = _OPENAI_SHAPED_PROVIDERS[provider]
     else:  # openai_compatible — the user's own endpoint
         base = (
             load_settings().get("openai_compatible_base_url")
@@ -283,6 +384,25 @@ def _openai_shaped_context_length(provider: str, model: str) -> int | None:
     return None
 
 
+def _codex_context_length(model: str) -> int | None:
+    from grc_agent.providers.openai_codex.model import context_window
+
+    return context_window(model)
+
+
+# Provider -> context-window probe (single-arg: the model id). Anthropic's
+# /v1/models carries no context length — the genai-prices registry knows the
+# Claude windows, so it maps to None.
+_CTX_PROBES = {
+    "ollama": _ollama_context_length,
+    "ollama_local": _ollama_context_length,
+    "ollama_cloud": _ollama_context_length,
+    "openai_codex": _codex_context_length,
+    "google": _google_context_length,
+    "anthropic": lambda _m: None,
+}
+
+
 def resolve_model_context_length(provider: str, model: str) -> int | None:
     """Dynamically query the active provider's API for the model's exact context
     length. Cached in-memory per (provider, model) pair; returns None if
@@ -298,13 +418,10 @@ def resolve_model_context_length(provider: str, model: str) -> int | None:
         return None
 
     try:
-        if provider in ("ollama", "ollama_local", "ollama_cloud"):
-            ctx_len = _ollama_context_length(model)
-        elif provider == "openai_codex":
-            from grc_agent.providers.openai_codex.model import context_window
-
-            ctx_len = context_window(model)
-        elif provider in ("openrouter", "openai", "openai_compatible"):
+        probe = _CTX_PROBES.get(provider)
+        if probe is not None:
+            ctx_len = probe(model)
+        elif provider in _OPENAI_SHAPED_PROVIDERS or provider == "openai_compatible":
             ctx_len = _openai_shaped_context_length(provider, model)
         else:
             ctx_len = None
@@ -549,6 +666,44 @@ def build_interactive_agent() -> tuple[Agent, str | None]:
     return build_agent_from_cfg(load_settings())
 
 
+# /models endpoints for the native cloud providers (the probe + the Load
+# button). One uniform table: a callable from api_key -> (url, headers).
+_PREFLIGHT_ENDPOINTS = {
+    "anthropic": lambda k: (
+        "https://api.anthropic.com/v1/models",
+        {"x-api-key": k, "anthropic-version": "2023-06-01"},
+    ),
+    "google": lambda k: (
+        f"https://generativelanguage.googleapis.com/v1beta/models?key={k}",
+        {},
+    ),
+    "groq": lambda k: (
+        "https://api.groq.com/openai/v1/models",
+        {"Authorization": f"Bearer {k}"},
+    ),
+    "mistral": lambda k: (
+        "https://api.mistral.ai/v1/models",
+        {"Authorization": f"Bearer {k}"},
+    ),
+    "cohere": lambda k: (
+        "https://api.cohere.com/v1/models",
+        {"Authorization": f"Bearer {k}"},
+    ),
+    "xai": lambda k: (
+        "https://api.x.ai/v1/models",
+        {"Authorization": f"Bearer {k}"},
+    ),
+}
+_PREFLIGHT_LABELS = {
+    "anthropic": "Anthropic",
+    "google": "Google (Gemini)",
+    "groq": "Groq",
+    "mistral": "Mistral",
+    "cohere": "Cohere",
+    "xai": "xAI",
+}
+
+
 def _preflight_target(provider: str, api_key: str, base_url: str) -> tuple[str, dict] | str:
     """Resolve the provider's /models endpoint to (url, headers), or return an
     error string when a required key is missing."""
@@ -581,6 +736,10 @@ def _preflight_target(provider: str, api_key: str, base_url: str) -> tuple[str, 
         )
         return models_url, headers
 
+    if provider in _PREFLIGHT_ENDPOINTS:
+        if not api_key:
+            return f"API key is required for {_PREFLIGHT_LABELS[provider]}"
+        return _PREFLIGHT_ENDPOINTS[provider](api_key)
     if provider == "ollama_cloud":
         if not api_key:
             return "API key is required for Ollama Cloud"

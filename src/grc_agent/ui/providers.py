@@ -17,6 +17,12 @@ PROVIDER_ORDER = (
     "openrouter",
     "openai",
     "openai_compatible",
+    "anthropic",
+    "google",
+    "groq",
+    "mistral",
+    "cohere",
+    "xai",
     "openai_codex",
 )
 
@@ -26,7 +32,13 @@ PROVIDER_LABELS = {
     "ollama_cloud": "Ollama Cloud",
     "openrouter": "OpenRouter",
     "openai": "OpenAI API",
-    "openai_compatible": "Other — OpenAI-compatible (llama.cpp, vLLM, LM Studio, Groq…)",
+    "openai_compatible": "Other — OpenAI-compatible (llama.cpp, vLLM, LM Studio…)",
+    "anthropic": "Anthropic (Claude)",
+    "google": "Google (Gemini)",
+    "groq": "Groq",
+    "mistral": "Mistral",
+    "cohere": "Cohere",
+    "xai": "xAI (Grok)",
     "openai_codex": "ChatGPT Plus/Pro (Codex)",
 }
 
@@ -37,6 +49,12 @@ PROVIDER_MODEL_KEY = {
     "openrouter": "openrouter_model",
     "openai": "openai_model",
     "openai_compatible": "openai_compatible_model",
+    "anthropic": "anthropic_model",
+    "google": "google_model",
+    "groq": "groq_model",
+    "mistral": "mistral_model",
+    "cohere": "cohere_model",
+    "xai": "xai_model",
     "openai_codex": "openai_codex_model",
 }
 
@@ -50,6 +68,12 @@ PROVIDER_API_KEY = {
     "openrouter": "OPENROUTER_API_KEY",
     "openai": "OPENAI_API_KEY",
     "openai_compatible": "OPENAI_COMPATIBLE_API_KEY",
+    "anthropic": "ANTHROPIC_API_KEY",
+    "google": "GOOGLE_API_KEY",
+    "groq": "GROQ_API_KEY",
+    "mistral": "MISTRAL_API_KEY",
+    "cohere": "COHERE_API_KEY",
+    "xai": "XAI_API_KEY",
     "openai_codex": None,
 }
 
@@ -59,6 +83,12 @@ PROVIDER_MODEL_PLACEHOLDER = {
     "openrouter": "deepseek/deepseek-v4-flash, qwen/qwen3-coder…",
     "openai": "gpt-5.6-sol — click Load to list yours",
     "openai_compatible": "model id served by your endpoint",
+    "anthropic": "claude-sonnet-4-5 — click Load to list yours",
+    "google": "gemini-2.5-pro — click Load to list yours",
+    "groq": "llama-3.3-70b-versatile — click Load to list yours",
+    "mistral": "mistral-large-latest — click Load to list yours",
+    "cohere": "command-r-plus — click Load to list yours",
+    "xai": "grok-4 — click Load to list yours",
     "openai_codex": "gpt-5.6-luna — click Load to list yours",
 }
 
@@ -68,6 +98,12 @@ PROVIDER_KEY_PLACEHOLDER = {
     "openrouter": "OpenRouter API key (sk-or-…)",
     "openai": "OpenAI API key (sk-…)",
     "openai_compatible": "API key (optional for local endpoints)",
+    "anthropic": "Anthropic API key (sk-ant-…)",
+    "google": "Google AI Studio API key (AIza…)",
+    "groq": "Groq API key (gsk_…)",
+    "mistral": "Mistral API key",
+    "cohere": "Cohere API key",
+    "xai": "xAI API key (xai-…)",
     "openai_codex": "",
 }
 
@@ -80,6 +116,12 @@ PROVIDER_BADGE_LABEL = {
     "openrouter": "openrouter",
     "openai": "openai",
     "openai_compatible": "openai-compat",
+    "anthropic": "anthropic",
+    "google": "gemini",
+    "groq": "groq",
+    "mistral": "mistral",
+    "cohere": "cohere",
+    "xai": "xai",
     "openai_codex": "chatgpt",
 }
 
@@ -94,8 +136,33 @@ PROVIDER_BASE_URL = {
     "openrouter": "https://openrouter.ai/api/v1",
     "openai": "https://api.openai.com/v1",
     "openai_compatible": None,
+    "anthropic": "https://api.anthropic.com/v1",
+    "google": "https://generativelanguage.googleapis.com/v1beta",
+    "groq": "https://api.groq.com/openai/v1",
+    "mistral": "https://api.mistral.ai/v1",
+    "cohere": "https://api.cohere.com/v1",
+    "xai": "https://api.x.ai/v1",
     "openai_codex": "",
 }
+
+
+# Host fragment -> provider id, for mapping a running model's base_url back
+# to its canonical cfg key (the toolbar badge). One uniform table — no
+# per-provider branches. Local Ollama is keyed on the port because its host
+# is user-configurable; everything else is keyed on the service's host.
+_BASE_URL_PROVIDER = (
+    ("chatgpt.com", "openai_codex"),
+    ("ollama.com", "ollama_cloud"),
+    ("openrouter.ai", "openrouter"),
+    ("api.openai.com", "openai"),
+    ("api.anthropic.com", "anthropic"),
+    ("generativelanguage.googleapis.com", "google"),
+    ("api.groq.com", "groq"),
+    ("api.mistral.ai", "mistral"),
+    ("api.cohere.com", "cohere"),
+    ("api.x.ai", "xai"),
+    (":11434", "ollama_local"),
+)
 
 
 def resolve_provider_from_base_url(base_url: str) -> str:
@@ -105,16 +172,9 @@ def resolve_provider_from_base_url(base_url: str) -> str:
     """
     if not base_url:
         return ""
-    if "chatgpt.com" in base_url:
-        return "openai_codex"
-    if "ollama.com" in base_url:
-        return "ollama_cloud"
-    if "openrouter.ai" in base_url:
-        return "openrouter"
-    if "api.openai.com" in base_url:
-        return "openai"
-    if ":11434" in base_url:
-        return "ollama_local"
+    for fragment, provider in _BASE_URL_PROVIDER:
+        if fragment in base_url:
+            return provider
     return "openai_compatible"
 
 

@@ -115,7 +115,7 @@ interpreter — a uv-managed build, or a `pyenv`/`conda` shim earlier on your
 `PATH` — will fail to `import gnuradio` even with `--system-site-packages`.
 
 ### 3. Setup LLM Backend
-Six concrete providers, switchable anytime from the app's Settings dialog:
+Twelve concrete providers, switchable anytime from the app's Settings dialog:
 1. **Ollama (local)** — local or LAN daemon
 2. **Ollama Cloud** — ollama.com, API key required
 3. **OpenRouter** — API key required

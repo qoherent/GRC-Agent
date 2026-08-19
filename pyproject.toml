@@ -52,6 +52,13 @@ dependencies = [
     "markdown-it-py>=3.0.0",
     "ddgs>=9.0",
     "pydantic-ai-harness>=0.21.0",
+    # Official provider SDKs for the pydantic-ai models the Settings UI
+    # exposes (anthropic/google ship with pydantic-ai-slim's own extras;
+    # these four are separate SDKs pydantic-ai wraps).
+    "groq>=0.9",
+    "mistralai>=1.0",
+    "cohere>=5.0",
+    "xai-sdk>=0.1",
 ]
 
 [project.optional-dependencies]
