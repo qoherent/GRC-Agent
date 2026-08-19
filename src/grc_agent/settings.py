@@ -83,7 +83,7 @@ _DEFAULT_MODELS = {
 _DEFAULT_PROVIDER = "ollama_local"
 
 _DEFAULT_OLLAMA_BASE_URL = "http://localhost:11434"
-_DEFAULT_OPENAI_COMPATIBLE_BASE_URL = "https://openrouter.ai/api/v1"
+_DEFAULT_OPENAI_COMPATIBLE_BASE_URL = "http://localhost:8080/v1"
 
 # mtime-gated cache for dotenv_values(env_path()). dotenv_values re-parses the
 # whole .env from disk on every call; callers like rag.py's embedding path hit
@@ -223,7 +223,7 @@ def load_settings() -> dict:
 
     openai_url = vals.get("OPENAI_COMPATIBLE_BASE_URL")
     if not openai_url:
-        openai_url = "https://openrouter.ai/api/v1"
+        openai_url = _DEFAULT_OPENAI_COMPATIBLE_BASE_URL
 
     embed_backend = vals.get("GRC_EMBED_BACKEND", _DEFAULT_EMBED_BACKEND)
     if embed_backend not in _VALID_EMBED_BACKENDS:

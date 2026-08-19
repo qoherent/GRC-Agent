@@ -9,8 +9,10 @@ from pydantic_ai import Agent, ModelSettings, RunContext
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.models.ollama import OllamaModel
 from pydantic_ai.models.openai import OpenAIChatModel
+from pydantic_ai.models.openrouter import OpenRouterModel
 from pydantic_ai.providers.ollama import OllamaProvider
 from pydantic_ai.providers.openai import OpenAIProvider
+from pydantic_ai.providers.openrouter import OpenRouterProvider
 from pydantic_ai.retries import AsyncTenacityTransport, RetryConfig
 from pydantic_ai_harness.compaction import (
     ClampOversizedMessages,
@@ -95,27 +97,37 @@ def _build_model(cfg: dict, http_client: httpx.AsyncClient):
         from grc_agent.providers.openai_codex import build_model as build_codex_model
 
         return build_codex_model(cfg["model"])
-    if provider in ("openrouter", "openai", "openai_compatible"):
-        if provider == "openrouter":
-            raw_url, key_var = "https://openrouter.ai/api/v1", "OPENROUTER_API_KEY"
-        elif provider == "openai":
-            raw_url, key_var = "https://api.openai.com/v1", "OPENAI_API_KEY"
-        else:
-            raw_url = (
-                cfg.get("openai_compatible_base_url")
-                or get_env_value("OPENAI_COMPATIBLE_BASE_URL")
-                or "https://openrouter.ai/api/v1"
-            )
-            key_var = "OPENAI_COMPATIBLE_API_KEY"
-        base_url = raw_url.rstrip("/")
-        base_url = base_url if base_url.endswith("/v1") else f"{base_url}/v1"
+    if provider == "openrouter":
+        # pydantic-ai's dedicated OpenRouter model/provider: adds the
+        # OpenRouter error taxonomy, attribution headers (HTTP-Referer /
+        # X-Title), and model profiles — the generic OpenAI path silently
+        # discards all of it.
+        key = get_env_value("OPENROUTER_API_KEY") or os.environ.get("OPENROUTER_API_KEY") or None
+        return OpenRouterModel(
+            cfg["model"],
+            provider=OpenRouterProvider(api_key=key, http_client=http_client),
+        )
+    if provider == "openai":
+        key = get_env_value("OPENAI_API_KEY") or os.environ.get("OPENAI_API_KEY") or None
+        return OpenAIChatModel(
+            cfg["model"],
+            provider=OpenAIProvider(api_key=key, http_client=http_client),
+        )
+    if provider == "openai_compatible":
+        # The user's own endpoint; api_key=None lets OpenAIProvider apply its
+        # own 'api-key-not-set' placeholder instead of our hand-rolled
+        # "not-required" sentinel.
+        raw_url = (
+            cfg.get("openai_compatible_base_url")
+            or get_env_value("OPENAI_COMPATIBLE_BASE_URL")
+            or "http://localhost:8080/v1"
+        ).rstrip("/")
+        base_url = raw_url if raw_url.endswith("/v1") else f"{raw_url}/v1"
         key = (
-            get_env_value(key_var)
-            or os.environ.get(key_var)
-            # Legacy pre-split .env: the generic provider served OpenRouter.
-            or (get_env_value("OPENROUTER_API_KEY") if provider == "openai_compatible" else None)
+            get_env_value("OPENAI_COMPATIBLE_API_KEY")
+            or os.environ.get("OPENAI_COMPATIBLE_API_KEY")
             or cfg.get("openai_compatible_api_key")
-            or "not-required"
+            or None
         )
         return OpenAIChatModel(
             cfg["model"],
@@ -553,7 +565,7 @@ def _preflight_target(provider: str, api_key: str, base_url: str) -> tuple[str, 
             base = (
                 base_url
                 or get_env_value("OPENAI_COMPATIBLE_BASE_URL")
-                or "https://openrouter.ai/api/v1"
+                or "http://localhost:8080/v1"
             ).rstrip("/")
         models_url = (
             base
