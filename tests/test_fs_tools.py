@@ -96,7 +96,7 @@ def test_offset_limit_paging(toolset, _saved):
     out = read(toolset, "big.txt", offset=2, limit=3)
     assert "     3\tline2" in out
     assert "     5\tline4" in out
-    assert "line5" not in out.split("... ")[0] or True
+    assert "line5" not in out  # pages 2-4 only; line5 lives on the next page
     assert "Use offset=5" in out
 
 
@@ -122,6 +122,17 @@ def _payload(out: str) -> dict:
     return json.loads(out.split("\n", 1)[1])
 
 
+def _assert_no_raw_flowgraph_source(out: str) -> None:
+    """The fixtures are YAML-format GRC files, so `<?xml` proves nothing.
+    Assert against markers that appear in the RAW fixture source but cannot
+    appear in the structural JSON: bare YAML keys (`options:`, `blocks:`,
+    `connections:` — the JSON quotes its keys, so the literal `key:` form
+    never occurs) and the YAML block-id header (`- id:`)."""
+    for marker in ("options:", "blocks:", "connections:", "- id:"):
+        assert marker not in out, f"raw flowgraph source leaked (found {marker!r})"
+    assert json.loads(out.split("\n", 1)[1])["graph"]  # valid structural JSON
+
+
 def test_active_grc_routed_to_inspect_engine_live(toolset, _saved):
     fg = load_flow_graph(str(_saved))
     import grc_agent.fs_tools as ft
@@ -134,9 +145,24 @@ def test_active_grc_routed_to_inspect_engine_live(toolset, _saved):
         ft._active_flow_graph_fn = orig
     assert "structural view via the inspect_graph engine" in out
     assert "live in-memory flowgraph" in out
-    assert "<?xml" not in out
-    data = _payload(out)
-    assert "graph" in data  # same engine/shape as the inspect_graph tool
+    _assert_no_raw_flowgraph_source(out)
+
+
+def test_active_grc_prefers_live_object_over_disk(toolset, _saved):
+    """Discriminate live vs disk: corrupt the disk copy AFTER loading the
+    live object — a live read still inspects; a disk read would fail to parse."""
+    fg = load_flow_graph(str(_saved))
+    import grc_agent.fs_tools as ft
+
+    orig = ft._active_flow_graph_fn
+    ft._active_flow_graph_fn = lambda: fg
+    try:
+        _saved.write_text("}}} corrupted yaml {{{", encoding="utf-8")
+        out = read(toolset, "proj.grc")
+    finally:
+        ft._active_flow_graph_fn = orig
+    assert "live in-memory flowgraph" in out
+    assert "graph" in _payload(out)  # parsed fine — the disk copy was never read
 
 
 def test_other_grc_in_folder_loaded_headless(toolset, _saved):
@@ -144,8 +170,7 @@ def test_other_grc_in_folder_loaded_headless(toolset, _saved):
     out = read(toolset, "colleague.grc")
     assert "structural view via the inspect_graph engine" in out
     assert "file on disk" in out
-    assert "<?xml" not in out
-    assert "graph" in _payload(out)
+    _assert_no_raw_flowgraph_source(out)
 
 
 def test_active_grc_without_live_object_reads_disk(toolset, _saved):
@@ -158,6 +183,78 @@ def test_malformed_grc_is_model_retry(toolset, _saved):
     (_saved.parent / "broken.grc").write_text("not xml at all", encoding="utf-8")
     with pytest.raises(ModelRetry, match="flowgraph"):
         read(toolset, "broken.grc")
+
+
+# -- audit fixes: name-rule coverage, nested denies, symlink write bypass ------
+
+
+def test_uppercase_GRC_routed_not_raw(toolset, _saved):
+    shutil.copy(FIXTURES / "dial_tone.grc", _saved.parent / "UPPER.GRC")
+    out = read(toolset, "UPPER.GRC")
+    assert "structural view via the inspect_graph engine" in out
+    _assert_no_raw_flowgraph_source(out)
+
+
+def test_grc_backup_suffix_routed_not_raw(toolset, _saved):
+    shutil.copy(FIXTURES / "dial_tone.grc", _saved.parent / "backup.grc~")
+    out = read(toolset, "backup.grc~")
+    assert "structural view via the inspect_graph engine" in out
+    _assert_no_raw_flowgraph_source(out)
+
+
+def test_nested_env_denied(toolset, _saved):
+    pkg = _saved.parent / "pkg"
+    pkg.mkdir()
+    (pkg / ".env").write_text("SECRET=2\n", encoding="utf-8")
+    with pytest.raises(ModelRetry, match="denied"):
+        read(toolset, "pkg/.env")
+
+
+def test_git_config_denied_read(toolset, _saved):
+    git_dir = _saved.parent / ".git"
+    git_dir.mkdir()
+    (git_dir / "config").write_text("[remote]\n", encoding="utf-8")
+    with pytest.raises(ModelRetry, match="denied"):
+        read(toolset, ".git/config")
+
+
+def test_walkers_do_not_surface_env_or_git(toolset, _saved):
+    root = _saved.parent
+    (root / ".env").write_text("X=1\n", encoding="utf-8")
+    pkg = root / "pkg"
+    pkg.mkdir()
+    (pkg / ".env").write_text("X=2\n", encoding="utf-8")
+    (root / ".git").mkdir()
+    (root / ".git" / "config").write_text("[core]\n", encoding="utf-8")
+    listing = run(toolset.list_directory("."))
+    assert ".env" not in listing and "pkg/" in listing
+    pkg_listing = run(toolset.list_directory("pkg"))
+    assert ".env" not in pkg_listing
+    found = run(toolset.find_files("*.env"))
+    assert found == "No matches found."
+
+
+def test_symlink_alias_to_grc_write_bypass_denied(toolset, _saved):
+    """write/edit via an in-root symlink naming a .grc target must be rejected
+    — the resolved target's name is checked too (adversarial audit repro)."""
+    import os
+
+    root = _saved.parent
+    target = root / "real.grc"
+    shutil.copy(FIXTURES / "dial_tone.grc", target)
+    alias = root / "alias.py"
+    os.symlink(target, alias)
+    with pytest.raises(ModelRetry, match="change_graph"):
+        write(toolset, "alias.py", "overwritten")
+    with pytest.raises(ModelRetry, match="change_graph"):
+        edit(toolset, "alias.py", "options:", "x")
+    assert target.read_text(encoding="utf-8") != "overwritten"
+    # And an alias naming the ACTIVE graph is likewise protected
+    active_alias = root / "active_alias.py"
+    os.symlink(_saved, active_alias)
+    with pytest.raises(ModelRetry, match="change_graph"):
+        write(toolset, "active_alias.py", "pwned")
+    assert "pwned" not in _saved.read_text(encoding="utf-8")
 
 
 # -- write_file -------------------------------------------------------------

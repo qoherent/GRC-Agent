@@ -26,6 +26,7 @@ native GRC app needs that a fixed ``root_dir`` cannot express:
 from __future__ import annotations
 
 import json
+import logging
 import os
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
@@ -48,6 +49,8 @@ from pydantic_ai_harness.filesystem._toolset import (
 )
 
 from grc_agent.adapter.graph import _atomic_write_text, inspect_graph, load_flow_graph
+
+_log = logging.getLogger(__name__)
 
 # --------------------------------------------------------------------------
 # Active-graph providers (installed by desktop_app once the canvas exists).
@@ -104,7 +107,20 @@ _NO_ACTIVE_GRAPH_MSG = (
 # Read access is denied outright (the harness's own protected list only makes
 # these read-only): the project root may be a repo checkout whose .env holds
 # every provider API key, and .grc_agent/ holds our own lock/snapshot state.
-_DENIED_PATTERNS = [".env", ".env.*", ".grc_agent/*"]
+# `**/`-duplicated entries cover NESTED files (pkg/.env, .venv/.env) — the
+# harness `_matches` strips a leading `**/` to cover the root-level case, and
+# bare fnmatch `*` spans `/` for the nested one. Without the `**/` forms the
+# deny patterns matched only root-level names (adversarial audit, live repro).
+_DENIED_PATTERNS = [
+    ".env",
+    ".env.*",
+    "**/.env",
+    "**/.env.*",
+    ".grc_agent/*",
+    "**/.grc_agent/*",
+    ".git/*",
+    "**/.git/*",
+]
 
 # The one uniform write rule: a file's suffix decides whether it may be
 # created or edited. `.grc` is deliberately absent — flowgraph writes are
@@ -138,6 +154,19 @@ _WRITE_GRC_MSG = (
     "Writing .grc files is not allowed — flowgraphs are edited through the "
     "change_graph tool (add/remove blocks and connections, set parameter values)."
 )
+
+
+def _is_grc_name(name: str) -> bool:
+    """One uniform flowgraph-name rule: any name containing `.grc` (case-insensitive).
+
+    Covers `.grc`, editor backups (`.grc~`, `.grc.orig`), and case variants
+    (`.GRC`) with one rule instead of a per-form list. The conservative
+    direction is deliberate: routing an oddly-named text file (e.g.
+    `notes.about.grc.md`) to the flowgraph parser fails with a clear
+    could-not-parse error, while missing a real flowgraph variant would leak
+    its raw source to the model.
+    """
+    return ".grc" in Path(name).name.lower()
 
 
 class GrcFileSystemToolset(FileSystemToolset[AgentDepsT]):
@@ -199,11 +228,15 @@ class GrcFileSystemToolset(FileSystemToolset[AgentDepsT]):
             raise ValueError(_NO_ACTIVE_GRAPH_MSG)
         return super()._safe_resolve(path, write=write, check_allowed=check_allowed)
 
-    def _assert_writable_suffix(self, path: str) -> None:
-        """One uniform write rule: the suffix allowlist. `.grc` never passes."""
+    def _assert_writable_suffix(self, path: str, resolved: Path | None = None) -> None:
+        """One uniform write rule: the suffix allowlist, applied to BOTH the
+        requested name and the resolved target (an in-root symlink can name a
+        `.grc` target as `alias.py` — the resolved name closes that bypass)."""
+        names = [Path(path).name] + ([resolved.name] if resolved is not None else [])
+        for name in names:
+            if _is_grc_name(name):
+                raise ValueError(_WRITE_GRC_MSG)
         suffix = Path(path).suffix.lower()
-        if suffix == ".grc":
-            raise ValueError(_WRITE_GRC_MSG)
         if suffix not in self._write_suffixes:
             what = f"{suffix!r} files" if suffix else "files without an extension"
             allowed = ", ".join(sorted(self._write_suffixes))
@@ -232,7 +265,7 @@ class GrcFileSystemToolset(FileSystemToolset[AgentDepsT]):
             File content with line numbers, plus metadata header.
         """
         resolved = self._safe_resolve(path)
-        if resolved.suffix == ".grc":
+        if _is_grc_name(resolved.name):
             return self._inspect_grc_file(resolved)
         return await super().read_file(path, offset=offset, limit=limit)
 
@@ -259,7 +292,12 @@ class GrcFileSystemToolset(FileSystemToolset[AgentDepsT]):
         try:
             fg = load_flow_graph(str(resolved))
         except Exception as exc:  # arbitrary user files fail in arbitrary ways
-            raise ValueError(f"Could not parse {resolved.name!r} as a flowgraph: {exc}") from exc
+            # Fixed message only: parse exceptions interpolate arbitrary file
+            # content, and ModelRetry text is NOT classified by the injection
+            # defender (retries skip after_tool_execute). The details go to the
+            # log instead.
+            _log.warning("read_file could not parse %s as a flowgraph: %s", resolved.name, exc)
+            raise ValueError(f"Could not parse {resolved.name!r} as a GNU Radio flowgraph file.") from exc
         return inspect_graph(fg, targets=None, view="overview")
 
     # -- write_file with a suffix allowlist and atomic replacement ----------
@@ -287,6 +325,7 @@ class GrcFileSystemToolset(FileSystemToolset[AgentDepsT]):
         """
         self._assert_writable_suffix(path)
         resolved = self._safe_resolve(path, write=True)
+        self._assert_writable_suffix(path, resolved)
 
         # Optimistic concurrency: reject stale writes
         if expected_hash is not None and resolved.is_file():
@@ -330,6 +369,7 @@ class GrcFileSystemToolset(FileSystemToolset[AgentDepsT]):
         """
         self._assert_writable_suffix(path)
         resolved = self._safe_resolve(path, write=True)
+        self._assert_writable_suffix(path, resolved)
         if not resolved.is_file():
             raise FileNotFoundError(f"File not found: {path}")
 

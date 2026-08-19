@@ -71,8 +71,12 @@ def test_injection_in_file_read_is_withheld(tmp_path, monkeypatch):
     ret = str(_tool_return(result).content)
     assert "withheld" in ret
     assert "prompt injection" in ret
-    assert "attacker@example.com" not in ret
-    assert "IGNORE ALL PREVIOUS" not in ret
+    # The payload must be absent from the ENTIRE message history — not just
+    # the first ToolReturnPart (audit: absence was only pinned on parts[0]).
+    history_text = "\n".join(str(getattr(p, "content", "")) for m in result.all_messages() for p in m.parts)
+    args_text = str([getattr(p, "args", "") for m in result.all_messages() for p in m.parts])
+    assert "attacker@example.com" not in history_text + args_text
+    assert "IGNORE ALL PREVIOUS" not in history_text
 
 
 def test_benign_file_read_passes_through(tmp_path, monkeypatch):
@@ -92,11 +96,21 @@ def test_detection_is_logged(tmp_path, monkeypatch, caplog):
     assert any("prompt-injection" in r.message and "read_file" in r.message for r in caplog.records)
 
 
-def test_capability_on_factory_agent():
-    """The interactive agent's capability list includes the defender."""
+def test_capability_on_factory_agent(tmp_path, monkeypatch):
+    """The interactive agent's capability list includes the defender.
+
+    Hermetic per the suite's convention: fresh GRC_AGENT_ENV (the factory
+    otherwise binds StepPersistence to the real repo DB) and the compaction
+    window probe patched out (otherwise it reads the repo .env and POSTs the
+    backend's /api/show)."""
     from pydantic_ai_harness import PromptInjectionDefender
 
     from grc_agent.agent_factory import build_agent_from_cfg
+
+    env_file = tmp_path / ".env"
+    env_file.write_text("", encoding="utf-8")
+    monkeypatch.setenv("GRC_AGENT_ENV", str(env_file))
+    monkeypatch.setattr("grc_agent.agent_factory.resolve_model_context_length", lambda *_a, **_k: None)
 
     cfg = {
         "provider": "ollama_local",
