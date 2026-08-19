@@ -303,6 +303,97 @@ def test_edit_cannot_create_files(toolset, _saved):
         edit(toolset, "brand_new.py", "", "content")
 
 
+# -- inherited tools: list_directory / search_files / find_files -------------
+
+
+def test_list_directory_entries_and_dotfile_skipping(toolset, _saved):
+    root = _saved.parent
+    (root / "a.py").write_text("x", encoding="utf-8")
+    (root / "sub").mkdir()
+    (root / ".hidden").write_text("x", encoding="utf-8")
+    out = run(toolset.list_directory("."))
+    assert "a.py" in out and "(1 bytes)" in out
+    assert "sub/" in out
+    assert ".hidden" not in out
+    assert "proj.grc" in out  # listings still SEE .grc files
+
+
+def test_list_directory_cap_at_200(toolset, _saved):
+    root = _saved.parent
+    for i in range(205):
+        (root / f"f{i:03}.txt").write_text("x", encoding="utf-8")
+    out = run(toolset.list_directory("."))
+    assert "[... truncated at 200 entries]" in out
+    assert "f204" not in out  # sorted order: the tail was dropped
+
+
+def test_list_directory_gated_when_unsaved(toolset):
+    with pytest.raises(ModelRetry, match="save the flowgraph"):
+        run(toolset.list_directory("."))
+
+
+def test_search_files_greps_contents_including_grc(toolset, _saved):
+    root = _saved.parent
+    (root / "helper.py").write_text("samp_rate = 32000\n", encoding="utf-8")
+    out = run(toolset.search_files("32000"))
+    assert "helper.py:1:samp_rate = 32000" in out
+    # .grc XML is greppable (decision: allow — writes are what's forbidden)
+    assert "proj.grc:" in out
+
+
+def test_search_files_include_glob(toolset, _saved):
+    root = _saved.parent
+    (root / "a.py").write_text("needle\n", encoding="utf-8")
+    (root / "b.txt").write_text("needle\n", encoding="utf-8")
+    out = run(toolset.search_files("needle", include_glob="*.py"))
+    assert "a.py:1" in out and "b.txt" not in out
+
+
+def test_find_files_glob(toolset, _saved):
+    root = _saved.parent
+    (root / "x.py").write_text("", encoding="utf-8")
+    out = run(toolset.find_files("*.py"))
+    assert "x.py" in out
+    out_grc = run(toolset.find_files("*.grc"))
+    assert "proj.grc" in out_grc
+
+
+def test_find_files_absolute_pattern_rejected(toolset, _saved):
+    with pytest.raises(ModelRetry, match="must be relative"):
+        run(toolset.find_files("/etc/*.py"))
+
+
+# -- create_directory / file_info ---------------------------------------------
+
+
+def test_create_directory_with_parents(toolset, _saved):
+    out = run(toolset.create_directory("scripts/utils"))
+    assert "Created directory" in out
+    assert (_saved.parent / "scripts" / "utils").is_dir()
+
+
+def test_create_directory_gated_when_unsaved(toolset):
+    with pytest.raises(ModelRetry, match="save the flowgraph"):
+        run(toolset.create_directory("x"))
+
+
+def test_file_info_hash_matches_read_header(toolset, _saved):
+    f = _saved.parent / "helper.py"
+    f.write_text("a\nb\n", encoding="utf-8")
+    info = run(toolset.file_info("helper.py"))
+    read_out = read(toolset, "helper.py")
+    info_hash = next(ln.split(": ")[1] for ln in info.splitlines() if ln.startswith("hash:"))
+    assert f"hash:{info_hash}" in read_out
+    assert "lines: 2" in info
+    assert "type: file" in info
+
+
+def test_file_info_grc_still_metadata_only(toolset, _saved):
+    info = run(toolset.file_info("proj.grc"))
+    assert "type: file" in info
+    assert "binary: False" in info  # XML is text; no content is dumped either way
+
+
 # -- toolset registration ------------------------------------------------------
 
 
