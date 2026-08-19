@@ -120,8 +120,14 @@ Twelve concrete providers, switchable anytime from the app's Settings dialog:
 2. **Ollama Cloud** — ollama.com, API key required
 3. **OpenRouter** — API key required
 4. **OpenAI API** — API key required
-5. **Other (OpenAI-compatible)** — llama.cpp, vLLM, LM Studio, Groq, …
-6. **ChatGPT Plus/Pro (Codex)** — OAuth sign-in, no API key (see Option C below)
+5. **Other (OpenAI-compatible)** — llama.cpp, vLLM, LM Studio, …
+6. **Anthropic (Claude)** — API key required
+7. **Google (Gemini)** — API key required
+8. **Groq** — API key required
+9. **Mistral** — API key required
+10. **Cohere** — API key required
+11. **xAI (Grok)** — API key required
+12. **ChatGPT Plus/Pro (Codex)** — OAuth sign-in, no API key (see Option C below)
 
 The active provider, model name, base URL, and API keys persist in `.env` and apply immediately on Save (no restart needed).
 
@@ -150,7 +156,15 @@ Set it to `120000`:
 - **OpenAI API:** pick **OpenAI API** (endpoint fixed), Model e.g. `gpt-5.6-sol`, paste your API key.
 - **Other (local servers — llama.cpp / vLLM / LM Studio / Groq):** Base URL e.g. `http://localhost:8080/v1` (or your server port), Model e.g. `qwen2.5-coder:32b`, API key optional.
 
-#### Option C: ChatGPT Plus/Pro (Codex)
+#### Option C: Anthropic / Gemini / Groq / Mistral / Cohere / xAI
+Each of these is pydantic-ai's dedicated model/provider — pick the provider
+in Settings (endpoint fixed, read-only), Model e.g. `claude-sonnet-4-5`,
+`gemini-2.5-pro`, `llama-3.3-70b-versatile`, `mistral-large-latest`,
+`command-r-plus`, or `grok-4`, and paste the provider's API key. Click
+**Load** next to the model field to list the models that provider actually
+serves.
+
+#### Option D: ChatGPT Plus/Pro (Codex)
 Sign in with your ChatGPT account instead of an API key — OpenAI documents
 ChatGPT sign-in as the [subscription auth mode for
 Codex](https://developers.openai.com/codex/auth). Pick **ChatGPT Plus/Pro
