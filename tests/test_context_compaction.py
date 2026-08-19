@@ -335,7 +335,7 @@ def test_chat_sidebar_renders_compacted_messages_cleanly():
     assert "inspect_graph" in expander.get_label()
 
 
-def test_summarizing_tier_fires_over_budget_and_replaces_old_turns(monkeypatch):
+def test_summarizing_tier_fires_over_budget_and_replaces_old_turns():
     """The summarizing tier (ResilientSummarizingCompaction, D1 model
     inheritance) replaces turns older than keep_messages with a summary
     SystemPromptPart when the cheap tiers cannot fit the history under
@@ -483,7 +483,7 @@ def test_conversation_search_recalls_compacted_detail(tmp_path, monkeypatch):
             conversation_id=conv,
         )
         h1 = r1.all_messages()
-        r2 = await agent.run(
+        await agent.run(
             "Continue; set the throttle to 0.005.", message_history=h1, conversation_id=conv
         )
         # Turn 3 must be a FRESH run: TestModel calls its configured tools

@@ -987,6 +987,12 @@ class ChatSidebar(Gtk.Box):
         (D3), and the send button becomes Stop so the user can cancel."""
         if self._busy or self._agent is None or not self._message_history:
             return
+        if self._active_session_id is None:
+            # No session row = no conversation id: the pre-compact snapshot
+            # cannot be registered, so compacting would destroy the only
+            # (in-memory) copy of the summarized turns. Refuse.
+            self.set_status("Cannot compact — history is not saved to a session yet.", error=True)
+            return
         self._set_busy(True)
         self._compact_task = asyncio.ensure_future(self._run_compact_now())
 
@@ -1027,11 +1033,21 @@ class ChatSidebar(Gtk.Box):
                 self._message_history,
                 model=self._agent.model,  # D1: model=None inherits this
             )
+            strategy_keep = strategy.keep_messages
+            had_work = len(self._message_history) > strategy_keep
             if compacted is not self._message_history and compacted != self._message_history:
                 self._message_history = compacted
                 await self._save_history()
                 self._render_history()
                 self.set_status("History compacted — older messages summarized.")
+            elif had_work:
+                # More than keep_messages messages and STILL unchanged: the
+                # summary call itself failed (D2 kept the history — e.g. Codex,
+                # whose transport rejects the non-streaming summarizer).
+                self.set_status(
+                    "Compaction failed — summary unavailable, history unchanged.",
+                    error=True,
+                )
             else:
                 self.set_status("History is already compact — nothing to summarize.")
         except Exception as e:

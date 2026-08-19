@@ -181,7 +181,8 @@ widget trees and need a display (`xvfb-run`); the graph/layout/db/exec tests do 
 
 `test_isolation.py` and the live-network tests (lite.duckduckgo.com search,
 Ollama embeddings/chat for RAG) are not fully hermetic. `test_isolation.py`
-needs no GUI/display server; `test_unit.py` builds real GTK widget trees and needs
+needs no GUI/display server; the sidebar/dialog/canvas clusters (test_chat_sidebar,
+test_native_canvas, test_desktop_app) build real GTK widget trees and need
 one (`xvfb-run`). `test_session_traces.py` is fully hermetic (each test redirects
 `GRC_AGENT_ENV` to a fresh tmp path). `test_session_traces_advanced.py` uses
 pydantic-ai's `TestModel` for real-agent-integration tests (no LLM, deterministic),

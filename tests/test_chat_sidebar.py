@@ -1748,18 +1748,29 @@ def test_compact_now_button_compacts_history_and_snapshots_first(tmp_path, monke
     from unittest.mock import AsyncMock, MagicMock
 
     from pydantic_ai import Agent
-    from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, UserPromptPart
+    from pydantic_ai.messages import (
+        ModelMessage,
+        ModelRequest,
+        ModelResponse,
+        TextPart,
+        UserPromptPart,
+    )
     from pydantic_ai.models.test import TestModel
 
     from grc_agent.chat_sidebar import ChatSidebar
-    from grc_agent.db import get_step_store
+    from grc_agent.db import conversation_id_for_session, get_step_store, save_session
 
     monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
+
+    # A real session row so the pre-compact snapshot seam actually runs.
+    f = tmp_path / "g.grc"
+    f.touch()
+    sid = save_session(None, str(f), [])
 
     def _turn(i: int) -> list[ModelMessage]:
         return [
             ModelRequest(parts=[UserPromptPart(content=f"Turn {i}: " + ("y" * 200))]),
-            ModelResponse(parts=[UserPromptPart(content=f"Turn {i} done.")]),
+            ModelResponse(parts=[TextPart(content=f"Turn {i} done.")]),
         ]
 
     history: list[ModelMessage] = []
@@ -1769,6 +1780,7 @@ def test_compact_now_button_compacts_history_and_snapshots_first(tmp_path, monke
     agent = Agent(TestModel(), capabilities=[])
     sidebar = ChatSidebar()
     sidebar._agent = agent
+    sidebar._active_session_id = sid
     sidebar._message_history = history
     sidebar._save_history = AsyncMock()
     sidebar._render_history = MagicMock()
@@ -1788,8 +1800,16 @@ def test_compact_now_button_compacts_history_and_snapshots_first(tmp_path, monke
     sidebar._render_history.assert_called_once()
     assert sidebar._busy is False
 
-    # D3: the pre-compact snapshot row exists under the conversation id.
-    # (No active session id in this bare sidebar — snapshot path skipped, so
-    # assert the history replacement is the observable contract; the snapshot
-    # seam itself is covered by the session-scoped store test.)
-    assert get_step_store() is not None
+    # D3: the pre-compact snapshot row exists under the conversation id — the
+    # ORIGINAL (unsummarized) history is what was snapshotted, so
+    # ConversationSearch can still recall what the summary drops.
+    import asyncio as _a
+
+    conv = conversation_id_for_session(sid)
+    store = get_step_store()
+    runs = _a.run(store.list_runs(conversation_id=conv))
+    assert runs, "pre-compact snapshot run never registered"
+    snaps = _a.run(store.list_snapshots(run_id=runs[-1].run_id))
+    assert snaps, "pre-compact snapshot unreadable via the store seam"
+    snap_msgs = snaps[-1].messages
+    assert len(snap_msgs) == len(history), "snapshot must hold the FULL pre-compact history"
