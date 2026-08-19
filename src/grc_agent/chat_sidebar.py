@@ -23,6 +23,8 @@ gi.require_version("Gtk", "3.0")
 gi.require_version("Gdk", "3.0")
 gi.require_version("Pango", "1.0")
 
+from uuid import uuid4
+
 from gi.repository import Gdk, GLib, GObject, Gtk, Pango
 from pydantic_ai import (
     Agent,
@@ -58,6 +60,7 @@ from .db import (
     delete_all_sessions,
     delete_session,
     deserialize_messages,
+    get_step_store,
     load_session,
     save_session,
 )
@@ -552,6 +555,7 @@ class ChatSidebar(Gtk.Box):
         # session can't resurrect.
         self._clear_generation: int = 0
         self._chat_task: asyncio.Task | None = None
+        self._compact_task: asyncio.Task | None = None
         # Set by shutting_down() (called from desktop_app.py's _shutdown)
         # just before stop_chat(). _run_agent_turn's finally block checks
         # this to skip widget operations on widgets that are mid-destroy
@@ -645,6 +649,11 @@ class ChatSidebar(Gtk.Box):
             "edit-clear-all-symbolic",
             "Clear conversation history",
             cb=self._on_clear_history_clicked,
+        )
+        self._compact_btn = _icon_btn(
+            "view-refresh-symbolic",
+            "Compact conversation history — summarize older messages (keeps recent context)",
+            cb=self._on_compact_clicked,
         )
 
         # Active graph badge — expands to fill the toolbar's leftover space.
@@ -970,6 +979,68 @@ class ChatSidebar(Gtk.Box):
         dialog.show()
         _log.info("Clear History: dialog shown, awaiting response")
 
+    def _on_compact_clicked(self, _btn: Gtk.Button) -> None:
+        """Manual compaction (compact_now button): summarize the older part of
+        the conversation between runs, on the unified event loop — never the
+        GTK thread. The pre-compact history is snapshotted into the step store
+        first so ConversationSearch can still recall what the summary drops
+        (D3), and the send button becomes Stop so the user can cancel."""
+        if self._busy or self._agent is None or not self._message_history:
+            return
+        self._set_busy(True)
+        self._compact_task = asyncio.ensure_future(self._run_compact_now())
+
+    async def _run_compact_now(self) -> None:
+        try:
+            from pydantic_ai_harness.compaction._manual import compact_now
+            from pydantic_ai_harness.step_persistence import (
+                ContinuableSnapshot,
+                RunRecord,
+            )
+
+            from .agent_factory import make_summarizing_strategy
+
+            # D3: snapshot the pre-compact history first so ConversationSearch
+            # can still recall what the summary drops. The run id mirrors
+            # StepPersistence's own derivation ('{agent_name}-{8-hex}').
+            sid = self._active_session_id
+            if sid is not None:
+                store = get_step_store()
+                conv = conversation_id_for_session(sid)
+                rid = f"grc_chat-{uuid4().hex[:8]}"
+                await store.register_run(
+                    RunRecord(run_id=rid, conversation_id=conv, agent_name="grc_chat")
+                )
+                await store.save_snapshot(
+                    ContinuableSnapshot(
+                        run_id=rid,
+                        step_index=0,
+                        messages=self._message_history,
+                        conversation_id=conv,
+                        agent_name="grc_chat",
+                    )
+                )
+
+            strategy = make_summarizing_strategy()
+            compacted = await compact_now(
+                strategy,
+                self._message_history,
+                model=self._agent.model,  # D1: model=None inherits this
+            )
+            if compacted is not self._message_history and compacted != self._message_history:
+                self._message_history = compacted
+                await self._save_history()
+                self._render_history()
+                self.set_status("History compacted — older messages summarized.")
+            else:
+                self.set_status("History is already compact — nothing to summarize.")
+        except Exception as e:
+            _log.warning("compact_now failed: %s", e, exc_info=True)
+            self.set_status("Compaction failed — history unchanged.", error=True)
+        finally:
+            self._set_busy(False)
+            self._update_context_label()
+
     def _on_delete_recent_session(self, session_id: int) -> None:
         """Delete a saved conversation after a confirmation dialog — mirrors the
         per-row delete-with-confirm of the reference web UI sidebar. The dialog
@@ -1183,6 +1254,7 @@ class ChatSidebar(Gtk.Box):
             self._chat_task.cancel()
         self._message_history = []
         self._active_session_id = None
+        self._compact_btn.set_sensitive(False)
         self._render_history()
 
     def _refresh_welcome_times(self) -> bool:
@@ -1348,6 +1420,8 @@ class ChatSidebar(Gtk.Box):
     def stop_chat(self) -> None:
         if self._chat_task and not self._chat_task.done():
             self._chat_task.cancel()
+        if self._compact_task and not self._compact_task.done():
+            self._compact_task.cancel()
 
     def shutting_down(self) -> None:
         """Signal that the app is shutting down — any in-flight widget cleanup
@@ -2204,6 +2278,7 @@ class ChatSidebar(Gtk.Box):
         self._gear_btn.set_sensitive(not busy)
         self._new_session_btn.set_sensitive(not busy)
         self._clear_hist_btn.set_sensitive(not busy)
+        self._compact_btn.set_sensitive(not busy and bool(self._message_history))
         if busy:
             self._send_btn.set_image(
                 Gtk.Image.new_from_icon_name(

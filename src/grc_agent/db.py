@@ -268,17 +268,19 @@ def get_step_store() -> SqliteStepStore:
 
     One store per resolved db path (so test isolation via `GRC_AGENT_ENV`
     gets a fresh store per tmp path), shared across agent live-swaps — the
-    store outlives any single `Agent`. `max_snapshots_per_run=2` bounds the
-    full-history snapshot write amplification: a turn with many tool calls
-    still keeps only its newest snapshots (plus the newest `complete` one
-    for `continue_run`). Media externalization (64 KiB threshold) keeps big
-    tool-return blobs deduplicated in the sibling `media` table instead of
-    repeated inside every snapshot row."""
+    store outlives any single `Agent`. `max_snapshots_per_run=None` keeps
+    EVERY settled tool-boundary snapshot (D3: ConversationSearch's
+    `SnapshotHistorySource` recovers the union of a run's snapshots, so the
+    pre-compaction originals must survive a mid-turn SummarizingCompaction —
+    a 2-snapshot cap could leave only post-compact copies and permanently
+    lose what the summary dropped). Media externalization (64 KiB
+    threshold) keeps big tool-return blobs deduplicated in the sibling
+    `media` table instead of repeated inside every snapshot row."""
     key = str(get_db_path())
     store = _step_stores.get(key)
     if store is None:
         init_db()
-        store = SqliteStepStore(database=key, max_snapshots_per_run=2)
+        store = SqliteStepStore(database=key, max_snapshots_per_run=None)
         _step_stores[key] = store
     return store
 

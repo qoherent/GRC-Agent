@@ -464,3 +464,142 @@ def test_scenario_lexical_fallback_ollama_cloud_only(monkeypatch):
             )
         finally:
             shutil.rmtree(tmp_dir)
+
+
+def test_ollama_cloud_summarizing_compaction_and_conversation_search(monkeypatch):
+    """End-to-end (Ollama Cloud only, never parametrized): real multi-turn
+    session, then the harness `compact_now` (the sidebar button's engine)
+    writes a REAL-model summary of the older turns, and the model recovers a
+    pre-compact detail (FIDDLEHEAD_7311) via search_conversation_history from
+    the persisted snapshots (D3). The automatic token-trigger path is proven
+    hermetically (model-return sizes are nondeterministic — not worth
+    calibrating live); what only a real model can prove is the summary call
+    itself and the recall afterwards."""
+    import sqlite3
+
+    if not _ollama_cloud_available():
+        pytest.skip("OLLAMA_CLOUD_API_KEY not set — skipping Ollama Cloud integration test.")
+
+    import asyncio
+
+    from pydantic_ai import UsageLimits
+    from pydantic_ai.messages import SystemPromptPart
+    from pydantic_ai_harness.compaction._manual import compact_now
+    from pydantic_ai_harness.conversation_search import ConversationSearch, SnapshotHistorySource
+    from pydantic_ai_harness.step_persistence import StepPersistence
+
+    from grc_agent.agent_factory import make_summarizing_strategy
+    from grc_agent.db import get_db_path, get_step_store
+
+    sc = next(s for s in SCENARIOS if s["name"] == "01_add_throttle")
+    fg, fixture_path, tmp_dir = fresh_agent(sc["fixture"])
+
+    # Fresh step store per run: point GRC_AGENT_ENV at a tmp .env so the
+    # session DB + snapshots start empty.
+    monkeypatch.setenv("GRC_AGENT_ENV", str(Path(tmp_dir) / "env"))
+
+    strategy = make_summarizing_strategy().__class__(
+        max_messages=1, keep_messages=2, keep_user_messages=True
+    )
+    try:
+        model = build_scenario_model(
+            "ollama_cloud", os.getenv("OLLAMA_CLOUD_MODEL", "deepseek-v4-flash:cloud")
+        )
+        agent = Agent(
+            model,
+            deps_type=Any,
+            output_type=[GrcAgentResponse, str],
+            name="grc_compaction_live_test",
+            instructions=build_system_prompt("pai-experiment-test"),
+            tools=grc_tools(),
+            capabilities=[
+                StopGracefully(),
+                StepPersistence(store=get_step_store(), agent_name="grc_chat"),
+                ConversationSearch(SnapshotHistorySource(get_step_store()), scope="conversation"),
+            ],
+            model_settings=ModelSettings(),
+            retries={"tools": 3, "output": 3},
+        )
+        agent.output_validator(validate_flowgraph_state)
+
+        conv = "session-compact-live"
+        history = []
+
+        # Turn 1: real work + a unique recall phrase.
+        r1 = agent.run_sync(
+            "Inspect the whole flowgraph in detail, then add a throttle block "
+            "with value 0.001 between the first source and the adder. "
+            "Remember the phrase FIDDLEHEAD_7311 — it will not appear again.",
+            deps=fg,
+            message_history=history,
+            conversation_id=conv,
+            usage_limits=UsageLimits(request_limit=200),
+        )
+        history = r1.all_messages()
+        # Turn 2: more real work so the summary has substance.
+        r2 = agent.run_sync(
+            "Add a second throttle block to the same flowgraph, and set samp_rate to 32000.",
+            deps=fg,
+            message_history=history,
+            conversation_id=conv,
+            usage_limits=UsageLimits(request_limit=200),
+        )
+        history = r2.all_messages()
+
+        # Force the real-model summary (the button's engine — unconditional).
+        compacted = asyncio.run(compact_now(strategy, history, model=model))
+
+        # The summary call really ran and summarized the older turns.
+        summary_parts = [
+            p.content
+            for m in compacted
+            for p in getattr(m, "parts", [])
+            if isinstance(p, SystemPromptPart)
+            and p.content.startswith("Summary of previous conversation")
+        ]
+        assert summary_parts, "compact_now produced no summary from the real model"
+        assert len(summary_parts[0]) > 200, (
+            f"summary suspiciously thin for 2 real turns: {summary_parts[0][:120]!r}"
+        )
+
+        # Turn 3: continue from the compacted history; the model recalls the
+        # phrase via the search tool (snapshots from turns 1-2, pre-compact).
+        r3 = agent.run_sync(
+            "Before answering, call search_conversation_history for the phrase "
+            "FIDDLEHEAD_7311 and report what it says. Then verify the flowgraph "
+            "is valid.",
+            deps=fg,
+            message_history=compacted,
+            conversation_id=conv,
+            usage_limits=UsageLimits(request_limit=200),
+        )
+        final_history = r3.all_messages()
+
+        search_returns = [
+            p.content
+            for m in final_history
+            for p in getattr(m, "parts", [])
+            if p.__class__.__name__ == "ToolReturnPart"
+            and p.tool_name == "search_conversation_history"
+        ]
+        assert search_returns, "model never called search_conversation_history"
+        assert "FIDDLEHEAD_7311" in str(search_returns[-1]), (
+            f"snapshot recall missed the phrase: {str(search_returns[-1])[:200]}"
+        )
+
+        # The graph edits landed.
+        assert fg.get_block("samp_rate").params["value"].get_value() == "32000"
+        throttles = [b for b in fg.blocks if b.name.startswith("throttle")]
+        assert throttles, "no throttle blocks in the graph"
+
+        # Snapshots persisted for both real turns (unbounded cap).
+        conn = sqlite3.connect(str(get_db_path()))
+        try:
+            snap_rows = conn.execute(
+                "SELECT count(*) FROM snapshots WHERE conversation_id = ?", (conv,)
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        assert snap_rows >= 2, f"expected >=2 snapshot rows, got {snap_rows}"
+    finally:
+        shutil.rmtree(tmp_dir)

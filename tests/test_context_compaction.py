@@ -6,6 +6,7 @@ from pydantic_ai.messages import (
     ModelMessage,
     ModelRequest,
     ModelResponse,
+    SystemPromptPart,
     TextPart,
     ThinkingPart,
     ToolCallPart,
@@ -13,8 +14,10 @@ from pydantic_ai.messages import (
     UserPromptPart,
 )
 from pydantic_ai.models.test import TestModel
+from pydantic_ai_harness.step_persistence import StepPersistence
 
-from grc_agent.agent_factory import _build_compaction_capability
+from grc_agent.agent_factory import _build_compaction_capability, make_summarizing_strategy
+from grc_agent.db import get_step_store
 
 
 def test_compaction_under_budget_preserves_exact_history():
@@ -72,7 +75,7 @@ def test_compaction_over_budget_evicts_old_tool_returns_keeps_last_n():
     session-14 40-request loop regression)."""
     # Set a small target_tokens so compaction triggers
     cfg = {"provider": "ollama_local", "ollama_base_url": "http://localhost:11434"}
-    os.environ["GRC_COMPACTION_TARGET_TOKENS"] = "500"
+    os.environ["GRC_COMPACTION_TARGET_TOKENS"] = "1500"
     try:
         compaction = _build_compaction_capability(cfg)
     finally:
@@ -330,3 +333,221 @@ def test_chat_sidebar_renders_compacted_messages_cleanly():
     expander = children[0]
     assert isinstance(expander, Gtk.Expander)
     assert "inspect_graph" in expander.get_label()
+
+
+def test_summarizing_tier_fires_over_budget_and_replaces_old_turns(monkeypatch):
+    """The summarizing tier (ResilientSummarizingCompaction, D1 model
+    inheritance) replaces turns older than keep_messages with a summary
+    SystemPromptPart when the cheap tiers cannot fit the history under
+    target. Uses the GRC_COMPACTION_TARGET_TOKENS escape hatch so the
+    TestModel's window resolution is irrelevant."""
+
+    from pydantic_ai_harness.compaction._summarizing_compaction import (
+        _KEPT_USER_MESSAGE_METADATA,
+        _SUMMARY_PREFIX,
+    )
+
+    cfg = {"provider": "ollama_local", "ollama_base_url": "http://localhost:11434"}
+    os.environ["GRC_COMPACTION_TARGET_TOKENS"] = "1500"
+    try:
+        compaction = _build_compaction_capability(cfg)
+    finally:
+        os.environ.pop("GRC_COMPACTION_TARGET_TOKENS", None)
+
+    # ~300 chars per message so the 4-char/token estimate clears the target
+    # (the tier's own trigger is bypassed; TieredCompaction re-measures after
+    # each tier). The target must also fit the POST-summary history — the
+    # keep_user_messages retention copies plus the summary — or the final
+    # SlidingWindow backstop would drop the summary again.
+    def _turn(i: int) -> list[ModelMessage]:
+        body = f"Turn {i}: " + ("x" * 220)
+        return [
+            ModelRequest(parts=[UserPromptPart(content=body)]),
+            ModelResponse(parts=[TextPart(content=f"Turn {i} done.")]),
+        ]
+
+    history: list[ModelMessage] = _turn(1)
+    # 25 more turns — far beyond keep_messages=20, so find_safe_cutoff cuts.
+    for i in range(2, 27):
+        history.extend(_turn(i))
+
+    agent = Agent(TestModel(), capabilities=[compaction])
+
+    async def _run():
+        result = await agent.run("Final turn", message_history=history)
+        all_msgs = result.all_messages()
+
+        # The summary message exists and carries the harness prefix.
+        summaries = [
+            p.content
+            for m in all_msgs
+            if isinstance(m, ModelRequest)
+            for p in m.parts
+            if isinstance(p, SystemPromptPart) and p.content.startswith(_SUMMARY_PREFIX)
+        ]
+        assert summaries, "summarizing tier never fired"
+        assert all(s for s in summaries), "summary must be non-empty"
+
+        # The turn-1 MODEL RESPONSE is gone from the live context (the user
+        # prompt itself survives by design as a D3 retention copy).
+        live_text = " ".join(
+            str(p.content)
+            for m in all_msgs
+            for p in m.parts
+            if isinstance(p, (UserPromptPart, SystemPromptPart, TextPart))
+        )
+        assert "Turn 1 done." not in live_text
+
+        # keep_user_messages (D3): retained copies carry the metadata key and
+        # hold the user prompt text.
+        kept = [
+            m
+            for m in all_msgs
+            if isinstance(m, ModelRequest) and (m.metadata or {}).get(_KEPT_USER_MESSAGE_METADATA)
+        ]
+        assert kept, "keep_user_messages retention copies missing"
+        assert all(isinstance(pp, UserPromptPart) for m in kept for pp in m.parts), (
+            "retained copies must contain only user prompts"
+        )
+
+    asyncio.run(_run())
+
+
+def test_summarizing_failure_degrades_keeps_history(monkeypatch):  # noqa: ARG001
+    """D2: a summarization failure must never hard-fail the turn — the
+    ResilientSummarizingCompaction returns the pre-compact history unchanged
+    (the harness's own compact_now builds the throwaway RunContext)."""
+    from pydantic_ai_harness.compaction._manual import compact_now
+
+    from grc_agent.agent_factory import ResilientSummarizingCompaction
+
+    strat = ResilientSummarizingCompaction(max_messages=1, keep_messages=2, keep_user_messages=True)
+
+    async def _boom(*_a, **_k):
+        raise RuntimeError("summarizer boom")
+
+    monkeypatch.setattr(strat, "_summarize", _boom)
+
+    history: list[ModelMessage] = [
+        ModelRequest(parts=[UserPromptPart(content="u1")]),
+        ModelResponse(parts=[TextPart(content="r1")]),
+        ModelRequest(parts=[UserPromptPart(content="u2")]),
+        ModelResponse(parts=[TextPart(content="r2")]),
+        ModelRequest(parts=[UserPromptPart(content="u3")]),
+        ModelResponse(parts=[TextPart(content="r3")]),
+    ]
+
+    out = asyncio.run(compact_now(strat, history, model=TestModel()))
+    assert out is history, "failure must return the original list object"
+
+
+def test_conversation_search_recalls_compacted_detail(tmp_path, monkeypatch):
+    """D3 end-to-end on a real SqliteStepStore: after SummarizingCompaction
+    drops an old turn, ConversationSearch (scope="conversation") recovers a
+    unique phrase from the pre-compact snapshot."""
+
+    from pydantic_ai_harness.compaction import ClearToolResults, TieredCompaction
+    from pydantic_ai_harness.conversation_search import ConversationSearch, SnapshotHistorySource
+
+    monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
+
+    store = get_step_store()
+    compaction = TieredCompaction(
+        tiers=[
+            ClearToolResults(max_tokens=1, keep_pairs=3),
+            make_summarizing_strategy().__class__(  # same params as production
+                max_messages=1, keep_messages=2, keep_user_messages=True
+            ),
+        ],
+        target_tokens=400,
+    )
+    # TestModel(call_tools=[...]) calls the search tool on every step, which
+    # is exactly what we need: the turn-1 tool boundary lands the pre-compact
+    # snapshot (StepPersistence saves only at settled tool boundaries), and
+    # turn 3's call searches the union.
+    agent = Agent(
+        TestModel(call_tools=["search_conversation_history"]),
+        capabilities=[
+            StepPersistence(store=store, agent_name="grc_chat"),
+            ConversationSearch(SnapshotHistorySource(store), scope="conversation"),
+            compaction,
+        ],
+    )
+
+    async def _run():
+        conv = "session-1"
+        r1 = await agent.run(
+            "Remember the phrase MAGIC_721 and inspect the graph.",
+            message_history=[],
+            deps=None,
+            conversation_id=conv,
+        )
+        h1 = r1.all_messages()
+        r2 = await agent.run(
+            "Continue; set the throttle to 0.005.", message_history=h1, conversation_id=conv
+        )
+        # Turn 3 must be a FRESH run: TestModel calls its configured tools
+        # only when the message history contains no ModelResponse yet
+        # (pydantic_ai/models/test.py:_request), so a history-carrying turn
+        # would silently skip the search tool.
+        r3 = await agent.run(
+            "Call search_conversation_history for MAGIC_721 and report the phrase.",
+            message_history=[],
+            deps=None,
+            conversation_id=conv,
+        )
+        returns = [
+            p.content
+            for m in r3.all_messages()
+            if isinstance(m, ModelRequest)
+            for p in m.parts
+            if isinstance(p, ToolReturnPart) and p.tool_name == "search_conversation_history"
+        ]
+        assert returns, "search_conversation_history was never called"
+        assert "MAGIC_721" in str(returns[0]), "snapshot recall missed the phrase"
+
+        # scope="conversation" fails closed without a conversation id.
+        r4 = await agent.run(
+            "Call back to search_conversation_history for MAGIC_721.",
+            message_history=[],
+            deps=None,
+        )
+        h4 = r4.all_messages()
+        fails = [
+            p.content
+            for m in h4
+            if isinstance(m, ModelRequest)
+            for p in m.parts
+            if isinstance(p, ToolReturnPart) and p.tool_name == "search_conversation_history"
+        ]
+        assert fails and "conversation" in str(fails[0]).lower(), "scope must fail closed"
+
+    asyncio.run(_run())
+
+
+def test_unbounded_snapshots_keep_all_boundaries():
+    """D3: max_snapshots_per_run=None must retain every settled snapshot, so
+    a pre-compaction snapshot always survives for ConversationSearch."""
+    from pydantic_ai_harness.step_persistence import ContinuableSnapshot, RunRecord
+
+    store = get_step_store()
+    rid = "grc_chat-test-unbounded"
+    asyncio.run(
+        store.register_run(
+            RunRecord(run_id=rid, conversation_id="session-u", agent_name="grc_chat")
+        )
+    )
+    for i in range(5):
+        asyncio.run(
+            store.save_snapshot(
+                ContinuableSnapshot(
+                    run_id=rid,
+                    step_index=i,
+                    messages=[ModelRequest(parts=[UserPromptPart(content=f"s{i}")])],
+                    conversation_id="session-u",
+                    agent_name="grc_chat",
+                )
+            )
+        )
+    snaps = asyncio.run(store.list_snapshots(run_id=rid))
+    assert len(snaps) >= 5, f"expected >=5 snapshots, got {len(snaps)}"

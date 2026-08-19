@@ -83,7 +83,7 @@ Harness provides `SqlitePlanStore(session=...)` for exactly this.
 ---
 
 ### 4. SummarizingCompaction + ConversationSearch + unbounded snapshots
-**Status**: ⏳ Approved (D1/D2/D3 agreed) — deferred until the provider-split / hung-chat work shipped (it has: `755ef8a`, `0df48ec`)
+**Status**: ✅ Done — implemented and verified live on Ollama Cloud (2026-08-18). `ResilientSummarizingCompaction` (D2 app-side), `ConversationSearch(scope='conversation')`, `max_snapshots_per_run=None`, `compact_now` button — see AGENTS.md compaction bullet.
 **Date Added**: 2026-08
 
 #### The decision (D1/D2/D3)
@@ -106,7 +106,7 @@ Docs reviewed at `/tmp/harness_docs/compaction.md`.
 ---
 
 ### 5. `compact_now` button in the chat UI
-**Status**: 📜 Proposed
+**Status**: ✅ Done (implemented together with item 4 — the compact_now button drives the same `make_summarizing_strategy()` via the harness `compact_now()`)
 **Date Added**: 2026-08
 
 A toolbar/status affordance that manually triggers context compaction

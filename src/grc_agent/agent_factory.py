@@ -15,8 +15,10 @@ from pydantic_ai_harness.compaction import (
     ClampOversizedMessages,
     ClearToolResults,
     SlidingWindowCompaction,
+    SummarizingCompaction,
     TieredCompaction,
 )
+from pydantic_ai_harness.conversation_search import ConversationSearch, SnapshotHistorySource
 from pydantic_ai_harness.planning import Planning
 from pydantic_ai_harness.step_persistence import StepPersistence
 from tenacity import retry_if_exception_type, stop_after_attempt, wait_exponential
@@ -180,6 +182,43 @@ class ModelRequestLogger(AbstractCapability[Any]):
         return request_context
 
 
+class ResilientSummarizingCompaction(SummarizingCompaction):
+    """SummarizingCompaction whose summary-call failures degrade gracefully.
+
+    D2: the harness does NOT catch summarizer failures — `_summarize` has no
+    try/except and core re-raises hook errors, so an uncaught summary error
+    would hard-fail the turn (verified in pydantic-ai-harness 0.21.0:
+    `_summarizing_compaction.py:_summarize`, `_agent_graph.py:1515`,
+    `capabilities/abstract.py:652`). On failure the pre-compact history is
+    kept unchanged; TieredCompaction then escalates to the zero-LLM
+    SlidingWindow backstop. Also covers Codex: its transport only accepts
+    streaming requests, so the non-streaming summarizer always fails there —
+    graceful by design.
+    """
+
+    async def compact(self, messages, ctx):  # noqa: ANN001
+        try:
+            return await super().compact(messages, ctx)
+        except Exception:
+            _log.warning("summarization failed; keeping message history unchanged", exc_info=True)
+            return messages
+
+
+def make_summarizing_strategy() -> ResilientSummarizingCompaction:
+    """Single source of truth for the summarizing tier — used both by the
+    in-run tier list and by the compact_now button so they can never drift.
+
+    model=None inherits the request's model (D1); keep_messages=20 matches
+    the sliding-window tail; keep_user_messages=True keeps retention copies
+    of summarized user turns so ConversationSearch can recover them (D3).
+    """
+    return ResilientSummarizingCompaction(
+        max_messages=1,  # inert under TieredCompaction; satisfies __post_init__
+        keep_messages=20,
+        keep_user_messages=True,
+    )
+
+
 def _build_compaction_capability(cfg: dict) -> TieredCompaction:
     """Build a tiered context compaction capability tailored to the active provider.
 
@@ -230,6 +269,11 @@ def _build_compaction_capability(cfg: dict) -> TieredCompaction:
                 "call the tool again if you still need this data]"
             ),
         ),
+        make_summarizing_strategy(),
+        # Zero-LLM final backstop: runs only when the summary tier returned
+        # the history unchanged (D2 failure — e.g. Codex can never run the
+        # non-streaming summarizer) or when the summary alone didn't reclaim
+        # enough. Keeps bounded compaction working on every provider.
         SlidingWindowCompaction(
             max_tokens=1,
             keep_messages=20,
@@ -319,6 +363,10 @@ def build_agent_from_cfg(cfg: dict) -> tuple[Agent, str | None]:
                     "model": str(cfg.get("model", "")),
                     "base_url": _provider_base_url(cfg),
                 },
+            ),
+            ConversationSearch(
+                SnapshotHistorySource(get_step_store()),
+                scope="conversation",
             ),
             Planning(),
             _build_compaction_capability(cfg),
