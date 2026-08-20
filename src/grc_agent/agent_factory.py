@@ -14,6 +14,7 @@ from pydantic_ai.providers.ollama import OllamaProvider
 from pydantic_ai.providers.openai import OpenAIProvider
 from pydantic_ai.providers.openrouter import OpenRouterProvider
 from pydantic_ai.retries import AsyncTenacityTransport, RetryConfig
+from pydantic_ai_harness import ToolOutputLimits
 from pydantic_ai_harness.compaction import (
     ClampOversizedMessages,
     ClearToolResults,
@@ -24,6 +25,7 @@ from pydantic_ai_harness.compaction import (
 from pydantic_ai_harness.conversation_search import ConversationSearch, SnapshotHistorySource
 from pydantic_ai_harness.planning import Planning
 from pydantic_ai_harness.step_persistence import StepPersistence
+from pydantic_ai_harness.tool_output_limits import LocalFileStore
 from tenacity import retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from grc_agent.agent import (
@@ -35,7 +37,7 @@ from grc_agent.agent import (
     web_fetch_cap,
     web_search_cap,
 )
-from grc_agent.db import get_step_store
+from grc_agent.db import get_db_path, get_step_store
 from grc_agent.fs_tools import GrcFileSystem
 from grc_agent.prompts import build_system_prompt
 from grc_agent.settings import default_settings, get_env_value, load_settings
@@ -486,6 +488,25 @@ def make_summarizing_strategy() -> ResilientSummarizingCompaction:
     )
 
 
+def _build_tool_output_limits() -> ToolOutputLimits:
+    """Spill oversized tool returns losslessly instead of flooding context.
+
+    Default band (one uniform rule, no per-tool folklore): any return over
+    10k characters is persisted whole and replaced with a handle + preview;
+    the model reads slices back on demand via the registered
+    ``read_tool_result`` tool. ``then=Truncate()`` covers the case where the
+    spill store itself errors (bounded, never a hard failure).
+
+    The spill store is rooted next to the chat DB under ``.grc_agent/``
+    (0700, same per-user data area as the DB itself) rather than the
+    library default under /tmp — spills must survive restarts to be
+    readable from a later session, and a shared tmpfs is the wrong place
+    for agent data. ``cleanup_after`` is deliberately unset: the whole
+    point is that a handle stays readable for as long as the session lives.
+    """
+    return ToolOutputLimits(store=LocalFileStore(base_dir=get_db_path().parent / "tool_overflow"))
+
+
 def _build_compaction_capability(cfg: dict) -> TieredCompaction:
     """Build a tiered context compaction capability tailored to the active provider.
 
@@ -649,6 +670,7 @@ def build_agent_from_cfg(cfg: dict) -> tuple[Agent, str | None]:
             web_fetch_cap,
             GrcFileSystem(),
             prompt_injection_cap,
+            _build_tool_output_limits(),
         ],
         model_settings=model_settings,
         retries={"tools": 3, "output": 3},
