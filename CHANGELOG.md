@@ -9,6 +9,10 @@ web-dashboard codebase and are not part of this history.
 
 ## [Unreleased]
 
+### Added
+- Planning state is now durable per saved chat session through the harness `SqlitePlanStore`, co-located with `chat_sessions.db`; plans survive turns, restarts, and agent/provider live-swaps, while ungrouped runs remain in memory and session delete/clear/prune operations cascade plan rows.
+- Automatic and manual compaction now preserve the complete pre-compaction transcript—including emitted `ThinkingPart` reasoning—in unbounded StepPersistence snapshots inside the same user-exported database, so compacted session history remains usable without sacrificing fine-tuning data.
+
 ### Fixed
 - Provider failures now surface the real cause: turn errors extract the provider's JSON error message from the httpx response/body chain (e.g. "Invalid API key provided" instead of a bare status line), and a missing API key for the configured cloud provider is caught before the turn with a clear "Open Preferences (Ctrl+,) to configure" message instead of a confusing model error. The model-build error from startup/live-swap is carried into the sidebar and shown when a turn is attempted.
 

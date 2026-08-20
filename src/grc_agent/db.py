@@ -244,12 +244,14 @@ def init_db() -> None:
             current = _read_schema_version(conn)
             if current < LATEST_SCHEMA_VERSION:
                 _apply_migrations(conn, current)
-            # The StepPersistence tables are created by SqliteStepStore on
-            # first use; guard the sweep so it never runs against a file that
-            # has none yet (fresh DB before the first agent turn).
+            # Harness-owned tables are created lazily by their respective
+            # stores. Guard each sweep so a fresh DB remains valid before the
+            # first agent or planning operation.
             if _step_tables_exist(conn):
                 _sweep_orphan_step_rows(conn)
-                conn.commit()
+            if _plan_table_exists(conn):
+                _sweep_orphan_plan_rows(conn)
+            conn.commit()
         _initialized_paths.add(db_path)
 
 
@@ -293,6 +295,15 @@ def _step_tables_exist(conn: sqlite3.Connection) -> bool:
     return "runs" in tables
 
 
+def _plan_table_exists(conn: sqlite3.Connection) -> bool:
+    """Whether the harness-owned, lazily-created plan table exists."""
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+        ("plan_items",),
+    ).fetchone()
+    return row is not None
+
+
 def _delete_step_rows_for_conversations(conn: sqlite3.Connection, conv_ids: list[str]) -> None:
     """Delete every StepPersistence row belonging to the given conversation
     ids (runs + their events/snapshots/tool_effects children). The `media`
@@ -311,6 +322,16 @@ def _delete_step_rows_for_conversations(conn: sqlite3.Connection, conv_ids: list
     conn.execute(f"DELETE FROM runs WHERE conversation_id IN ({placeholders})", conv_ids)
 
 
+def _delete_plan_rows_for_conversations(
+    conn: sqlite3.Connection, conv_ids: list[str]
+) -> None:
+    """Delete durable plans belonging to the given chat conversations."""
+    if not conv_ids or not _plan_table_exists(conn):
+        return
+    placeholders = ",".join("?" for _ in conv_ids)
+    conn.execute(f"DELETE FROM plan_items WHERE session IN ({placeholders})", conv_ids)
+
+
 def _sweep_orphan_step_rows(conn: sqlite3.Connection) -> None:
     """Delete step rows grouped under a `session-{id}` conversation whose
     session row no longer exists — e.g. a Clear History that raced an
@@ -327,6 +348,17 @@ def _sweep_orphan_step_rows(conn: sqlite3.Connection) -> None:
         ).fetchall()
     ]
     _delete_step_rows_for_conversations(conn, orphans)
+
+
+def _sweep_orphan_plan_rows(conn: sqlite3.Connection) -> None:
+    """Delete ``session-*`` plans whose owning chat session is gone."""
+    if not _plan_table_exists(conn):
+        return
+    conn.execute(
+        "DELETE FROM plan_items WHERE session LIKE ? "
+        "AND session NOT IN (SELECT 'session-' || id FROM sessions)",
+        ("session-%",),
+    )
 
 
 def _cleanup_invalid_sessions() -> None:
@@ -470,9 +502,9 @@ def _extract_first_user_prompt_json(messages_json: str) -> str:
 def _prune_in(conn: sqlite3.Connection, keep: int = _MAX_SESSIONS) -> None:
     """Evict the oldest sessions beyond ``keep`` (by updated_at then id) using
     an already-open connection, taking each evicted session's StepPersistence
-    rows (runs/events/snapshots/tool_effects) with it. Bounds the tables'
-    growth; the deleted rows are the long-tail a user is unlikely to scroll
-    back to."""
+    rows (runs/events/snapshots/tool_effects) and durable plan with it. Bounds
+    the tables' growth; the deleted rows are the long-tail a user is unlikely
+    to scroll back to."""
     evicted = [
         r[0]
         for r in conn.execute(
@@ -482,7 +514,9 @@ def _prune_in(conn: sqlite3.Connection, keep: int = _MAX_SESSIONS) -> None:
         ).fetchall()
     ]
     if evicted:
-        _delete_step_rows_for_conversations(conn, [conversation_id_for_session(i) for i in evicted])
+        conversations = [conversation_id_for_session(i) for i in evicted]
+        _delete_step_rows_for_conversations(conn, conversations)
+        _delete_plan_rows_for_conversations(conn, conversations)
         conn.execute(
             "DELETE FROM sessions WHERE id IN (" + ",".join("?" for _ in evicted) + ")",
             evicted,
@@ -541,12 +575,12 @@ def save_session(
 
 
 def delete_session(session_id: int) -> None:
-    """Delete a session from SQLite, together with its StepPersistence rows
-    (runs/events/snapshots/tool_effects for `conversation_id =
-    'session-{id}'`)."""
+    """Delete a session with its StepPersistence rows and durable plan."""
     init_db()
     with _conn() as conn:
-        _delete_step_rows_for_conversations(conn, [conversation_id_for_session(session_id)])
+        conversation = conversation_id_for_session(session_id)
+        _delete_step_rows_for_conversations(conn, [conversation])
+        _delete_plan_rows_for_conversations(conn, [conversation])
         conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
         conn.commit()
 
@@ -555,10 +589,10 @@ def delete_all_sessions() -> None:
     """Delete every saved session. Used by the toolbar 'Clear History' button,
     which clears the whole recent-sessions list the user sees — independent of
     which flowgraph (if any) is active. Per-session deletion stays available via
-    the per-row delete buttons (delete_session). All StepPersistence rows for
-    `session-*` conversations go with them; ungrouped runs (NULL conversation
-    id) are left alone, and content-addressed `media` blobs are shared and
-    deliberately kept."""
+    the per-row delete buttons (delete_session). All StepPersistence rows and
+    durable plans for `session-*` conversations go with them; ungrouped runs
+    and non-session plans are left alone, and content-addressed `media` blobs
+    are shared and deliberately kept."""
     init_db()
     with _conn() as conn:
         convs = []
@@ -570,5 +604,7 @@ def delete_all_sessions() -> None:
                 ).fetchall()
             ]
         _delete_step_rows_for_conversations(conn, convs)
+        if _plan_table_exists(conn):
+            conn.execute("DELETE FROM plan_items WHERE session LIKE ?", ("session-%",))
         conn.execute("DELETE FROM sessions")
         conn.commit()

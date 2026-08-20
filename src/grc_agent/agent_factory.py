@@ -3,6 +3,7 @@ import os
 import time
 from dataclasses import dataclass
 from typing import Any
+from uuid import uuid4
 
 import httpx
 from pydantic_ai import Agent, ModelSettings, RunContext
@@ -23,8 +24,8 @@ from pydantic_ai_harness.compaction import (
     TieredCompaction,
 )
 from pydantic_ai_harness.conversation_search import ConversationSearch, SnapshotHistorySource
-from pydantic_ai_harness.planning import Planning
-from pydantic_ai_harness.step_persistence import StepPersistence
+from pydantic_ai_harness.planning import InMemoryPlanStore, Planning, PlanStore, SqlitePlanStore
+from pydantic_ai_harness.step_persistence import ContinuableSnapshot, RunRecord, StepPersistence
 from pydantic_ai_harness.tool_output_limits import Band, LocalFileStore, Spill, Truncate
 from tenacity import retry_if_exception_type, stop_after_attempt, wait_exponential
 
@@ -37,7 +38,7 @@ from grc_agent.agent import (
     web_fetch_cap,
     web_search_cap,
 )
-from grc_agent.db import get_db_path, get_step_store
+from grc_agent.db import get_db_path, get_step_store, init_db
 from grc_agent.fs_tools import GrcFileSystem
 from grc_agent.prompts import build_system_prompt
 from grc_agent.settings import default_settings, get_env_value, load_settings
@@ -54,6 +55,21 @@ _MODEL_WINDOW_OVERRIDES = {
 
 
 _log = logging.getLogger(__name__)
+
+
+def _plan_store_resolver(ctx: RunContext[Any]) -> PlanStore:
+    """Resolve one run's plan store from its chat conversation id.
+
+    Saved chat sessions use ``session-{id}``, the same key passed to
+    ``Agent.iter`` and StepPersistence. Those plans live in the shared chat DB
+    and therefore survive turns, restarts, and agent live-swaps. Runs without
+    an owning session stay in memory so they cannot leave orphaned plan rows.
+    """
+    conversation_id = ctx.conversation_id
+    if not (isinstance(conversation_id, str) and conversation_id.startswith("session-")):
+        return InMemoryPlanStore()
+    init_db()
+    return SqlitePlanStore(str(get_db_path()), session=conversation_id)
 
 
 def _provider_base_url(cfg: dict) -> str:
@@ -488,6 +504,46 @@ def make_summarizing_strategy() -> ResilientSummarizingCompaction:
     )
 
 
+class TranscriptPreservingTieredCompaction(TieredCompaction):
+    """Archive the exact pre-compaction transcript before replacing history.
+
+    StepPersistence normally snapshots settled tool boundaries and run ends.
+    Automatic compaction can instead fire on the first model request, before
+    either boundary exists. When a tier actually changes the request history,
+    persist the untouched live history under the same conversation in the
+    shared step store first. A store failure fails the turn, so compaction can
+    never silently destroy the only durable copy used for dataset collection.
+    """
+
+    async def before_model_request(self, ctx, request_context):  # noqa: ANN001
+        before = list(request_context.messages)
+        transcript = list(ctx.messages)
+        processed = await super().before_model_request(ctx, request_context)
+        if processed.messages == before or ctx.conversation_id is None:
+            return processed
+
+        store = get_step_store()
+        run_id = f"grc_chat-compaction-{uuid4().hex[:8]}"
+        await store.register_run(
+            RunRecord(
+                run_id=run_id,
+                conversation_id=ctx.conversation_id,
+                agent_name="grc_chat",
+                metadata={"kind": "pre_compaction_transcript"},
+            )
+        )
+        await store.save_snapshot(
+            ContinuableSnapshot(
+                run_id=run_id,
+                step_index=ctx.run_step,
+                messages=transcript,
+                conversation_id=ctx.conversation_id,
+                agent_name="grc_chat",
+            )
+        )
+        return processed
+
+
 def _build_tool_output_limits() -> ToolOutputLimits:
     """Spill oversized tool returns losslessly instead of flooding context.
 
@@ -514,7 +570,7 @@ def _build_tool_output_limits() -> ToolOutputLimits:
     )
 
 
-def _build_compaction_capability(cfg: dict) -> TieredCompaction:
+def _build_compaction_capability(cfg: dict) -> TranscriptPreservingTieredCompaction:
     """Build a tiered context compaction capability tailored to the active provider.
 
     Evicts bulky older tool return contents (e.g. inspect_graph 10k JSONs, generate_python previews)
@@ -587,7 +643,7 @@ def _build_compaction_capability(cfg: dict) -> TieredCompaction:
     except (ValueError, TypeError):
         target_tokens = None
     if target_tokens is not None:
-        return TieredCompaction(tiers=tiers, target_tokens=target_tokens)
+        return TranscriptPreservingTieredCompaction(tiers=tiers, target_tokens=target_tokens)
 
     # One uniform rule: the REAL context window, probed from the backend
     # itself (Ollama /api/show -> model_info.context_length, OpenRouter/OpenAI
@@ -600,17 +656,25 @@ def _build_compaction_capability(cfg: dict) -> TieredCompaction:
     model_id = str(cfg.get("model", ""))
     for key, window in _MODEL_WINDOW_OVERRIDES.items():
         if key in model_id:
-            return TieredCompaction(tiers=tiers, target_fraction=0.85, context_window=window)
+            return TranscriptPreservingTieredCompaction(
+                tiers=tiers, target_fraction=0.85, context_window=window
+            )
 
     probed = resolve_model_context_length(str(cfg.get("provider", "")), model_id)
     if probed is not None:
-        return TieredCompaction(tiers=tiers, target_fraction=0.85, context_window=probed)
+        return TranscriptPreservingTieredCompaction(
+            tiers=tiers, target_fraction=0.85, context_window=probed
+        )
 
     # Probe failed or impossible: let the harness resolve the registry per
     # request, with the old conservative guesses as the fallback denominator.
     if is_local:
-        return TieredCompaction(tiers=tiers, target_fraction=0.85, context_window=32_000)
-    return TieredCompaction(tiers=tiers, target_fraction=0.85, fallback_context_window=128_000)
+        return TranscriptPreservingTieredCompaction(
+            tiers=tiers, target_fraction=0.85, context_window=32_000
+        )
+    return TranscriptPreservingTieredCompaction(
+        tiers=tiers, target_fraction=0.85, fallback_context_window=128_000
+    )
 
 
 def build_agent_from_cfg(cfg: dict) -> tuple[Agent, str | None]:
@@ -671,7 +735,7 @@ def build_agent_from_cfg(cfg: dict) -> tuple[Agent, str | None]:
                 SnapshotHistorySource(get_step_store()),
                 scope="conversation",
             ),
-            Planning(),
+            Planning(store_resolver=_plan_store_resolver),
             _build_compaction_capability(cfg),
             web_search_cap,
             web_fetch_cap,

@@ -578,6 +578,102 @@ def test_chatsidebar_run_agent_turn_records_step_rows(tmp_path):
     assert rate is None or rate > 0
 
 
+def test_manual_compaction_preserves_full_history_and_reasoning_in_same_db(
+    tmp_path, monkeypatch
+):
+    """Dataset invariant: compacting the reloadable session history must not
+    erase the original transcript from the user-exported chat_sessions.db.
+
+    The sidebar snapshots the complete history into StepPersistence before it
+    saves the compacted session blob. This test includes a ThinkingPart so the
+    reasoning-trace retention claim is behavioral, not just structural.
+    """
+    from unittest.mock import MagicMock
+
+    from pydantic_ai import Agent
+    from pydantic_ai.messages import (
+        ModelRequest,
+        ModelResponse,
+        TextPart,
+        ThinkingPart,
+        UserPromptPart,
+    )
+    from pydantic_ai.models.test import TestModel
+
+    from grc_agent.chat_sidebar import ChatSidebar
+    from grc_agent.db import (
+        conversation_id_for_session,
+        deserialize_messages,
+        get_step_store,
+        load_session,
+        save_session,
+    )
+
+    unique_prompt = "FULL_HISTORY_DATASET_SENTINEL"
+    unique_reasoning = "REASONING_TRACE_DATASET_SENTINEL"
+    original = []
+    for i in range(12):
+        prompt = unique_prompt if i == 0 else f"user-{i}"
+        response_parts = [TextPart(content=f"assistant-{i}")]
+        if i == 0:
+            response_parts.insert(0, ThinkingPart(content=unique_reasoning))
+        original.extend(
+            [
+                ModelRequest(parts=[UserPromptPart(content=prompt)]),
+                ModelResponse(parts=response_parts),
+            ]
+        )
+
+    sid, file_path = _make_session(tmp_path, messages=original)
+    sidebar = ChatSidebar()
+    sidebar._agent = Agent(TestModel(), output_type=str)
+    sidebar._active_session_id = sid
+    sidebar._message_history = original
+    sidebar._render_history = MagicMock()
+    sidebar._update_context_label = MagicMock()
+
+    async def _save_compacted_history():
+        saved = save_session(sid, file_path, sidebar._message_history)
+        assert saved == sid
+
+    sidebar._save_history = _save_compacted_history
+
+    async def _fake_compact(_strategy, messages, *, model):  # noqa: ARG001
+        return messages[-2:]
+
+    monkeypatch.setattr("pydantic_ai_harness.compaction._manual.compact_now", _fake_compact)
+    asyncio.run(sidebar._run_compact_now())
+
+    session = load_session(sid)
+    assert session is not None
+    compacted = deserialize_messages(session["messages"])
+    assert unique_prompt not in repr(compacted), "test must prove the session blob was compacted"
+    assert unique_reasoning not in repr(compacted), "test must prove old reasoning left the session blob"
+
+    conversation_id = conversation_id_for_session(sid)
+    store = get_step_store()
+    runs = asyncio.run(store.list_runs(conversation_id=conversation_id))
+    snapshots = [
+        snapshot
+        for run in runs
+        for snapshot in asyncio.run(store.list_snapshots(run_id=run.run_id))
+    ]
+    archived_parts = [
+        part
+        for snapshot in snapshots
+        for message in snapshot.messages
+        for part in getattr(message, "parts", [])
+    ]
+    assert any(
+        isinstance(part, UserPromptPart) and unique_prompt in str(part.content)
+        for part in archived_parts
+    )
+    assert any(
+        isinstance(part, ThinkingPart) and unique_reasoning in part.content
+        for part in archived_parts
+    )
+
+
 def test_chatsidebar_failed_turn_leaves_failure_trail(tmp_path):
     """When the model raises mid-turn, the sidebar catches the error (no
     crash), and the persistence layer has already recorded the failure

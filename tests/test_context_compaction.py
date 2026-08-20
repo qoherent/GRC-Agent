@@ -574,6 +574,86 @@ def test_conversation_search_recalls_compacted_detail(tmp_path, monkeypatch):
     asyncio.run(_run())
 
 
+def test_automatic_compaction_archives_first_pre_compaction_history(tmp_path, monkeypatch):
+    """Dataset invariant: even first-request automatic compaction must archive
+    the full transcript before Pydantic AI replaces its live history."""
+    from pydantic_ai_harness.compaction import SlidingWindowCompaction
+
+    from grc_agent import db
+    from grc_agent.agent_factory import TranscriptPreservingTieredCompaction
+
+    monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
+    db._initialized_paths.clear()
+    db._cleanup_done.clear()
+    db._step_stores.clear()
+    store = get_step_store()
+
+    unique_prompt = "AUTOMATIC_COMPACTION_DATASET_SENTINEL"
+    unique_reasoning = "AUTOMATIC_REASONING_DATASET_SENTINEL"
+    history: list[ModelMessage] = []
+    for i in range(6):
+        prompt = unique_prompt if i == 2 else f"user-{i}"
+        parts = [TextPart(content=f"assistant-{i}")]
+        if i == 2:
+            parts.insert(0, ThinkingPart(content=unique_reasoning))
+        history.extend(
+            [
+                ModelRequest(parts=[UserPromptPart(content=prompt)]),
+                ModelResponse(parts=parts),
+            ]
+        )
+
+    compaction = TranscriptPreservingTieredCompaction(
+        tiers=[
+            SlidingWindowCompaction(
+                max_tokens=1,
+                keep_messages=2,
+                preserve_first_user_message=True,
+            )
+        ],
+        target_tokens=10,
+    )
+    agent = Agent(
+        TestModel(call_tools=[]),
+        capabilities=[
+            StepPersistence(store=store, agent_name="grc_chat"),
+            compaction,
+        ],
+    )
+
+    async def _run():
+        result = await agent.run(
+            "current request",
+            message_history=history,
+            conversation_id="session-automatic",
+        )
+        assert unique_prompt not in repr(result.all_messages())
+        assert unique_reasoning not in repr(result.all_messages())
+
+        runs = await store.list_runs(conversation_id="session-automatic")
+        snapshots = [
+            snapshot
+            for run in runs
+            for snapshot in await store.list_snapshots(run_id=run.run_id)
+        ]
+        archived_parts = [
+            part
+            for snapshot in snapshots
+            for message in snapshot.messages
+            for part in getattr(message, "parts", [])
+        ]
+        assert any(
+            isinstance(part, UserPromptPart) and unique_prompt in str(part.content)
+            for part in archived_parts
+        )
+        assert any(
+            isinstance(part, ThinkingPart) and unique_reasoning in part.content
+            for part in archived_parts
+        )
+
+    asyncio.run(_run())
+
+
 def test_unbounded_snapshots_keep_all_boundaries(tmp_path, monkeypatch):
     """D3: max_snapshots_per_run=None must retain every settled snapshot, so
     a pre-compaction snapshot always survives for ConversationSearch. Runs on

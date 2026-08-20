@@ -19,7 +19,7 @@ Active feature requests, architectural improvements, and planned capabilities. C
 ---
 
 ### 2. Durable Planner → Executor Handoff (`SqlitePlanStore`)
-* **Status**: ⏳ Approved in concept — research grounded (see `/tmp/research_db_merge.md` findings folded below)
+* **Status**: ✅ Implemented — durable per-session plans, lifecycle cleanup, and lossless pre-compaction transcript retention
 * **Scope**: Make the harness `Planning` capability durable across user turns within the same chat session.
 * **Key Design Decisions**:
   - Replace `Planning()` with `Planning(store_resolver=…)` keyed on `ctx.conversation_id` (verified present on `RunContext` in installed pydantic-ai 2.31.0) → `SqlitePlanStore(get_db_path(), session='session-{id}')`; `InMemoryPlanStore()` for ungrouped runs. Zero new deps.
@@ -85,4 +85,3 @@ When recording new requests or design decisions:
 1. Document the requirement, user context, and target scope.
 2. Outline specific architecture constraints, safety boundaries, and affected modules.
 3. Keep entries concise, actionable, and grounded in the current codebase state.
-
