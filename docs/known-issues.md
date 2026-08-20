@@ -149,8 +149,9 @@ affected — it runs before the loop starts.
 The modal surface has been shrinking deliberately: the "Model not in backend's
 list" Save-path popup (introduced with the `probe_backend` hung-chat guard) was
 removed again in `0df48ec` and replaced with a status-bar warning, because the
-mismatch is a diagnostic, not a decision — only `_confirm_unreachable` still
-uses `.run()`.
+mismatch is a diagnostic, not a decision. As of v0.3.0, `_confirm_unreachable`
+(the "Save anyway?" confirm on a genuinely unreachable backend) is the only
+remaining `.run()` dialog in the sidebar.
 
 **Proposed fix**: replace `.run()` with the `response` signal plus an
 `asyncio.Future`, so the dialog is awaited rather than pumped.

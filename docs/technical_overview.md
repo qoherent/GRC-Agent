@@ -42,9 +42,12 @@ The application merges the GNU Radio Companion desktop canvas with the AI sideba
 
 ---
 
-## Genius Tool Design
+## Tool Surface
 
-The agent interacts with the flowgraph through six highly specialized tools:
+The agent interacts with the user's project through fifteen tools — six
+flowgraph-domain tools, eight sandboxed filesystem tools, and the harness's
+planning tools (`write_plan`/`read_plan`/task management). Web search and
+fetch capabilities complete the surface.
 
 ### 1. Context-Efficient Graph Inspection (`inspect_graph`)
 
@@ -53,9 +56,9 @@ To preserve context window limits and optimize reasoning tokens, visual and sche
 - **Stage A (Visual & Structural Layout Pruning)**: Excludes layout-specific variables (e.g. GUI hints, coordinates) and schema plumbing (block `id`, `showports`, `bus_structure_*`); imports/snippets stay in the listing, tagged by a `role` field.
 - **Stage B (Parameter Visibility Pruning)**: Omits default configuration values, advanced parameters, and unconnected optional ports. The LLM receives a clean, semantic JSON representation of the active DSP topology.
 
-### 2. Local SQLite Vector RAG (`query_knowledge`)
+### 2. Knowledge Search — Lexical & Local Vector (`query_knowledge`)
 
-Knowledge grounding is enforced through a local SQLite vector database (`sqlite-vec`) built lazily upon first use. The database splits search queries into two separate domains:
+Knowledge grounding is enforced through two search backends over the same corpus, built lazily upon first use. Search queries split into two separate domains:
 
 - **Catalog Domain**: Queries GNU Radio block metadata, block IDs, category mappings, parameter options, and port structures.
 - **Docs Domain**: Queries wiki pages, tutorials, and conceptual documentation parsed and heading-chunked.
@@ -90,7 +93,15 @@ At the end of a transaction, GNU Radio's native validation compiles and validate
 
 ### 6. Reusable Block Library (`save_block`)
 
-Exports an existing Embedded Python Block (`epy_block`) instance's source into GNU Radio's own native hier-block library (`~/.grc_gnuradio`) as a standalone, reusable catalog block — available to `change_graph` in this flowgraph or any other, without recreating the same logic from scratch each time. This is distinct from an out-of-tree (OOT) module (`gr-modtool`, a separate, heavier build toolchain the agent still has no access to); it's GNU Radio's own lighter mechanism for a loose, reusable block file. The current flowgraph's own `epy_block` instance is left untouched — the exported block is a new, separately-named catalog entry for future use only. Validation never calls GNU Radio's own `Platform.build_library()` on a disposable instance (that would corrupt the shared, process-wide block registry — see `AGENTS.md`); instead it builds and instantiates the candidate block class directly via `Platform.new_block_class()`, a pure function with no such side effect.
+Exports an existing Embedded Python Block (`epy_block`) instance's source into GNU Radio's own native hier-block library (`~/.grc_gnuradio`) as a standalone, reusable catalog block — available for `change_graph` in this flowgraph or any other, without recreating the same logic from scratch each time. This is distinct from an out-of-tree (OOT) module (`gr-modtool`, a separate, heavier build toolchain the agent still has no access to); it's GNU Radio's own lighter mechanism for a loose, reusable block file. The current flowgraph's own `epy_block` instance is left untouched — the exported block is a new, separately-named catalog entry for future use only. Validation never calls GNU Radio's own `Platform.build_library()` on a disposable instance (that would corrupt the shared, process-wide block registry — see `AGENTS.md`); instead it builds and instantiates the candidate block class directly via `Platform.new_block_class()`, a pure function with no such side effect.
+
+### 7. Sandboxed Filesystem Tools (`read_file` · `write_file` · `edit_file` · `list_directory` · `search_files` · `find_files` · `create_directory` · `file_info`)
+
+A `FileSystemToolset` subclass (`fs_tools.py`, pydantic-ai-harness 0.23) whose sandbox root is the **active `.grc` file's directory**, re-resolved per tool call — tab switches and saves are followed automatically; an unsaved flowgraph gates every tool with a "save first" error instead of a CWD fallback. `.grc` files never reach the model as raw XML: `read_file` routes them through the structural `inspect_graph` engine (the active file inspects the live in-memory `FlowGraph`; others load headlessly). Flowgraph writes are structurally impossible — one uniform name rule (case-insensitive `.grc`, covering `.GRC` and `.grc~`) drives both read routing and the write gate, and the write suffix allowlist (`.py .cmake .txt .md .m .json` YAML/C-C++/`.xml .conf .rst .i` — OOT-module-ready) is re-checked against the symlink-resolved target. Writes are atomic (temp → fsync → rename) with `expected_hash` conflict detection. Secrets and repo metadata (`.env`, `.env.*`, `.envrc`, `.grc_agent/`, `.git/`) are denied at root and nested; reads cap at 1000 lines, listings at 200 entries.
+
+### 8. Indirect Prompt-Injection Defense
+
+Every client-executed tool result is classified with `stackone-defender` tier-1 pattern detection (`PromptInjectionDefender`, `block_high_risk=True`): the agent ingests untrusted text (project files, web content) and can write files, so a high/critical-risk result is withheld and replaced with a short notice; flags are logged. Known scope limits (tier-1 inspects recognized text fields and bare strings only; provider-native web tools run server-side) are documented in `AGENTS.md`.
 
 ---
 

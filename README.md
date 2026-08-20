@@ -14,50 +14,47 @@ use.
 
 ## What it does
 
-**Flowgraph editing.** Inspect blocks, connections, and parameters; add,
-remove, rewire, and re-parameterize blocks; every change is validated,
-rolled back on failure, and drawn on the canvas immediately. GRC's native
-undo/redo (Ctrl+Z/Y) keeps working. What the agent changed is what you see —
-no reload, no export/import.
+### Flowgraphs
 
-**Reading your project.** The agent reads any file in the flowgraph's folder
-(Python, C/C++, txt, markdown, MATLAB, JSON, YAML, XML, …). `.grc` files are
-never dumped as raw XML — they pass through the same structural inspection
-used on the active graph, so the agent understands them, not just reads them.
+- **Inspect & edit structurally** — the agent reads blocks, connections, and
+  parameters; adds, removes, rewires, and re-parameterizes through one
+  validated, rolled-back-on-failure edit. The canvas redraws immediately,
+  GRC's native undo/redo keeps working — what it changed is what you see.
+- **Diagnose failed runs** — when a run fails, the agent gets the return code,
+  reads the full console log itself, and proposes the fix.
+- **Preview generated code** — renders the exact Python GNU Radio would
+  generate from the current graph, read-only, nothing written to disk.
+- **Save reusable blocks** — exports a working Embedded Python Block into
+  GRC's block library as a standalone catalog block for future flowgraphs.
 
-**Writing your project.** The agent creates and edits source/config files
-(the usual suspects plus CMake — ready for out-of-tree module work), with
-atomic saves and conflict detection. Flowgraph files themselves are
-read-only to it on purpose: graphs are only ever edited through the
-validated graph tools.
+### Your project files
 
-**Grounded knowledge.** Block IDs, port names, parameter keys, and concepts
-are answered from a searchable GNU Radio catalog and docs wiki — the agent
-checks the docs instead of guessing from memory, and falls back to web
-search for what's not covered.
+- **Read anything in the flowgraph's folder** — Python, C/C++, txt, markdown,
+  MATLAB, JSON, YAML, XML, … And `.grc` files are never dumped as raw XML:
+  they pass through the same structural inspection as the active graph.
+- **Write source/config files** — create and edit with atomic saves and
+  conflict detection; formats cover CMake, C++, YAML and friends, ready for
+  out-of-tree module work. The agent can grep file contents and find files by
+  name.
+- **Flowgraphs are read-only to it on purpose** — graphs are only ever edited
+  through the validated graph tools, never by writing the `.grc` file.
 
-**Runtime debugging.** When a flowgraph run fails, the agent is notified
-with the return code, reads the full console log itself, and diagnoses the
-error. It can also render the exact Python code GNU Radio would generate
-from the current graph — read-only, nothing written to disk.
+### Grounded answers
 
-**Saving reusable blocks.** A working Embedded Python Block can be exported
-into GRC's block library (`~/.grc_gnuradio`) as a standalone, reusable
-catalog block.
+- **Checks the docs, not its memory** — block IDs, port names, parameter keys,
+  and concepts come from a searchable GNU Radio catalog and docs wiki, with
+  web search as fallback for what's not covered.
 
-**Context management.** Long conversations are handled automatically:
-bulky old tool results are cleared, aging turns are summarized (your
-messages always preserved), and the target size is derived from the model's
-real context window, probed from the backend. A manual compact button is
-also there when you want it.
+### Reliability
 
-**Safety.** Every tool result is scanned for indirect prompt injection — a
-malicious instruction planted in a project file or web page is withheld
-before it reaches the model. The agent's file access is sandboxed to your
-project folder, and secrets (`.env`, `.envrc`, `.git/`) are off-limits.
-
-**Chat sessions.** Persisted with full history, resumable, and searchable.
-Switch sessions or start new ones from the sidebar.
+- **Handles long conversations** — bulky old tool results are cleared, aging
+  turns summarized (your messages always preserved), sized against the
+  model's real context window probed from the backend.
+- **Prompt-injection safe** — every tool result is scanned; a malicious
+  instruction planted in a file or web page is withheld before reaching the
+  model. File access is sandboxed to your project folder; `.env` and `.git`
+  are off-limits.
+- **Sessions persist** — full chat history, resumable, searchable.
 
 ## Supported LLM providers
 
@@ -131,13 +128,30 @@ active tab automatically.
 
 ## Example prompts
 
-- `Summarize this graph.`
-- `Show parameters for analog_sig_source_x_0.`
-- `Find a low-pass filter block.`
+**Understand & explain**
+- `Summarize this flowgraph — what does it do end to end?`
+- `Compare this graph with rx_bench.grc in the same folder.`
+- `Show the parameters for analog_sig_source_x_0 and explain what they do.`
+
+**Edit the graph**
 - `Change samp_rate to 48000 and validate.`
-- `Change the signal source frequency from 440 to 1000.`
-- `Read helper.py in this flowgraph's folder and explain what it does.`
-- `The run failed — read the log and tell me what's wrong.`
+- `Add a low-pass filter between the source and the sink, and explain your
+  cutoff choice.`
+- `Change the signal source frequency from 440 Hz to 1 kHz.`
+- `Make the output smoother.` *(casual descriptions work too — the agent
+  searches the block catalog for the right knob)*
+
+**Work with files**
+- `Read helper.py in this folder and explain what it does.`
+- `Write a calibration_loader.py that reads cal_table.json and exposes the
+  values as variables.`
+- `Grep the project for everywhere samp_rate is referenced.`
+
+**Debug & verify**
+- `The run just failed — read the log and tell me what's wrong.`
+- `Show me the Python GRC would generate for this graph.`
+- `Add a probe so we can verify the throughput when I hit Run, then tell me
+  what to look for.`
 
 ## Tests
 
