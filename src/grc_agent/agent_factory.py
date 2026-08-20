@@ -25,7 +25,7 @@ from pydantic_ai_harness.compaction import (
 from pydantic_ai_harness.conversation_search import ConversationSearch, SnapshotHistorySource
 from pydantic_ai_harness.planning import Planning
 from pydantic_ai_harness.step_persistence import StepPersistence
-from pydantic_ai_harness.tool_output_limits import LocalFileStore
+from pydantic_ai_harness.tool_output_limits import Band, LocalFileStore, Spill, Truncate
 from tenacity import retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from grc_agent.agent import (
@@ -492,7 +492,7 @@ def _build_tool_output_limits() -> ToolOutputLimits:
     """Spill oversized tool returns losslessly instead of flooding context.
 
     Default band (one uniform rule, no per-tool folklore): any return over
-    10k characters is persisted whole and replaced with a handle + preview;
+    20k characters is persisted whole and replaced with a handle + preview;
     the model reads slices back on demand via the registered
     ``read_tool_result`` tool. ``then=Truncate()`` covers the case where the
     spill store itself errors (bounded, never a hard failure).
@@ -504,7 +504,14 @@ def _build_tool_output_limits() -> ToolOutputLimits:
     for agent data. ``cleanup_after`` is deliberately unset: the whole
     point is that a handle stays readable for as long as the session lives.
     """
-    return ToolOutputLimits(store=LocalFileStore(base_dir=get_db_path().parent / "tool_overflow"))
+    return ToolOutputLimits(
+        # One uniform band, sized by measured tool outputs: a 23-block graph
+        # inspection is ~20k chars, so 10k (the library default) would spill
+        # routine inspections; 20k chars (~5k tokens, ~2% of a 262k window)
+        # keeps typical results inline and still bounds the 100KB flood case.
+        bands=[Band(over=20_000, action=Spill(then=Truncate()))],
+        store=LocalFileStore(base_dir=get_db_path().parent / "tool_overflow"),
+    )
 
 
 def _build_compaction_capability(cfg: dict) -> TieredCompaction:

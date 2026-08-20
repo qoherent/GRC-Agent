@@ -16,7 +16,7 @@ from pydantic_ai.models.function import FunctionModel
 from pydantic_ai_harness import ToolOutputLimits
 from pydantic_ai_harness.tool_output_limits import LocalFileStore
 
-BIG_TEXT = "NEEDLE_AT_START " + ("x" * 20_000) + " NEEDLE_AT_END"
+BIG_TEXT = "NEEDLE_AT_START " + ("x" * 30_000) + " NEEDLE_AT_END"
 SMALL_TEXT = "small payload, stays inline"
 
 
