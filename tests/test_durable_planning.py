@@ -256,22 +256,26 @@ def test_compact_now_leaves_plan_rows_untouched(tmp_path):
     assert _plan_contents(conversation_id) == ["Durable step"]
 
 
-def test_agent_factory_planning_uses_store_resolver(monkeypatch):
-    from grc_agent.agent_factory import build_agent_from_cfg
+def test_planner_factory_uses_durable_store_and_executor_has_no_planning(monkeypatch):
+    from grc_agent.agent_factory import build_agents_from_cfg
 
     monkeypatch.setattr(
         "grc_agent.agent_factory.resolve_model_context_length", lambda *_args, **_kwargs: None
     )
-    agent, error = build_agent_from_cfg(
+    agents = build_agents_from_cfg(
         {
             "provider": "ollama_local",
             "model": "test-model",
             "ollama_base_url": "http://127.0.0.1:11434",
         }
     )
-    assert error is None
+    assert agents.model_build_error is None
 
     capabilities = []
-    agent._root_capability.apply(capabilities.append)
+    agents.planner._root_capability.apply(capabilities.append)
     planning = next(cap for cap in capabilities if isinstance(cap, Planning))
     assert planning.store_resolver is not None
+
+    executor_capabilities = []
+    agents.executor._root_capability.apply(executor_capabilities.append)
+    assert not any(isinstance(cap, Planning) for cap in executor_capabilities)

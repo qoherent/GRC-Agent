@@ -448,13 +448,17 @@ class ChatSidebar(Gtk.Box):
         _apply_css()
         self.get_style_context().add_class("chat-sidebar")
         self._agent: Agent | None = None
+        self._executor_agent: Agent | None = None
+        self._planner_agent: Agent | None = None
+        self._agent_mode = "executor"
+        self._changing_agent_mode = False
         # Live-swap callback: when the Settings dialog saves a new provider/
         # model/key, this rebuilds the Agent in-place. Set by desktop_app.py
-        # right after set_agent(). None in tests/headless mode (the Settings
+        # right after set_agents(). None in tests/headless mode (the Settings
         # dialog falls back to the old restart-gated behavior if unset).
-        self._rebuild_agent: Callable[[], tuple[Agent, str | None]] | None = None
+        self._rebuild_agent: Callable[[], Any] | None = None
         # Active provider/model label shown in the toolbar; updated on every
-        # set_agent call (startup + live-swap) so the user always sees which
+        # set_agents call (startup + live-swap) so the user always sees which
         # backend the running agent is actually using.
         self._active_provider: str = ""
         self._active_model: str = ""
@@ -588,6 +592,15 @@ class ChatSidebar(Gtk.Box):
             "Compact conversation history — summarize older messages (keeps recent context)",
             cb=self._on_compact_clicked,
         )
+
+        self._planner_toggle = Gtk.ToggleButton(label="Plan")
+        self._planner_toggle.set_tooltip_text(
+            "Switch to the read-only planner. In an existing conversation, "
+            "this immediately asks it to prepare or revise the plan."
+        )
+        self._planner_toggle.get_style_context().add_class("chat-planner-toggle")
+        self._planner_toggle.connect("toggled", self._on_planner_toggled)
+        bar.pack_start(self._planner_toggle, False, False, 0)
 
         # Active graph badge — expands to fill the toolbar's leftover space.
         self._graph_label = Gtk.Label(label="Active Graph: none")
@@ -947,9 +960,10 @@ class ChatSidebar(Gtk.Box):
             if sid is not None:
                 store = get_step_store()
                 conv = conversation_id_for_session(sid)
-                rid = f"grc_chat-{uuid4().hex[:8]}"
+                agent_name = f"grc_{self._agent_mode}"
+                rid = f"{agent_name}-{uuid4().hex[:8]}"
                 await store.register_run(
-                    RunRecord(run_id=rid, conversation_id=conv, agent_name="grc_chat")
+                    RunRecord(run_id=rid, conversation_id=conv, agent_name=agent_name)
                 )
                 await store.save_snapshot(
                     ContinuableSnapshot(
@@ -957,7 +971,7 @@ class ChatSidebar(Gtk.Box):
                         step_index=0,
                         messages=self._message_history,
                         conversation_id=conv,
-                        agent_name="grc_chat",
+                        agent_name=agent_name,
                     )
                 )
 
@@ -1074,14 +1088,22 @@ class ChatSidebar(Gtk.Box):
             "Hide block library" if expanded else "Show block library"
         )
 
-    def set_agent(self, agent: Agent, model_error: str | None = None) -> None:
-        self._agent = agent
+    def set_agents(
+        self,
+        executor: Agent,
+        planner: Agent,
+        model_error: str | None = None,
+    ) -> None:
+        """Install both roles while preserving the user's selected mode."""
+        self._executor_agent = executor
+        self._planner_agent = planner
+        self._agent = planner if self._agent_mode == "planner" else executor
         self._model_build_error = model_error
         # Reflect the *running* agent's provider/model in the toolbar badge.
         # The provider is resolved from the model's base_url (not provider.name
         # — OllamaProvider.name returns "ollama" for both local and cloud, so
         # only base_url can tell them apart). See _PROVIDER_BASE_URL.
-        model = getattr(agent, "model", None)
+        model = getattr(executor, "model", None)
         model_name = ""
         resolved_provider = ""
         base_url = ""
@@ -1111,12 +1133,56 @@ class ChatSidebar(Gtk.Box):
             resolved_provider, model_name, is_default=is_default, base_url=base_url
         )
 
-    def set_rebuild_agent_callback(self, cb: Callable[[], tuple[Agent, str | None]]) -> None:
+    def set_rebuild_agent_callback(self, cb: Callable[[], Any]) -> None:
         """Wire the live-swap entry point. desktop_app.py calls this once at
-        startup with a closure over `build_agent_from_cfg(load_settings())`;
+        startup with a closure over `build_agents_from_cfg(load_settings())`;
         the Settings dialog invokes it after a successful Save to apply the
-        new provider/model/key to the running process immediately."""
+        new provider/model/key to both roles immediately."""
         self._rebuild_agent = cb
+
+    def _select_executor(self) -> None:
+        """Reset role selection without dispatching a planner turn."""
+        self._agent_mode = "executor"
+        self._agent = self._executor_agent
+        if not hasattr(self, "_planner_toggle"):
+            return
+        self._changing_agent_mode = True
+        try:
+            self._planner_toggle.set_active(False)
+        finally:
+            self._changing_agent_mode = False
+
+    def _on_planner_toggled(self, button: Gtk.ToggleButton) -> None:
+        if self._changing_agent_mode:
+            return
+        if self._busy:
+            self._changing_agent_mode = True
+            try:
+                button.set_active(self._agent_mode == "planner")
+            finally:
+                self._changing_agent_mode = False
+            return
+
+        if button.get_active():
+            if self._planner_agent is None:
+                self._select_executor()
+                self.set_status("Planner is not configured.", error=True)
+                return
+            self._agent_mode = "planner"
+            self._agent = self._planner_agent
+            if self._message_history:
+                self.set_status("Planner active — reviewing this conversation.")
+                self.send_message(
+                    "Create or revise a complete plan for the current request. "
+                    "Do not execute it."
+                )
+            else:
+                self.set_status("Planner active — describe what you want planned.")
+                self.grab_entry_focus()
+        else:
+            self._agent_mode = "executor"
+            self._agent = self._executor_agent
+            self.set_status("GRC agent active — send a message when you want to execute the plan.")
 
     def set_active_provider(
         self, provider: str, model: str, *, is_default: bool = False, base_url: str | None = None
@@ -1192,6 +1258,7 @@ class ChatSidebar(Gtk.Box):
         self._status_is_error = False
         self._active_session_id = None
         self._message_history = []
+        self._select_executor()
         self._render_history()
 
     def clear_messages(self) -> None:
@@ -1205,6 +1272,7 @@ class ChatSidebar(Gtk.Box):
             self._chat_task.cancel()
         self._message_history = []
         self._active_session_id = None
+        self._select_executor()
         self._compact_btn.set_sensitive(False)
         self._render_history()
 
@@ -1283,6 +1351,7 @@ class ChatSidebar(Gtk.Box):
 
         self._active_session_id = session_id
         self._message_history = deserialize_messages(session_data["messages"])
+        self._select_executor()
         self._render_history()
 
         self._loading_session_id = session_id
@@ -2271,6 +2340,7 @@ class ChatSidebar(Gtk.Box):
         self._new_session_btn.set_sensitive(not busy)
         self._clear_hist_btn.set_sensitive(not busy)
         self._compact_btn.set_sensitive(not busy and bool(self._message_history))
+        self._planner_toggle.set_sensitive(not busy)
         if busy:
             self._send_btn.set_image(
                 Gtk.Image.new_from_icon_name(
@@ -2450,15 +2520,19 @@ class ChatSidebar(Gtk.Box):
             )
             return
         try:
-            new_agent, model_err = self._rebuild_agent()
+            agents = self._rebuild_agent()
         except Exception as e:
             _log.exception("Live-swap rebuild failed")
             self.set_status(f"Settings saved but live-swap failed: {e}", error=True)
             return
-        self.set_agent(new_agent, model_error=model_err)
-        if model_err:
+        self.set_agents(
+            agents.executor,
+            agents.planner,
+            model_error=agents.model_build_error,
+        )
+        if agents.model_build_error:
             self.set_status(
-                f"Switched with warning ({model_err}). Running on defaults.",
+                f"Switched with warning ({agents.model_build_error}). Running on defaults.",
                 error=True,
             )
         else:

@@ -34,8 +34,8 @@ def test_settings_custom_ollama_url(tmp_path, monkeypatch):
 
 
 def test_agent_factory_custom_ollama_url(monkeypatch):
-    """Test build_agent_from_cfg passes custom base_url to the provider."""
-    from grc_agent.agent_factory import build_agent_from_cfg, probe_backend
+    """Test build_agents_from_cfg passes custom base_url to the provider."""
+    from grc_agent.agent_factory import build_agents_from_cfg, probe_backend
 
     cfg = {
         "provider": "ollama_local",
@@ -47,8 +47,9 @@ def test_agent_factory_custom_ollama_url(monkeypatch):
     monkeypatch.setattr(
         "grc_agent.agent_factory.resolve_model_context_length", lambda *_a, **_k: None
     )
-    agent, err = build_agent_from_cfg(cfg)
-    assert err is None
+    agents = build_agents_from_cfg(cfg)
+    agent = agents.executor
+    assert agents.model_build_error is None
     # No thinking request knobs: the provider's native default stands.
     assert not (agent.model_settings or {}).get("extra_body")
 
@@ -64,7 +65,7 @@ def test_agent_factory_custom_ollama_url(monkeypatch):
 
 def test_openai_compatible_provider_and_factory(tmp_path, monkeypatch):
     """Test openai_compatible provider settings, agent creation, and preflight connection."""
-    from grc_agent.agent_factory import build_agent_from_cfg, probe_backend
+    from grc_agent.agent_factory import build_agents_from_cfg, probe_backend
     from grc_agent.settings import load_settings, save_settings
 
     env_file = tmp_path / ".env"
@@ -85,8 +86,9 @@ def test_openai_compatible_provider_and_factory(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "grc_agent.agent_factory.resolve_model_context_length", lambda *_a, **_k: None
     )
-    agent, err = build_agent_from_cfg(cfg)
-    assert err is None
+    agents = build_agents_from_cfg(cfg)
+    agent = agents.executor
+    assert agents.model_build_error is None
 
     # Check model provider
     provider = getattr(agent.model, "_provider", None) or getattr(agent.model, "provider", None)

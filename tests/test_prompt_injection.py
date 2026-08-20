@@ -136,7 +136,7 @@ def test_capability_on_factory_agent(tmp_path, monkeypatch):
     backend's /api/show)."""
     from pydantic_ai_harness import PromptInjectionDefender
 
-    from grc_agent.agent_factory import build_agent_from_cfg
+    from grc_agent.agent_factory import build_agents_from_cfg
 
     env_file = tmp_path / ".env"
     env_file.write_text("", encoding="utf-8")
@@ -149,6 +149,6 @@ def test_capability_on_factory_agent(tmp_path, monkeypatch):
         "ollama_base_url": "http://localhost:11434",
         "api_key": "",
     }
-    agent, _err = build_agent_from_cfg(cfg)
+    agent = build_agents_from_cfg(cfg).executor
     caps = agent.root_capability.capabilities
     assert any(isinstance(c, PromptInjectionDefender) and c.block_high_risk is True for c in caps)

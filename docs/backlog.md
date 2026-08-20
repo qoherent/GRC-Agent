@@ -24,14 +24,13 @@ Active feature requests, architectural improvements, and planned capabilities. C
 * **Key Design Decisions**:
   - Replace `Planning()` with `Planning(store_resolver=…)` keyed on `ctx.conversation_id` (verified present on `RunContext` in installed pydantic-ai 2.31.0) → `SqlitePlanStore(get_db_path(), session='session-{id}')`; `InMemoryPlanStore()` for ungrouped runs. Zero new deps.
   - Co-location on the chat DB is safe: WAL persists at file level; the plan store uses per-op short-lived connections under a lock; `delete_session`/prune need `plan_items` cascade twins of the existing step-row SQL.
-  - Known caveat: documented last-write-wins race on `update_item` if a planner and executor share one session key concurrently — planner and executor must use distinct session keys (e.g. `session-{id}-plan`).
-  - Follows standard harness `Planning` capabilities without introducing custom sub-agent layers.
-  - **Handoff mechanism (research-verified)**: the store IS the whole protocol — `set_items` is an atomic full-plan write; the executor's `<plan-reminder>` is rebuilt from the store on every request, so a plan written by a separate planner agent run is visible to the executor with zero custom plumbing and no planner tokens burned at execution time.
+  - Planner and executor deliberately share the same `session-{id}` key. The UI permits only one run at a time, the planner has only atomic whole-plan `write_plan`, and the executor cannot write plans, so the store's documented concurrent granular-update race is unreachable.
+  - **Handoff mechanism**: the planner atomically replaces the durable store; a `SystemReminders` dynamic reminder renders that store into an ephemeral `<execution-plan>` for the executor on every request. The executor has no `Planning` capability or planning tools.
 
 ---
 
 ### 3. Research/Planning Front-End Agent ("Deep Planner")
-* **Status**: 📐 Design grounded in Pydantic AI built-ins — not implemented
+* **Status**: ✅ Implemented — manual read-only Planner mode with durable handoff
 * **Scope**: A dedicated planning agent that runs *before* execution: researches online (web search + fetch), reads PDFs and long-form documentation, and hands the GRC-Agent a proper, grounded plan instead of it planning inside the chat turn.
 * **Key Design Decisions**:
   - Use Pydantic AI's **programmatic agent hand-off**: the user explicitly enters Planner mode, the app runs a separate `Agent`, and the user explicitly switches back to GRC Agent mode when satisfied. No automatic delegation tool, graph workflow, or Deep Agents layer.
@@ -40,6 +39,9 @@ Active feature requests, architectural improvements, and planned capabilities. C
   - Reuse the existing provider/model construction for v1, but instantiate a distinct named agent (`grc_planner`) with dedicated planning instructions and StepPersistence identity. A separate stronger model remains a later settings decision, not a prerequisite.
   - Multimodal input (pydantic-ai `core-concepts/input`) may be used by the planner for plots/screenshots when researching — including `DocumentInput` for PDFs if the provider supports it (verify per-provider in the vision spike of item 4).
   - **Grounding discipline stays the same**: the planner is subject to the same docs-first rules as the executor — plans cite their sources so the executor can re-verify cheaply (the `query_knowledge` corpus + `web_search` are shared).
+  - The compact `Plan` toolbar toggle is disabled during a run. On an empty chat it waits for the user's goal; mid-session it sends a visible “create or revise” turn through the planner; toggling back selects the executor but never starts execution automatically. Loading/clearing/switching sessions resets safely to executor mode.
+  - Planner and executor turns append to the same canonical `ModelMessage` history and `session-{id}` conversation. `ThinkingPart`s persist in the session blob and pre-compaction StepPersistence snapshots; run rows distinguish `grc_planner` from `grc_executor` for dataset reconstruction.
+  - Live-verified on Ollama Cloud `deepseek-v4-flash:0731`: planner called `inspect_graph` + `write_plan`, produced a visible two-step plan, executor received it without planning calls, and the fixture remained byte-identical.
 
 ---
 

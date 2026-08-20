@@ -130,7 +130,7 @@ def content_preview(ret) -> str:
 def test_factory_agent_carries_the_capability(tmp_path, monkeypatch):
     from pydantic_ai_harness import ToolOutputLimits
 
-    from grc_agent.agent_factory import build_agent_from_cfg
+    from grc_agent.agent_factory import build_agents_from_cfg
 
     env_file = tmp_path / ".env"
     env_file.write_text("", encoding="utf-8")
@@ -143,7 +143,7 @@ def test_factory_agent_carries_the_capability(tmp_path, monkeypatch):
         "ollama_base_url": "http://localhost:11434",
         "api_key": "",
     }
-    agent, _err = build_agent_from_cfg(cfg)
+    agent = build_agents_from_cfg(cfg).executor
     caps = agent.root_capability.capabilities
     tol = next((c for c in caps if isinstance(c, ToolOutputLimits)), None)
     assert tol is not None

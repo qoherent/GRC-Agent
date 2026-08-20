@@ -27,9 +27,9 @@ Env vars (resolved by env_path(): GRC_AGENT_ENV override -> repo-root `.env`
 `load_settings()` reads the `.env` *file* (the saved source of truth), never
 os.environ. A model/provider change is applied live by the Settings dialog's
 Save handler — `chat_sidebar.py:_apply_settings_save` writes here, then calls
-`build_agent_from_cfg(load_settings())` to rebuild the Agent in-place and
-swaps it via `sidebar.set_agent`. The Settings dialog surfaces "Changes apply
-immediately on Save." to make this explicit.
+`build_agents_from_cfg(load_settings())` to rebuild both roles in-place and
+swaps them via `sidebar.set_agents`. The Settings dialog surfaces "Changes
+apply immediately on Save." to make this explicit.
 """
 
 import os

@@ -23,8 +23,8 @@ from grc_agent.adapter import (
     register_execution_messenger,
 )
 from grc_agent.agent_factory import (
-    build_agent_from_cfg,
-    build_interactive_agent,
+    build_agents_from_cfg,
+    build_interactive_agents,
 )
 from grc_agent.chat_sidebar import ChatSidebar
 from grc_agent.exec_monitor import ExecutionErrorMonitor
@@ -230,16 +230,22 @@ def build_app() -> tuple[Gtk.Window, NativeCanvasManager, ChatSidebar, NativeFlo
     outer_paned.pack2(sidebar, resize=True, shrink=False)
     parent.pack_start(outer_paned, expand=True, fill=True, padding=0)
 
-    agent, model_error = build_interactive_agent()
-    sidebar.set_agent(agent, model_error=model_error)
+    agents = build_interactive_agents()
+    sidebar.set_agents(
+        agents.executor,
+        agents.planner,
+        model_error=agents.model_build_error,
+    )
     # Wire the live-swap entry point. The Settings dialog's Save handler calls
     # this after a successful save to rebuild the Agent in-place from the
     # newly-written .env — eliminating the restart requirement that used to
     # silently keep the running agent on the old provider ("backend still kept
     # calling ollama cloud" after a swap to openrouter).
-    sidebar.set_rebuild_agent_callback(lambda: build_agent_from_cfg(load_settings()))
-    if model_error:
-        sidebar.set_status(f"Model warning: {model_error} (using defaults)", error=True)
+    sidebar.set_rebuild_agent_callback(lambda: build_agents_from_cfg(load_settings()))
+    if agents.model_build_error:
+        sidebar.set_status(
+            f"Model warning: {agents.model_build_error} (using defaults)", error=True
+        )
     # NOTE: the startup connection preflight is scheduled from main() AFTER
     # window.show_all(), so the window appears immediately instead of being
     # delayed up to 5s by a sync HTTP probe (see _startup_preflight).

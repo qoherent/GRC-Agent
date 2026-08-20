@@ -284,7 +284,7 @@ def test_save_settings_writes_openai_compatible_model_to_env(tmp_path, monkeypat
 
 def test_build_model_fallback_does_not_mutate_cfg(tmp_path, monkeypatch):
     """When _build_model() fails (e.g. OpenAI-compatible with bad config), the
-    fallback in build_interactive_agent must NOT mutate the saved cfg."""
+    fallback in build_interactive_agents must NOT mutate the saved cfg."""
     env = tmp_path / ".env"
     monkeypatch.setenv("GRC_AGENT_ENV", str(env))
     save_settings("openai_compatible", "openai/gpt-4o-mini")
@@ -836,8 +836,8 @@ def test_system_prompt_names_every_real_tool():
         assert name in prompt, f"{name!r} is a real tool but missing from the system prompt"
 
 
-def test_build_agent_from_cfg_produces_correct_model_type_per_provider(tmp_path, monkeypatch):
-    """Regression: build_agent_from_cfg must produce a model whose type
+def test_build_agents_from_cfg_produces_correct_model_type_per_provider(tmp_path, monkeypatch):
+    """Regression: build_agents_from_cfg must produce a model whose type
     matches the saved provider — OllamaModel for ollama/ollama_cloud,
     OpenRouterModel for openrouter. No LLM call is made (the model is built
     but never .run()); this just locks the provider -> model-type mapping
@@ -850,7 +850,7 @@ def test_build_agent_from_cfg_produces_correct_model_type_per_provider(tmp_path,
     from pydantic_ai.models.ollama import OllamaModel
     from pydantic_ai.models.openai import OpenAIChatModel
 
-    from grc_agent.agent_factory import build_agent_from_cfg
+    from grc_agent.agent_factory import build_agents_from_cfg
 
     monkeypatch.setattr(
         "grc_agent.agent_factory.resolve_model_context_length", lambda *_a, **_k: None
@@ -858,7 +858,7 @@ def test_build_agent_from_cfg_produces_correct_model_type_per_provider(tmp_path,
 
     # ollama (local default)
     save_settings("ollama_local", "qwen3.6:35b-a3b-q4_K_M")
-    agent_local, _ = build_agent_from_cfg(load_settings())
+    agent_local = build_agents_from_cfg(load_settings()).executor
     assert isinstance(agent_local.model, OllamaModel), (
         f"local ollama cfg must produce OllamaModel, got {type(agent_local.model).__name__}"
     )
@@ -866,7 +866,7 @@ def test_build_agent_from_cfg_produces_correct_model_type_per_provider(tmp_path,
     # ollama (remote/cloud)
     save_settings("ollama_cloud", "deepseek-v4-flash:cloud")
     upsert_env_key("OLLAMA_API_KEY", "dummy-key-for-build-test")
-    agent_cloud, _ = build_agent_from_cfg(load_settings())
+    agent_cloud = build_agents_from_cfg(load_settings()).executor
     assert isinstance(agent_cloud.model, OllamaModel), (
         f"ollama cloud cfg must produce OllamaModel, got {type(agent_cloud.model).__name__}"
     )
@@ -882,7 +882,7 @@ def test_build_agent_from_cfg_produces_correct_model_type_per_provider(tmp_path,
         openai_compatible_base_url="http://localhost:8080/v1",
     )
     upsert_env_key("OPENAI_COMPATIBLE_API_KEY", "sk-or-dummy-key-for-build-test")
-    agent_or, _ = build_agent_from_cfg(load_settings())
+    agent_or = build_agents_from_cfg(load_settings()).executor
     assert isinstance(agent_or.model, OpenAIChatModel), (
         f"openai_compatible cfg must produce OpenAIChatModel, got {type(agent_or.model).__name__}"
     )
@@ -895,7 +895,7 @@ def test_build_agent_from_cfg_produces_correct_model_type_per_provider(tmp_path,
 
     save_settings("openrouter", "deepseek/deepseek-v4-flash")
     upsert_env_key("OPENROUTER_API_KEY", "sk-or-dummy-key-for-build-test")
-    agent_ro, _ = build_agent_from_cfg(load_settings())
+    agent_ro = build_agents_from_cfg(load_settings()).executor
     assert isinstance(agent_ro.model, OpenRouterModel), (
         f"openrouter cfg must produce OpenRouterModel, got {type(agent_ro.model).__name__}"
     )
@@ -928,7 +928,7 @@ def test_build_agent_from_cfg_produces_correct_model_type_per_provider(tmp_path,
         # agent instead of proving the provider mapping.
         save_settings(prov, model_id)
         upsert_env_key(key_var, "dummy-key-for-build-test")
-        agent_n, _ = build_agent_from_cfg(load_settings())
+        agent_n = build_agents_from_cfg(load_settings()).executor
         expected = getattr(importlib.import_module(mod), cls)
         assert isinstance(agent_n.model, expected), (
             f"{prov} cfg must produce {cls}, got {type(agent_n.model).__name__}"
@@ -960,14 +960,14 @@ def test_live_swap_rebuilds_agent_with_new_provider(tmp_path, monkeypatch):
     env = tmp_path / ".env"
     monkeypatch.setenv("GRC_AGENT_ENV", str(env))
 
-    from grc_agent.agent_factory import build_agent_from_cfg
+    from grc_agent.agent_factory import build_agents_from_cfg
 
     # 1. Boot with ollama cfg + a dummy key. We never send a real
     #    request on this agent, so the dummy key is fine — it just exercises
     #    the build path and gives us a baseline agent to "swap away from".
     save_settings("ollama_cloud", "deepseek-v4-flash:cloud")
     upsert_env_key("OLLAMA_API_KEY", "dummy-boot-key-not-used")
-    agent1, _ = build_agent_from_cfg(load_settings())
+    agent1 = build_agents_from_cfg(load_settings()).executor
     assert isinstance(agent1.model, OllamaModel)
     assert "ollama.com" in str(agent1.model._provider.base_url)
 
@@ -980,7 +980,7 @@ def test_live_swap_rebuilds_agent_with_new_provider(tmp_path, monkeypatch):
         openai_compatible_base_url="https://openrouter.ai/api/v1",
     )
     upsert_env_key("OPENAI_COMPATIBLE_API_KEY", api_key)
-    agent2, _ = build_agent_from_cfg(load_settings())
+    agent2 = build_agents_from_cfg(load_settings()).executor
 
     # 3. The new agent's model must actually be the new provider's type and
     #    point at the new base_url. This is the assertion that would have
@@ -1292,7 +1292,7 @@ def test_codex_defaults_to_lexical_embeddings(tmp_path, monkeypatch):
 
 def test_codex_badge_resolves_from_its_base_url():
     """Regression: resolve_provider_from_base_url() maps any non-Ollama URL to
-    openai_compatible, and set_agent() then reports a healthy connection as
+    openai_compatible, and set_agents() then reports a healthy connection as
     'Fallback default (configured provider unreachable)'."""
     from grc_agent.providers.openai_codex.model import BASE_URL
     from grc_agent.ui.providers import (

@@ -12,9 +12,11 @@ web-dashboard codebase and are not part of this history.
 ### Added
 - Planning state is now durable per saved chat session through the harness `SqlitePlanStore`, co-located with `chat_sessions.db`; plans survive turns, restarts, and agent/provider live-swaps, while ungrouped runs remain in memory and session delete/clear/prune operations cascade plan rows.
 - Automatic and manual compaction now preserve the complete pre-compaction transcript—including emitted `ThinkingPart` reasoning—in unbounded StepPersistence snapshots inside the same user-exported database, so compacted session history remains usable without sacrificing fine-tuning data.
+- A separate, manually selected Planner agent now shares the current chat history and durable plan store with the GRC executor. Its model-visible surface is structurally read-only (`PrepareTools` plus only `write_plan`/`read_plan`), its reasoning/tool activity persists under the `grc_planner` identity, and a compact `Plan` toggle supports both empty-session planning and explicit mid-session plan revision.
 
 ### Changed
 - The GTK chat welcome screen is denser and sidebar-safe: smaller one-row quick prompts, two-line ellipsized recent-session rows, long-name width bounds, and clearer composer/message boundaries reduce the measured minimum width from 562 px to 472 px while preserving full details in tooltips.
+- The main GRC executor no longer has any planning capability or planning tools. Approved plans are injected read-only from `SqlitePlanStore` through a cache-safe ephemeral `SystemReminders` handoff; switching back from Planner mode never auto-executes.
 
 ### Fixed
 - Provider failures now surface the real cause: turn errors extract the provider's JSON error message from the httpx response/body chain (e.g. "Invalid API key provided" instead of a bare status line), and a missing API key for the configured cloud provider is caught before the turn with a clear "Open Preferences (Ctrl+,) to configure" message instead of a confusing model error. The model-build error from startup/live-swap is carried into the sidebar and shown when a turn is attempted.
@@ -34,7 +36,7 @@ web-dashboard codebase and are not part of this history.
 - Continuous prose grouping in `MarkdownView`: contiguous markdown paragraphs, headings, and lists stream into a single `Gtk.TextBuffer` for unified selection and natural paragraph spacing.
 
 ### Changed
-- `write_plan`/planning tools, fs tools, and web tools all surface through harness capabilities — the app now rides `pydantic-ai-harness` 0.23 (upgraded from 0.21 for the `list_directory` result cap and symlink-hardened walker authorization).
+- Role-appropriate planning, filesystem, and web tools surface through harness capabilities — the app now rides `pydantic-ai-harness` 0.23 (upgraded from 0.21 for the `list_directory` result cap and symlink-hardened walker authorization).
 - Unbounded snapshot retention (`max_snapshots_per_run=None`) across all settled tool boundaries so `ConversationSearch` always has a pre-compaction snapshot.
 - Settings dialog simplified to the two search backends with inline status and one-click installation triggers.
 - Fast test suite reorganized from a 5056-line `test_unit.py` god file into a clustered minimal suite (adapter graph/layout/RAG, sidebar, canvas, factory, sessions, fs tools, injection defense).

@@ -1025,6 +1025,112 @@ def test_send_message_guards_and_creates_session(tmp_path, monkeypatch):
     assert any(s["id"] == sidebar._active_session_id for s in sessions)
 
 
+def test_planner_toggle_is_manual_and_reuses_current_session():
+    """An empty chat only changes mode; a mid-session toggle visibly dispatches
+    the planner handoff through the same send/history path."""
+    from unittest.mock import MagicMock
+
+    from pydantic_ai import Agent
+    from pydantic_ai.messages import ModelRequest, UserPromptPart
+    from pydantic_ai.models.test import TestModel
+
+    from grc_agent.chat_sidebar import ChatSidebar
+
+    sidebar = ChatSidebar()
+    executor = Agent(TestModel(custom_output_text="executor"), output_type=str)
+    planner = Agent(TestModel(custom_output_text="planner"), output_type=str)
+    sidebar.set_agents(executor, planner)
+    sidebar.send_message = MagicMock(return_value=True)
+
+    sidebar._planner_toggle.set_active(True)
+    assert sidebar._agent_mode == "planner"
+    assert sidebar._agent is planner
+    sidebar.send_message.assert_not_called()
+
+    sidebar._planner_toggle.set_active(False)
+    sidebar._message_history = [
+        ModelRequest(parts=[UserPromptPart(content="Build a receiver")])
+    ]
+    sidebar._active_session_id = 17
+    sidebar._planner_toggle.set_active(True)
+
+    sidebar.send_message.assert_called_once_with(
+        "Create or revise a complete plan for the current request. Do not execute it."
+    )
+    assert sidebar._active_session_id == 17
+
+
+def test_planner_toggle_cannot_switch_while_busy():
+    from pydantic_ai import Agent
+    from pydantic_ai.models.test import TestModel
+
+    from grc_agent.chat_sidebar import ChatSidebar
+
+    sidebar = ChatSidebar()
+    executor = Agent(TestModel(custom_output_text="executor"), output_type=str)
+    planner = Agent(TestModel(custom_output_text="planner"), output_type=str)
+    sidebar.set_agents(executor, planner)
+
+    sidebar._set_busy(True)
+    assert sidebar._planner_toggle.get_sensitive() is False
+    sidebar._planner_toggle.set_active(True)
+
+    assert sidebar._agent_mode == "executor"
+    assert sidebar._agent is executor
+
+
+def test_planner_turn_persists_thinking_in_shared_session_history(tmp_path, monkeypatch):
+    """Planner reasoning and reply use the same canonical session payload the
+    executor uses, so dataset export does not lose the role's pre-compaction trace."""
+    from pydantic_ai import Agent
+    from pydantic_ai.messages import ModelResponse, TextPart, ThinkingPart
+    from pydantic_ai.models.function import FunctionModel
+
+    from grc_agent.chat_sidebar import ChatSidebar
+    from grc_agent.db import deserialize_messages, load_session, save_session
+
+    monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
+    graph = tmp_path / "planner-history.grc"
+    graph.touch()
+    session_id = save_session(None, str(graph), [])
+    assert session_id is not None
+
+    planner = Agent(
+        FunctionModel(
+            lambda _messages, _info: ModelResponse(
+                parts=[
+                    ThinkingPart(content="planner-private-trace"),
+                    TextPart(content="visible planner plan"),
+                ]
+            )
+        ),
+        output_type=str,
+    )
+    sidebar = ChatSidebar()
+    sidebar._agent_mode = "planner"
+    sidebar._agent = planner
+    sidebar._active_session_id = session_id
+
+    result = asyncio.run(planner.run("Make a plan"))
+    sidebar._message_history = result.all_messages()
+    monkeypatch.setattr(sidebar, "_get_effective_path", lambda: str(graph))
+    asyncio.run(sidebar._save_history())
+
+    row = load_session(session_id)
+    assert row is not None
+    history = deserialize_messages(row["messages"])
+    assert any(
+        isinstance(part, ThinkingPart) and part.content == "planner-private-trace"
+        for message in history
+        for part in getattr(message, "parts", [])
+    )
+    assert any(
+        isinstance(part, TextPart) and part.content == "visible planner plan"
+        for message in history
+        for part in getattr(message, "parts", [])
+    )
+
+
 def test_save_history_is_async_and_offloads_to_thread(monkeypatch):
     """DB-1 regression: _save_history must be async and dispatch save_session via
     asyncio.to_thread so it never blocks the gbulb event loop."""

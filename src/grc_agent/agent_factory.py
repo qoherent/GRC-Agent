@@ -7,7 +7,7 @@ from uuid import uuid4
 
 import httpx
 from pydantic_ai import Agent, ModelSettings, RunContext
-from pydantic_ai.capabilities import AbstractCapability
+from pydantic_ai.capabilities import AbstractCapability, PrepareTools
 from pydantic_ai.models.ollama import OllamaModel
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.models.openrouter import OpenRouterModel
@@ -24,8 +24,15 @@ from pydantic_ai_harness.compaction import (
     TieredCompaction,
 )
 from pydantic_ai_harness.conversation_search import ConversationSearch, SnapshotHistorySource
-from pydantic_ai_harness.planning import InMemoryPlanStore, Planning, PlanStore, SqlitePlanStore
+from pydantic_ai_harness.planning import (
+    InMemoryPlanStore,
+    Planning,
+    PlanStore,
+    SqlitePlanStore,
+    render_plan,
+)
 from pydantic_ai_harness.step_persistence import ContinuableSnapshot, RunRecord, StepPersistence
+from pydantic_ai_harness.system_reminders import SystemReminders
 from pydantic_ai_harness.tool_output_limits import Band, LocalFileStore, Spill, Truncate
 from tenacity import retry_if_exception_type, stop_after_attempt, wait_exponential
 
@@ -40,7 +47,7 @@ from grc_agent.agent import (
 )
 from grc_agent.db import get_db_path, get_step_store, init_db
 from grc_agent.fs_tools import GrcFileSystem
-from grc_agent.prompts import build_system_prompt
+from grc_agent.prompts import build_planner_prompt, build_system_prompt
 from grc_agent.settings import default_settings, get_env_value, load_settings
 
 # genai-prices registry errors documented in the harness compaction docs:
@@ -55,6 +62,55 @@ _MODEL_WINDOW_OVERRIDES = {
 
 
 _log = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class AgentBundle:
+    """The two explicit roles available in the desktop chat."""
+
+    executor: Agent
+    planner: Agent
+    model_build_error: str | None = None
+
+
+_PLANNER_FUNCTION_TOOLS = frozenset(
+    {
+        "inspect_graph",
+        "query_knowledge",
+        "generate_python",
+        "get_run_log",
+        "read_file",
+        "list_directory",
+        "search_files",
+        "find_files",
+        "file_info",
+        "read_tool_result",
+        "search_conversation_history",
+        "duckduckgo_search",
+        "web_fetch",
+        "write_plan",
+        "read_plan",
+    }
+)
+
+
+async def _prepare_planner_tools(_ctx: RunContext[Any], tool_defs: list[Any]) -> list[Any]:
+    """Expose only read operations plus atomic plan read/write to the planner."""
+    return [tool for tool in tool_defs if tool.name in _PLANNER_FUNCTION_TOOLS]
+
+
+async def _execution_plan_reminder(ctx: RunContext[Any]) -> str | None:
+    """Hand the executor the durable plan without giving it planning tools."""
+    items = await _plan_store_resolver(ctx).get_items()
+    if not items:
+        return None
+    return (
+        "<execution-plan>\n"
+        "The user prepared this plan in Planner mode. Treat it as read-only: follow it, "
+        "re-inspect live state before edits, and ask before materially changing its scope.\n\n"
+        f"{render_plan(items)}\n"
+        "</execution-plan>"
+    )
 
 
 def _plan_store_resolver(ctx: RunContext[Any]) -> PlanStore:
@@ -515,6 +571,8 @@ class TranscriptPreservingTieredCompaction(TieredCompaction):
     never silently destroy the only durable copy used for dataset collection.
     """
 
+    archive_agent_name = "grc_chat"
+
     async def before_model_request(self, ctx, request_context):  # noqa: ANN001
         before = list(request_context.messages)
         transcript = list(ctx.messages)
@@ -523,12 +581,13 @@ class TranscriptPreservingTieredCompaction(TieredCompaction):
             return processed
 
         store = get_step_store()
-        run_id = f"grc_chat-compaction-{uuid4().hex[:8]}"
+        agent_name = getattr(self, "archive_agent_name", "grc_chat")
+        run_id = f"{agent_name}-compaction-{uuid4().hex[:8]}"
         await store.register_run(
             RunRecord(
                 run_id=run_id,
                 conversation_id=ctx.conversation_id,
-                agent_name="grc_chat",
+                agent_name=agent_name,
                 metadata={"kind": "pre_compaction_transcript"},
             )
         )
@@ -538,7 +597,7 @@ class TranscriptPreservingTieredCompaction(TieredCompaction):
                 step_index=ctx.run_step,
                 messages=transcript,
                 conversation_id=ctx.conversation_id,
-                agent_name="grc_chat",
+                agent_name=agent_name,
             )
         )
         return processed
@@ -570,7 +629,9 @@ def _build_tool_output_limits() -> ToolOutputLimits:
     )
 
 
-def _build_compaction_capability(cfg: dict) -> TranscriptPreservingTieredCompaction:
+def _build_compaction_capability(
+    cfg: dict, *, agent_name: str = "grc_chat"
+) -> TranscriptPreservingTieredCompaction:
     """Build a tiered context compaction capability tailored to the active provider.
 
     Evicts bulky older tool return contents (e.g. inspect_graph 10k JSONs, generate_python previews)
@@ -584,6 +645,10 @@ def _build_compaction_capability(cfg: dict) -> TranscriptPreservingTieredCompact
     context label uses. The genai-prices registry and the old 128k/32k
     guesses are only fallbacks when the probe cannot answer.
     """
+    def tagged(capability: TranscriptPreservingTieredCompaction):
+        capability.archive_agent_name = agent_name
+        return capability
+
     base_url = _provider_base_url(cfg)
     # One uniform rule: any plain-HTTP endpoint is a self-hosted server
     # (every cloud provider — ollama.com, openrouter.ai, chatgpt.com — is
@@ -643,7 +708,9 @@ def _build_compaction_capability(cfg: dict) -> TranscriptPreservingTieredCompact
     except (ValueError, TypeError):
         target_tokens = None
     if target_tokens is not None:
-        return TranscriptPreservingTieredCompaction(tiers=tiers, target_tokens=target_tokens)
+        return tagged(
+            TranscriptPreservingTieredCompaction(tiers=tiers, target_tokens=target_tokens)
+        )
 
     # One uniform rule: the REAL context window, probed from the backend
     # itself (Ollama /api/show -> model_info.context_length, OpenRouter/OpenAI
@@ -656,34 +723,41 @@ def _build_compaction_capability(cfg: dict) -> TranscriptPreservingTieredCompact
     model_id = str(cfg.get("model", ""))
     for key, window in _MODEL_WINDOW_OVERRIDES.items():
         if key in model_id:
-            return TranscriptPreservingTieredCompaction(
-                tiers=tiers, target_fraction=0.85, context_window=window
+            return tagged(
+                TranscriptPreservingTieredCompaction(
+                    tiers=tiers, target_fraction=0.85, context_window=window
+                )
             )
 
     probed = resolve_model_context_length(str(cfg.get("provider", "")), model_id)
     if probed is not None:
-        return TranscriptPreservingTieredCompaction(
-            tiers=tiers, target_fraction=0.85, context_window=probed
+        return tagged(
+            TranscriptPreservingTieredCompaction(
+                tiers=tiers, target_fraction=0.85, context_window=probed
+            )
         )
 
     # Probe failed or impossible: let the harness resolve the registry per
     # request, with the old conservative guesses as the fallback denominator.
     if is_local:
-        return TranscriptPreservingTieredCompaction(
-            tiers=tiers, target_fraction=0.85, context_window=32_000
+        return tagged(
+            TranscriptPreservingTieredCompaction(
+                tiers=tiers, target_fraction=0.85, context_window=32_000
+            )
         )
-    return TranscriptPreservingTieredCompaction(
-        tiers=tiers, target_fraction=0.85, fallback_context_window=128_000
+    return tagged(
+        TranscriptPreservingTieredCompaction(
+            tiers=tiers, target_fraction=0.85, fallback_context_window=128_000
+        )
     )
 
 
-def build_agent_from_cfg(cfg: dict) -> tuple[Agent, str | None]:
-    """Construct a fresh Agent from an already-loaded settings dict.
+def build_agents_from_cfg(cfg: dict) -> AgentBundle:
+    """Construct fresh executor and planner agents from loaded settings.
 
-    Shared between startup (`build_interactive_agent`) and live-swap (the
-    Settings dialog's Save handler). Returns `(agent, model_build_error)` —
-    on a model-construction failure, falls back to defaults and surfaces the
-    error string so the caller can warn the user without crashing the app.
+    Both roles share the selected model and canonical message history, but
+    their model-visible tools are disjoint. On model-construction failure the
+    bundle falls back to defaults and carries the error for the GUI to surface.
     """
     http_client = _retrying_http_client()
     model_build_error: str | None = None
@@ -712,11 +786,17 @@ def build_agent_from_cfg(cfg: dict) -> tuple[Agent, str | None]:
 
     from grc_agent.native_canvas import NativeFlowgraphProxy
 
-    agent: Agent[NativeFlowgraphProxy, Any] = Agent(
+    persistence_metadata = {
+        "provider": str(cfg.get("provider", "")),
+        "model": str(cfg.get("model", "")),
+        "base_url": _provider_base_url(cfg),
+    }
+
+    executor: Agent[NativeFlowgraphProxy, Any] = Agent(
         model=model,
         deps_type=NativeFlowgraphProxy,
         output_type=[GrcAgentResponse, str],
-        name="grc_desktop_chat_agent",
+        name="grc_desktop_executor_agent",
         instructions=build_system_prompt("pai-desktop-chat"),
         tools=grc_tools(),
         capabilities=[
@@ -724,19 +804,15 @@ def build_agent_from_cfg(cfg: dict) -> tuple[Agent, str | None]:
             ModelRequestLogger(),
             StepPersistence(
                 store=get_step_store(),
-                agent_name="grc_chat",
-                metadata={
-                    "provider": str(cfg.get("provider", "")),
-                    "model": str(cfg.get("model", "")),
-                    "base_url": _provider_base_url(cfg),
-                },
+                agent_name="grc_executor",
+                metadata=persistence_metadata,
             ),
             ConversationSearch(
                 SnapshotHistorySource(get_step_store()),
                 scope="conversation",
             ),
-            Planning(store_resolver=_plan_store_resolver),
-            _build_compaction_capability(cfg),
+            SystemReminders(dynamic_reminders=[_execution_plan_reminder]),
+            _build_compaction_capability(cfg, agent_name="grc_executor"),
             web_search_cap,
             web_fetch_cap,
             GrcFileSystem(),
@@ -747,7 +823,41 @@ def build_agent_from_cfg(cfg: dict) -> tuple[Agent, str | None]:
         retries={"tools": 3, "output": 3},
     )
 
-    @agent.instructions
+    planner: Agent[NativeFlowgraphProxy, str] = Agent(
+        model=model,
+        deps_type=NativeFlowgraphProxy,
+        output_type=str,
+        name="grc_desktop_planner_agent",
+        instructions=build_planner_prompt("pai-desktop-planner"),
+        tools=grc_tools(),
+        capabilities=[
+            StopGracefully(),
+            ModelRequestLogger(),
+            StepPersistence(
+                store=get_step_store(),
+                agent_name="grc_planner",
+                metadata=persistence_metadata,
+            ),
+            ConversationSearch(
+                SnapshotHistorySource(get_step_store()),
+                scope="conversation",
+            ),
+            Planning(
+                store_resolver=_plan_store_resolver,
+                tools=["write_plan", "read_plan"],
+            ),
+            _build_compaction_capability(cfg, agent_name="grc_planner"),
+            web_search_cap,
+            web_fetch_cap,
+            GrcFileSystem(),
+            prompt_injection_cap,
+            _build_tool_output_limits(),
+            PrepareTools(_prepare_planner_tools),
+        ],
+        model_settings=model_settings,
+        retries={"tools": 3, "output": 3},
+    )
+
     def add_active_flowgraph_context(ctx: RunContext[NativeFlowgraphProxy]) -> str | None:
         if ctx.deps is not None:
             cm = getattr(ctx.deps, "_canvas_manager", None)
@@ -755,17 +865,15 @@ def build_agent_from_cfg(cfg: dict) -> tuple[Agent, str | None]:
                 return f"Active flowgraph file path: {cm.path}"
         return None
 
-    agent.output_validator(validate_flowgraph_state)
-    return agent, model_build_error
+    executor.instructions(add_active_flowgraph_context)
+    planner.instructions(add_active_flowgraph_context)
+    executor.output_validator(validate_flowgraph_state)
+    return AgentBundle(executor, planner, model_build_error)
 
 
-def build_interactive_agent() -> tuple[Agent, str | None]:
-    """Startup path — read .env via load_settings() and build the Agent.
-
-    Kept as a thin wrapper over `build_agent_from_cfg` so `desktop_app.py`'s
-    call site stays unchanged. Live-swap callers use `build_agent_from_cfg`
-    directly so they can show a before/after diff to the user."""
-    return build_agent_from_cfg(load_settings())
+def build_interactive_agents() -> AgentBundle:
+    """Read persisted settings and construct both interactive roles."""
+    return build_agents_from_cfg(load_settings())
 
 
 # /models endpoints for the native cloud providers (the probe + the Load
