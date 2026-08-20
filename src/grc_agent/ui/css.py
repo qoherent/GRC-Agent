@@ -64,12 +64,14 @@ textview.chat-thinking-textview text {
 
 /* ---- buttons: explicit bounded affordance --------------------------- */
 .chat-toolbar-btn,
+.chat-quick-prompt-btn,
 .chat-copy-btn,
 .chat-recent-delete-btn {
     border: 1px solid @SOFT@;
     border-radius: 4px;
 }
 .chat-toolbar-btn:hover,
+.chat-quick-prompt-btn:hover,
 .chat-copy-btn:hover,
 .chat-recent-delete-btn:hover {
     border-color: @STRONG@;
@@ -79,9 +81,49 @@ textview.chat-thinking-textview text {
 .chat-recent-item {
     border: 1px solid @SOFT@;
     border-radius: 6px 0 0 6px;
+    padding: 3px 6px;
 }
 .chat-recent-delete-btn {
     border-radius: 0 6px 6px 0;
+    min-width: 26px;
+    padding: 2px;
+}
+.chat-recent-meta {
+    color: alpha(@theme_fg_color, 0.62);
+    font-size: 0.80em;
+}
+
+/* Quick prompts are suggestions, not primary actions. Keep their labels
+   compact so all three fit across a normal sidebar without widening it. */
+.chat-quick-prompt-btn {
+    font-size: 0.82em;
+    min-height: 22px;
+    padding: 2px 6px;
+}
+
+/* Separate the composer from the scrolling transcript and make its active
+   text area unmistakable on both light and dark themes. */
+.chat-input-area {
+    border-top: 1px solid @SOFT@;
+    padding-top: 4px;
+}
+.chat-entry-frame {
+    border-color: alpha(@theme_fg_color, 0.46);
+    border-radius: 8px;
+    background-color: alpha(@theme_fg_color, 0.025);
+}
+.chat-send-btn {
+    min-width: 34px;
+    min-height: 34px;
+}
+.chat-agent-msg-box {
+    padding: 6px 8px;
+}
+.chat-user-msg-box {
+    border: 1px solid @SOFT@;
+    border-radius: 8px;
+    padding: 5px 7px;
+    background-color: alpha(@theme_fg_color, 0.035);
 }
 
 /* Block-name pill badge */

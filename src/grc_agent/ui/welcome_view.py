@@ -57,10 +57,10 @@ def format_relative_time(timestamp_str: str) -> str:
 
 # (button label, prompt sent on click) — shown only when a flowgraph is open.
 _QUICK_PROMPTS = [
-    ("\U0001f50d Inspect graph", "Inspect this flowgraph and summarize its architecture."),
-    ("\u26a1 Check errors", "Check this flowgraph for configuration errors or missing parameters."),
+    ("\U0001f50d Inspect", "Inspect this flowgraph and summarize its architecture."),
+    ("\u26a1 Validate", "Check this flowgraph for configuration errors or missing parameters."),
     (
-        "\u2753 Explain pipeline",
+        "\u2753 Explain",
         "Explain what signal processing pipeline this flowgraph implements.",
     ),
 ]
@@ -92,11 +92,11 @@ class WelcomeView:
             self._add_recent_sessions(sessions)
 
     def _welcome_card(self, current_page) -> Gtk.Box:
-        welcome_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        welcome_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         welcome_box.get_style_context().add_class("chat-welcome-box")
 
         title_lbl = Gtk.Label()
-        title_lbl.set_markup("<span size='large' weight='bold'>GRC Agent Chat</span>")
+        title_lbl.set_markup("<span weight='bold'>GRC Agent</span>")
         title_lbl.set_xalign(0.0)
         welcome_box.pack_start(title_lbl, False, False, 0)
 
@@ -119,10 +119,12 @@ class WelcomeView:
             chips_box.set_selection_mode(Gtk.SelectionMode.NONE)
             chips_box.set_max_children_per_line(3)
             chips_box.set_valign(Gtk.Align.START)
-            chips_box.set_margin_top(4)
+            chips_box.set_row_spacing(4)
+            chips_box.set_column_spacing(4)
+            chips_box.set_margin_top(2)
             for label_text, prompt_text in _QUICK_PROMPTS:
                 btn = Gtk.Button(label=label_text)
-                btn.get_style_context().add_class("chat-toolbar-btn")
+                btn.get_style_context().add_class("chat-quick-prompt-btn")
                 btn.set_tooltip_text(f'Send: "{prompt_text}"')
                 btn.connect("clicked", lambda _, p=prompt_text: self._on_quick_prompt(p))
                 chips_box.add(btn)
@@ -168,7 +170,7 @@ class WelcomeView:
         btn.set_relief(Gtk.ReliefStyle.NONE)
         btn.set_hexpand(True)
 
-        inner = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        inner = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         inner.pack_start(
             Gtk.Image.new_from_icon_name("text-x-generic-symbolic", Gtk.IconSize.MENU),
             False,
@@ -176,12 +178,14 @@ class WelcomeView:
             0,
         )
 
-        text_vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
-        top_hbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        text_vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        top_hbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        top_hbox.set_hexpand(True)
         name_lbl = Gtk.Label()
         name_lbl.set_markup(f"<b>{_esc(Path(grc_path).name)}</b>")
         name_lbl.set_xalign(0.0)
-        top_hbox.pack_start(name_lbl, False, False, 0)
+        name_lbl.set_ellipsize(Pango.EllipsizeMode.END)
+        top_hbox.pack_start(name_lbl, True, True, 0)
         if updated_at:
             time_lbl = Gtk.Label()
             time_lbl.get_style_context().add_class("dim-label")
@@ -191,26 +195,21 @@ class WelcomeView:
             time_lbl.set_xalign(1.0)
             top_hbox.pack_end(time_lbl, False, False, 0)
 
-        path_lbl = Gtk.Label()
-        path_lbl.get_style_context().add_class("dim-label")
-        path_lbl.set_markup(f"<span size='small'>{_esc(str(Path(grc_path).parent))}</span>")
-        path_lbl.set_xalign(0.0)
-        path_lbl.set_ellipsize(Pango.EllipsizeMode.START)
-        text_vbox.pack_start(top_hbox, False, False, 0)
-        text_vbox.pack_start(path_lbl, False, False, 0)
-
+        metadata = str(Path(grc_path).parent)
         if first_message:
             snippet = first_message.replace("\n", " ").strip()
-            snippet_lbl = Gtk.Label()
-            snippet_lbl.get_style_context().add_class("dim-label")
-            snippet_lbl.set_markup(f"<span style='italic' size='small'>{_esc(snippet)}</span>")
-            snippet_lbl.set_xalign(0.0)
-            snippet_lbl.set_ellipsize(Pango.EllipsizeMode.END)
-            text_vbox.pack_start(snippet_lbl, False, False, 0)
+            metadata = f"{metadata} · {snippet}"
+        meta_lbl = Gtk.Label(label=metadata)
+        meta_lbl.get_style_context().add_class("chat-recent-meta")
+        meta_lbl.set_xalign(0.0)
+        meta_lbl.set_ellipsize(Pango.EllipsizeMode.END)
+        text_vbox.pack_start(top_hbox, False, False, 0)
+        text_vbox.pack_start(meta_lbl, False, False, 0)
 
         inner.pack_start(text_vbox, True, True, 0)
         btn.add(inner)
-        btn.set_tooltip_text(grc_path)
+        tooltip = grc_path if not first_message else f"{grc_path}\n\n{first_message}"
+        btn.set_tooltip_text(tooltip)
         btn.connect("clicked", lambda _, session_id=sid: self._on_open_session(session_id))
 
         del_btn = Gtk.Button()

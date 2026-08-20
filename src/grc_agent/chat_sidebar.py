@@ -642,6 +642,7 @@ class ChatSidebar(Gtk.Box):
 
     def _build_input_area(self, content: Gtk.Box) -> None:
         vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        vbox.get_style_context().add_class("chat-input-area")
         vbox.set_border_width(4)
 
         box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
@@ -1682,6 +1683,7 @@ class ChatSidebar(Gtk.Box):
 
         hbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
         hbox.set_halign(Gtk.Align.END)
+        hbox.get_style_context().add_class("chat-user-msg-box")
 
         copy_btn = Gtk.Button()
         copy_btn.set_relief(Gtk.ReliefStyle.NONE)

@@ -31,11 +31,13 @@ Active feature requests, architectural improvements, and planned capabilities. C
 ---
 
 ### 3. Research/Planning Front-End Agent ("Deep Planner")
-* **Status**: 💡 Agreed direction
+* **Status**: 📐 Design grounded in Pydantic AI built-ins — not implemented
 * **Scope**: A dedicated planning agent that runs *before* execution: researches online (web search + fetch), reads PDFs and long-form documentation, and hands the GRC-Agent a proper, grounded plan instead of it planning inside the chat turn.
 * **Key Design Decisions**:
-  - Hand the finished plan to the GRC-Agent via the durable plan store (`SqlitePlanStore` on the chat DB, see item 2) or as plan files in the project folder — no custom inter-agent protocol layers.
-  - Reuses the existing provider/catalog infrastructure (same `.env`, same twelve providers); a separate, possibly stronger, model can back the planner without touching the executor's provider.
+  - Use Pydantic AI's **programmatic agent hand-off**: the user explicitly enters Planner mode, the app runs a separate `Agent`, and the user explicitly switches back to GRC Agent mode when satisfied. No automatic delegation tool, graph workflow, or Deep Agents layer.
+  - The durable `SqlitePlanStore` is the plan handoff; ordinary Pydantic AI `message_history` is shared between the agents so planner output, reasoning, and read-tool activity stream through the same chat UI and persist transparently.
+  - The planner is structurally read-only via the built-in `PrepareTools` capability over an explicit allowlist: planning (`write_plan`/`read_plan`), graph/file inspection, knowledge lookup, web search/fetch, and run-log reads. `change_graph`, `save_block`, and every filesystem mutation tool are absent—not merely prohibited by prompt text.
+  - Reuse the existing provider/model construction for v1, but instantiate a distinct named agent (`grc_planner`) with dedicated planning instructions and StepPersistence identity. A separate stronger model remains a later settings decision, not a prerequisite.
   - Multimodal input (pydantic-ai `core-concepts/input`) may be used by the planner for plots/screenshots when researching — including `DocumentInput` for PDFs if the provider supports it (verify per-provider in the vision spike of item 4).
   - **Grounding discipline stays the same**: the planner is subject to the same docs-first rules as the executor — plans cite their sources so the executor can re-verify cheaply (the `query_knowledge` corpus + `web_search` are shared).
 

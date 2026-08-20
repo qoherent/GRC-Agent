@@ -713,6 +713,66 @@ def test_send_quick_prompt():
     sidebar.send_message.assert_called_once_with("Inspect this graph")
 
 
+def test_welcome_ui_stays_compact_with_long_recent_sessions(monkeypatch):
+    """Quick prompts and long recent-session labels must not force a wide,
+    sparse sidebar; metadata stays on one compact ellipsized line."""
+    from unittest.mock import MagicMock
+
+    from gi.repository import Gtk
+
+    from grc_agent.chat_sidebar import ChatSidebar
+
+    sessions = [
+        {
+            "id": i,
+            "grc_file_path": f"/tmp/project/wideband_receiver_experiment_{i}.grc",
+            "first_message": "Inspect this receiver and explain every stage in its RF pipeline",
+            "updated_at": "2026-08-20 12:00:00",
+        }
+        for i in range(5)
+    ]
+    monkeypatch.setattr("grc_agent.ui.welcome_view.get_recent_sessions", lambda: sessions)
+
+    sidebar = ChatSidebar()
+    cm = MagicMock()
+    cm.path = "/tmp/project/active.grc"
+    cm.current_page = object()
+    sidebar.set_flowgraph_proxy(MagicMock(_canvas_manager=cm))
+
+    window = Gtk.Window()
+    window.set_default_size(420, 760)
+    window.add(sidebar)
+    window.show_all()
+    while Gtk.events_pending():
+        Gtk.main_iteration()
+
+    def descendants(widget):
+        yield widget
+        if isinstance(widget, Gtk.Container):
+            for child in widget.get_children():
+                yield from descendants(child)
+
+    widgets = list(descendants(sidebar))
+    quick_buttons = [
+        widget
+        for widget in widgets
+        if isinstance(widget, Gtk.Button)
+        and widget.get_style_context().has_class("chat-quick-prompt-btn")
+    ]
+    metadata_labels = [
+        widget
+        for widget in widgets
+        if isinstance(widget, Gtk.Label)
+        and widget.get_style_context().has_class("chat-recent-meta")
+    ]
+
+    assert [button.get_label() for button in quick_buttons] == ["🔍 Inspect", "⚡ Validate", "❓ Explain"]
+    assert len(metadata_labels) == 5
+    assert all(label.get_ellipsize().value_nick == "end" for label in metadata_labels)
+    assert window.get_allocated_width() <= 500
+    window.destroy()
+
+
 def test_poll_indexing_building_ready_failed_idle(monkeypatch):
     """_poll_indexing drives the status bar across the full state machine:
     idle (no-op), building (live progress, content-guarded), ready transition
