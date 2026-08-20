@@ -78,17 +78,17 @@ PROVIDER_API_KEY = {
 }
 
 PROVIDER_MODEL_PLACEHOLDER = {
-    "ollama_local": "qwen3.6:35b-a3b-q4_K_M",
+    "ollama_local": "qwen3.8:latest",
     "ollama_cloud": "deepseek-v4-flash:cloud",
-    "openrouter": "deepseek/deepseek-v4-flash, qwen/qwen3-coder…",
-    "openai": "gpt-5.6-sol — click Load to list yours",
+    "openrouter": "deepseek/deepseek-v4-flash, anthropic/claude-sonnet-5…",
+    "openai": "gpt-5.6-terra — click Load to list yours",
     "openai_compatible": "model id served by your endpoint",
-    "anthropic": "claude-sonnet-4-5 — click Load to list yours",
-    "google": "gemini-2.5-pro — click Load to list yours",
+    "anthropic": "claude-sonnet-5 — click Load to list yours",
+    "google": "gemini-3.7-flash — click Load to list yours",
     "groq": "llama-3.3-70b-versatile — click Load to list yours",
-    "mistral": "mistral-large-latest — click Load to list yours",
-    "cohere": "command-r-plus — click Load to list yours",
-    "xai": "grok-4 — click Load to list yours",
+    "mistral": "codestral-latest — click Load to list yours",
+    "cohere": "north-mini-code-1-0 — click Load to list yours",
+    "xai": "grok-4.6 — click Load to list yours",
     "openai_codex": "gpt-5.6-luna — click Load to list yours",
 }
 

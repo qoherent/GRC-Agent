@@ -127,6 +127,12 @@ lexical automatically with a notice.
   ```bash
   sudo apt install gnuradio python3-gi python3-gi-cairo
   ```
+- **SDR hardware permissions** (if using physical SDRs like RTL-SDR, HackRF, USRP):
+  ```bash
+  # Ensure udev rules and groups are set so you never need sudo
+  sudo usermod -aG plugdev,dialout,usrp $USER
+  sudo udevadm control --reload-rules && sudo udevadm trigger
+  ```
 
 ### Setup
 ```bash

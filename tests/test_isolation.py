@@ -26,7 +26,7 @@ def test_settings_isolation_and_defaults(tmp_path, monkeypatch):
     # 1. Load initial settings (defaults)
     cfg = load_settings()
     assert cfg["provider"] == "ollama_local"
-    assert cfg["ollama_model"] == "qwen3.6:35b-a3b-q4_K_M"
+    assert cfg["ollama_model"] == "qwen3.8:latest"
     assert cfg["openai_compatible_model"] == "deepseek/deepseek-v4-flash"
 
     # 2. Switch provider to openai_compatible and change model
@@ -35,7 +35,7 @@ def test_settings_isolation_and_defaults(tmp_path, monkeypatch):
     assert cfg["provider"] == "openai_compatible"
     assert cfg["model"] == "google/gemini-2.5-flash"
     assert cfg["openai_compatible_model"] == "google/gemini-2.5-flash"
-    assert cfg["ollama_model"] == "qwen3.6:35b-a3b-q4_K_M"  # preserved!
+    assert cfg["ollama_model"] == "qwen3.8:latest"  # preserved!
 
     # 3. Switch back to ollama and change model
     save_settings("ollama_local", "mistral-large")

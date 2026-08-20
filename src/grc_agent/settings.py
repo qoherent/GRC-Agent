@@ -89,16 +89,16 @@ _PROVIDER_MODEL_KEY = {
 }
 
 _DEFAULT_MODELS = {
-    "ollama_model": "qwen3.6:35b-a3b-q4_K_M",
+    "ollama_model": "qwen3.8:latest",
     "openrouter_model": "deepseek/deepseek-v4-flash",
-    "openai_model": "gpt-5.6-sol",
+    "openai_model": "gpt-5.6-terra",
     "openai_compatible_model": "deepseek/deepseek-v4-flash",
-    "anthropic_model": "claude-sonnet-4-5",
-    "google_model": "gemini-2.5-pro",
+    "anthropic_model": "claude-sonnet-5",
+    "google_model": "gemini-3.7-flash",
     "groq_model": "llama-3.3-70b-versatile",
-    "mistral_model": "mistral-large-latest",
-    "cohere_model": "command-r-plus",
-    "xai_model": "grok-4",
+    "mistral_model": "codestral-latest",
+    "cohere_model": "north-mini-code-1-0",
+    "xai_model": "grok-4.6",
     "openai_codex_model": "gpt-5.6-luna",
 }
 _DEFAULT_PROVIDER = "ollama_local"
