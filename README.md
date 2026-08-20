@@ -10,6 +10,36 @@ use.
 
 ![GRC Agent User Interface](docs/screenshot.png)
 
+The whole app is one native GTK3 process: GRC's canvas and the chat sidebar
+share a single event loop, and the agent edits the **same live flowgraph
+object** the canvas draws — no files are round-tripped between them.
+
+```mermaid
+flowchart LR
+    U([You]) <--> CS[Chat sidebar]
+    CS <--> AG[PydanticAI agent<br/>+ your LLM provider]
+
+    subgraph GRC [GRC window — one process, one event loop]
+        CS
+        FG[(Live flowgraph)]
+    end
+
+    AG -- "inspect / change graph" --> FG
+    FG -- "redraws instantly" --> FG
+
+    AG -- "read/write files<br/>.grc reads routed to inspection" --> FS[(Project folder)]
+    AG -- "block & docs search" --> KB[(Catalog + wiki<br/>lexical or vector)]
+    AG -- "web search/fetch" --> WEB[Web]
+
+    FS -- "every tool result scanned" --> DEF{{Injection defense}}
+    WEB --> DEF
+    DEF -- clean --> AG
+    DEF -- withheld --> AG
+
+    FG -- "run fails → return code" --> AG
+    AG -- "reads full run log" --> FG
+```
+
 ---
 
 ## What it does
