@@ -66,12 +66,16 @@ from .db import (
     save_session,
 )
 from .settings import (
+    get_env_value,
     load_settings,
     save_settings,
     upsert_env_key,
 )
 from .ui.css import apply_css as _apply_css
 from .ui.markdown_view import MarkdownView
+from .ui.providers import (
+    PROVIDER_API_KEY as _PROVIDER_API_KEY,
+)
 from .ui.providers import (
     PROVIDER_BADGE_LABEL as _PROVIDER_BADGE_LABEL,
 )
@@ -186,16 +190,60 @@ def _generation_ms_from_messages(new_msgs: list[Any]) -> int:
     return int(total_ms)
 
 
+def _extract_httpx_message(resp) -> str:
+    """Provider JSON error message from an httpx response, if any."""
+    try:
+        data = resp.json()
+    except Exception:
+        return getattr(resp, "text", "")[:300]
+    if not isinstance(data, dict):
+        return ""
+    err = data.get("error")
+    if isinstance(err, dict) and err.get("message"):
+        return str(err["message"])
+    if isinstance(err, str):
+        return err
+    if data.get("message"):
+        return str(data["message"])
+    if data.get("detail"):
+        return str(data["detail"])
+    return ""
+
+
+def _extract_body_message(body) -> str:
+    """Provider JSON error message from a body attribute, if any."""
+    if not isinstance(body, dict):
+        return str(body)
+    err = body.get("error")
+    if isinstance(err, dict) and err.get("message"):
+        return str(err["message"])
+    return str(body.get("message") or body.get("detail") or body)
+
+
+def _extract_cause_message(cause: Exception) -> str:
+    """Best-effort human message from an exception chain cause.
+
+    Prefers the provider's JSON error payload (httpx response or ``body``
+    attribute) over the raw exception string, so the user sees e.g.
+    "Invalid API key provided" instead of a bare status line.
+    """
+    cause_msg = ""
+    resp = getattr(cause, "response", None)
+    if resp is not None:
+        cause_msg = _extract_httpx_message(resp)
+    body = getattr(cause, "body", None)
+    if not cause_msg and body:
+        cause_msg = _extract_body_message(body)
+    return cause_msg or str(cause)
+
+
 def _format_turn_error(e: Exception) -> str:
     """User-facing message for a failed agent turn (_run_agent_turn's catch-all).
     Exposes exact status codes, provider error message details, and underlying causes.
     """
     cause_str = ""
     if hasattr(e, "__cause__") and e.__cause__:
-        cause = e.__cause__
-        cause_msg = str(cause)
-        if hasattr(cause, "body") and cause.body:
-            cause_msg = str(cause.body)
+        cause_msg = _extract_cause_message(e.__cause__)
         if cause_msg and cause_msg != str(e):
             cause_str = f" (Cause: {cause_msg})"
 
@@ -205,7 +253,10 @@ def _format_turn_error(e: Exception) -> str:
             body_detail = ""
             if isinstance(e.body, dict):
                 body_detail = (
-                    e.body.get("message") or e.body.get("error", {}).get("message") or str(e.body)
+                    e.body.get("message")
+                    or e.body.get("error", {}).get("message")
+                    or e.body.get("detail")
+                    or str(e.body)
                 )
             else:
                 body_detail = str(e.body)
@@ -408,6 +459,7 @@ class ChatSidebar(Gtk.Box):
         self._active_provider: str = ""
         self._active_model: str = ""
         self._active_base_url: str | None = None
+        self._model_build_error: str | None = None
         # True when the status bar currently shows an error. set_status uses
         # this to enforce the "background poll can't clobber a sticky error"
         # rule (M5) — saves save/preflight failures visible past the next
@@ -1021,8 +1073,9 @@ class ChatSidebar(Gtk.Box):
             "Hide block library" if expanded else "Show block library"
         )
 
-    def set_agent(self, agent: Agent) -> None:
+    def set_agent(self, agent: Agent, model_error: str | None = None) -> None:
         self._agent = agent
+        self._model_build_error = model_error
         # Reflect the *running* agent's provider/model in the toolbar badge.
         # The provider is resolved from the model's base_url (not provider.name
         # — OllamaProvider.name returns "ollama" for both local and cloud, so
@@ -2048,6 +2101,46 @@ class ChatSidebar(Gtk.Box):
             if self._agent is None:
                 self._append_error("No agent configured.")
                 return
+
+            try:
+                cfg = load_settings()
+                configured_provider = cfg.get("provider", self._active_provider)
+            except Exception:
+                configured_provider = self._active_provider
+
+            key_var = _PROVIDER_API_KEY.get(configured_provider)
+            if key_var and configured_provider not in ("ollama_local", "openai_compatible"):
+                import os
+                key_val = get_env_value(key_var) or os.environ.get(key_var)
+                if not key_val:
+                    provider_title = _PROVIDER_LABELS.get(
+                        configured_provider, configured_provider
+                    )
+                    self._append_error(
+                        f"API key for {provider_title} ({key_var}) is not set. "
+                        "Open Preferences (Ctrl+,) to configure your API key."
+                    )
+                    return
+
+            if configured_provider == "openai_codex":
+                from .providers.openai_codex import is_signed_in as codex_is_signed_in
+
+                if not codex_is_signed_in():
+                    self._append_error(
+                        "Not signed in to ChatGPT. Open Preferences (Ctrl+,) and click 'Sign in with ChatGPT'."
+                    )
+                    return
+
+            if self._model_build_error:
+                provider_title = _PROVIDER_LABELS.get(
+                    configured_provider, configured_provider
+                )
+                self._append_error(
+                    f"Cannot run {provider_title}: {self._model_build_error}. "
+                    "Open Preferences (Ctrl+,) to configure."
+                )
+                return
+
             ctx = _StreamCtx(self._start_agent_message())
             self._message_history = _clean_message_history_for_new_turn(self._message_history)
             async with self._agent.iter(
@@ -2360,7 +2453,7 @@ class ChatSidebar(Gtk.Box):
             _log.exception("Live-swap rebuild failed")
             self.set_status(f"Settings saved but live-swap failed: {e}", error=True)
             return
-        self.set_agent(new_agent)
+        self.set_agent(new_agent, model_error=model_err)
         if model_err:
             self.set_status(
                 f"Switched with warning ({model_err}). Running on defaults.",

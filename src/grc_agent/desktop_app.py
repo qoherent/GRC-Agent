@@ -231,7 +231,7 @@ def build_app() -> tuple[Gtk.Window, NativeCanvasManager, ChatSidebar, NativeFlo
     parent.pack_start(outer_paned, expand=True, fill=True, padding=0)
 
     agent, model_error = build_interactive_agent()
-    sidebar.set_agent(agent)
+    sidebar.set_agent(agent, model_error=model_error)
     # Wire the live-swap entry point. The Settings dialog's Save handler calls
     # this after a successful save to rebuild the Agent in-place from the
     # newly-written .env — eliminating the restart requirement that used to

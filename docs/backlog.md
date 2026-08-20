@@ -54,6 +54,20 @@ Active feature requests, architectural improvements, and planned capabilities. C
 
 ---
 
+### 5. Deterministic Block Placement (algorithm-based layout)
+* **Status**: 💡 Agreed direction — design open
+* **Scope**: Fix the "blocks thrown at random places" problem. When `change_graph` adds blocks (or any new component appears), the whole workspace must be rearranged deterministically — and **positions must stay algorithm-based, never LLM-based**: block coordinates are deliberately filtered out of the model's context (they would flood it and confuse it), so the model can never be asked to choose positions.
+* **User requirements (paraphrased)**:
+  - **Variables/parameters first**: all variable and parameter blocks are listed horizontally along the top of the workspace — the universal GNU Radio convention. Order doesn't matter, but alphabetical is preferred.
+  - **Full rearrangement on add**: whenever a new component is added, the agent arranges the *entire* workspace, not just the new block — moving existing components is cheap and expected.
+* **Proposed algorithm (rough sketch, to be refined)**:
+  - Split the workspace into a grid of defined cells (e.g. 150×150 px).
+  - Row 1: all variables/parameters (alphabetical).
+  - Remaining rows: place components column-by-column following connection topology — e.g. blocks with no inputs go in the first column (stacked vertically), their consumers in the next column, and so on (a Sugiyama-style rank assignment; the existing `adapter/layout.py` grandalf machinery already does rank assignment and can be extended rather than replaced).
+* **Constraints**: must stay fully automatic (no model input), deterministic, and must not fight manual user drags (the current rule: relayout runs only from `change_graph`'s `add_blocks` path, never on manual edits — keep that).
+
+---
+
 ## 🛠️ Contributing to the Backlog
 When recording new requests or design decisions:
 1. Document the requirement, user context, and target scope.

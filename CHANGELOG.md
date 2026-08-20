@@ -7,6 +7,11 @@ Versioning starts fresh at `0.1.0` for the current native GTK3 architecture —
 earlier `v1.0.0`/`v2.0.0` tags belonged to an unrelated, since-rewritten
 web-dashboard codebase and are not part of this history.
 
+## [Unreleased]
+
+### Fixed
+- Provider failures now surface the real cause: turn errors extract the provider's JSON error message from the httpx response/body chain (e.g. "Invalid API key provided" instead of a bare status line), and a missing API key for the configured cloud provider is caught before the turn with a clear "Open Preferences (Ctrl+,) to configure" message instead of a confusing model error. The model-build error from startup/live-swap is carried into the sidebar and shown when a turn is attempted.
+
 ## [0.3.0] - 2026-08-19
 
 ### Added

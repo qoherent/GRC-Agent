@@ -871,6 +871,46 @@ def test_format_turn_error_covers_each_exception_type():
     )
     assert _format_turn_error(RuntimeError("boom")) == "Agent Error: boom"
 
+    # Deep cause extraction from HTTPStatusError
+    import httpx
+    req = httpx.Request("POST", "https://api.openai.com/v1/chat/completions")
+    resp_json = httpx.Response(401, request=req, json={"error": {"message": "Invalid API key provided"}})
+    try:
+        resp_json.raise_for_status()
+    except Exception as c:
+        try:
+            raise ModelAPIError("gpt-5.6-sol", "Connection error.") from c
+        except Exception as exc:
+            assert _format_turn_error(exc) == "Model API Error: Connection error. (Cause: Invalid API key provided)"
+
+
+def test_run_agent_turn_missing_api_key_shows_error(tmp_path, monkeypatch):
+    """Missing API key for a configured cloud provider surfaces a clear chat error."""
+    import asyncio
+
+    from pydantic_ai import Agent
+    from pydantic_ai.models.test import TestModel
+
+    from grc_agent.chat_sidebar import ChatSidebar
+    from grc_agent.settings import save_settings
+
+    env_file = tmp_path / ".env"
+    monkeypatch.setenv("GRC_AGENT_ENV", str(env_file))
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    save_settings("anthropic", "claude-sonnet-5")
+
+    sidebar = ChatSidebar()
+    sidebar._agent = Agent(TestModel())
+    sidebar._active_provider = "anthropic"
+
+    asyncio.run(sidebar._run_agent_turn("hello"))
+
+    # Verify error label added
+    rows = sidebar._listbox.get_children()
+    assert len(rows) >= 1
+    row_text = rows[-1].get_child().get_text()
+    assert "API key for Anthropic (Claude) (ANTHROPIC_API_KEY) is not set" in row_text
+
 
 def test_send_message_guards_and_creates_session(tmp_path, monkeypatch):
     """M14 regression: send_message's blank-text/busy no-op guards and its
