@@ -68,8 +68,21 @@ Active feature requests, architectural improvements, and planned capabilities. C
 
 ---
 
+### 6. Shell Tool Access & Sandboxed Execution
+* **Status**: 📥 Proposed / Research
+* **Scope**: Provide the agent with safe, structured shell execution capabilities to run build commands (e.g., `cmake`, `make`, `gr-modtool`), run standalone scripts, and inspect system environments.
+* **References**:
+  - [PydanticAI Harness Shell](https://pydantic.dev/docs/ai/harness/shell/)
+  - [PydanticAI Harness Modal Sandbox](https://pydantic.dev/docs/ai/harness/modal-sandbox/)
+* **Key Considerations & Investigation Points**:
+  - **Hardware & User Permission Investigation**: Investigate how shell execution interacts with host device permissions (e.g., SDR USB access, missing `udev` rules, `plugdev`/`usrp` group membership) to automatically detect or prevent permission errors without requiring the user to run full GUI IDEs or workflows with `sudo`.
+  - **Security & Sandboxing Boundaries**: Evaluate local directory-sandboxed allowlists vs. isolated execution (e.g. Modal sandboxes or local containers), balancing safety against the need to access host GNU Radio C++ bindings and physically connected SDR hardware.
+
+---
+
 ## 🛠️ Contributing to the Backlog
 When recording new requests or design decisions:
 1. Document the requirement, user context, and target scope.
 2. Outline specific architecture constraints, safety boundaries, and affected modules.
 3. Keep entries concise, actionable, and grounded in the current codebase state.
+
