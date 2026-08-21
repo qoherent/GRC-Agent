@@ -2336,6 +2336,81 @@ def test_model_wait_indicator_lifecycle():
     win.destroy()
 
 
+def test_code_block_height_pin_shows_full_content():
+    """Regression: a code block containing an ASCII diagram (13 lines)
+    rendered in a ~46px porthole — the ListBox allocates a row child its
+    MINIMUM, and the code ScrolledWindow's AUTOMATIC vpolicy made its
+    minimum tiny. The height pin (request = min(Pango-measured content
+    height, 420)) makes min == natural below the cap, so the diagram shows
+    in full with no scrollbars; content taller than the cap gets exactly
+    the 420px viewport. Measured at construction via create_pango_layout
+    over the buffer text — an unrealized TextView's own preferred height is
+    0/1 (no font metrics), but its style font is already resolved."""
+    import gi
+
+    gi.require_version("Gtk", "3.0")
+    from gi.repository import Gtk
+
+    from grc_agent.chat_sidebar import ChatSidebar
+    from grc_agent.ui.code_block import CodeBlock
+
+    diagram = "\n".join(
+        [
+            "vec_mu0 -+   vec_mu1 -+   vec_local -+",
+            "        mul_mu0       mul_mu1      mul_local",
+            "        ^ bpf_mu0     ^ bpf_mu1    ^ sig_local",
+            "      route_a       route_b      route_c",
+            "        +------+-------+             |",
+            "               +----> add_0 <-------+",
+            "                       |",
+            "                   throttle_0",
+            "                       |",
+            "               unified_spectrogram",
+        ]
+    )
+
+    win = Gtk.Window()
+    win.set_default_size(1000, 800)
+    sidebar = ChatSidebar()
+    win.add(sidebar)
+    win.show_all()
+    while Gtk.events_pending():
+        Gtk.main_iteration()
+
+    box = sidebar._start_agent_message()
+    sidebar._render_markdown_to_box(box, "```\n" + diagram + "\n```\n", clear=True)
+    while Gtk.events_pending():
+        Gtk.main_iteration()
+
+    def find_cb(w):
+        if isinstance(w, CodeBlock):
+            return w
+        if isinstance(w, Gtk.Container):
+            for c in w.get_children():
+                r = find_cb(c)
+                if r:
+                    return r
+        return None
+
+    cb = find_cb(box)
+    sw = next(c for c in cb.get_children() if isinstance(c, Gtk.ScrolledWindow))
+    tv = sw.get_child()
+
+    _tvmn, tv_nat = tv.get_preferred_height()
+    sw_mn, sw_nat = sw.get_preferred_height()
+    assert sw_mn == sw_nat  # pin closed the min<natural gap below the cap
+    assert tv.get_allocated_height() >= tv_nat, "diagram clipped"
+    vs = sw.get_vscrollbar()
+    assert not (vs is not None and vs.get_child_visible()), "unneeded vscrollbar"
+
+    # Above the cap: request is exactly 420 and the viewport scrolls.
+    tall = CodeBlock("", "\n".join(f"line {i}" for i in range(80)))
+    tsw = next(c for c in tall.get_children() if isinstance(c, Gtk.ScrolledWindow))
+    assert tsw.get_size_request()[1] == 420
+
+    win.destroy()
+
+
 def test_highlight_cleared_on_history_rebuild():
     """A full message-list rebuild (_render_history) must clear the canvas
     highlight — GTK3 doesn't synthesize leave-notify-event on a destroyed

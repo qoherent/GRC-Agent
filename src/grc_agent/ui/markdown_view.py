@@ -361,6 +361,11 @@ class MarkdownView:
         self._rewrap_idle_id = None
         if not self._shutting_down:
             self._rewrap_prose_textviews(self._listbox)
+            # Re-allocate rows whose content was added after their first
+            # allocation (code blocks, tables — see CodeBlock's height pin):
+            # the ListBox's row-geometry cache doesn't re-run on height-only
+            # size-request changes, and an explicit check_resize does.
+            self._listbox.check_resize()
         return False  # one-shot
 
     def _rewrap_prose_textviews(self, container: Gtk.Widget) -> None:

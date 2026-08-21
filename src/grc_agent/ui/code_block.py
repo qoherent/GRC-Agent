@@ -139,6 +139,30 @@ class CodeBlock(Gtk.Box):
         tv.set_bottom_margin(6)
         self._highlight(tv.get_buffer(), lang, code, style_name)
 
+        # Height pin — same uniform rule as the prose width pin: a row child
+        # whose minimum < natural gets allocated its MINIMUM by the ListBox
+        # (verified live: a 13-line diagram rendered in a 46px porthole),
+        # and an AUTOMATIC-vpolicy ScrolledWindow always has min < natural.
+        # Pinning the request to min(natural, cap) makes min == natural below
+        # the cap (no scrollbar; ASCII diagrams and short snippets show in
+        # full) and exactly the cap above it (the existing 420px viewport +
+        # vscroll).
+        #
+        # Measured at construction via a Pango layout over the buffer text:
+        # an unrealized TextView reports preferred height 0/1 (no font
+        # metrics yet), but its style-context font IS already resolved
+        # (monospace 11 pre- and post-realize) and create_pango_layout
+        # inherits it — layout height + top/bottom margins equals the
+        # realized preferred height exactly (verified: 322+12 == 334).
+        # WrapMode.NONE means the height is width-independent, so this never
+        # fights the horizontal scrollbar.
+        buf = tv.get_buffer()
+        buf_text = buf.get_slice(buf.get_start_iter(), buf.get_end_iter(), True)
+        _lw, content_h = tv.create_pango_layout(buf_text).get_pixel_size()
+        sw.set_size_request(
+            -1, min(content_h + tv.get_top_margin() + tv.get_bottom_margin() + 2, 420)
+        )
+
         sw.add(tv)
         self.pack_start(header, False, False, 0)
         self.pack_start(sw, True, True, 0)
