@@ -1045,9 +1045,13 @@ def test_planner_toggle_is_manual_and_reuses_current_session():
     sidebar._planner_toggle.set_active(True)
     assert sidebar._agent_mode == "planner"
     assert sidebar._agent is planner
+    assert sidebar._planner_mode_label.get_text() == "Planner active"
+    assert sidebar._planner_toggle.get_parent() is sidebar._context_label.get_parent()
+    assert sidebar._compact_btn.get_parent() is sidebar._context_label.get_parent()
     sidebar.send_message.assert_not_called()
 
     sidebar._planner_toggle.set_active(False)
+    assert sidebar._planner_mode_label.get_text() == "GRC-Agent Active"
     sidebar._message_history = [
         ModelRequest(parts=[UserPromptPart(content="Build a receiver")])
     ]
@@ -1077,6 +1081,7 @@ def test_planner_toggle_cannot_switch_while_busy():
 
     assert sidebar._agent_mode == "executor"
     assert sidebar._agent is executor
+    assert sidebar._planner_mode_label.get_text() == "GRC-Agent Active"
 
 
 def test_planner_turn_persists_thinking_in_shared_session_history(tmp_path, monkeypatch):
@@ -1975,7 +1980,7 @@ def test_highlight_cleared_on_partial_rerender():
 
 
 def test_compact_now_button_compacts_history_and_snapshots_first(tmp_path, monkeypatch):
-    """The compact_now toolbar button: runs on the unified loop, snapshots the
+    """The Compact action: runs on the unified loop, snapshots the
     pre-compact history into the step store FIRST (D3 — ConversationSearch
     recall), replaces _message_history with the compacted list, saves +
     re-renders, and returns to the not-busy state. Uses the real
@@ -2088,3 +2093,49 @@ def test_compact_now_refuses_without_an_active_session(tmp_path, monkeypatch):
     assert sidebar._message_history is history, "history must be untouched"
     assert sidebar._busy is False, "must not enter the busy state"
     assert "not saved to a session" in sidebar._status_label.get_text()
+
+
+def test_compact_button_requires_explicit_confirmation(tmp_path, monkeypatch):
+    """The text Compact action defaults to No and starts no work until the
+    user explicitly confirms the summary operation."""
+    from unittest.mock import AsyncMock
+
+    from gi.repository import Gtk
+    from pydantic_ai import Agent
+    from pydantic_ai.messages import ModelRequest, UserPromptPart
+    from pydantic_ai.models.test import TestModel
+
+    from grc_agent.chat_sidebar import ChatSidebar
+    from grc_agent.db import save_session
+
+    monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
+    graph = tmp_path / "compact-confirm.grc"
+    graph.touch()
+    session_id = save_session(None, str(graph), [])
+    assert session_id is not None
+
+    sidebar = ChatSidebar()
+    sidebar._agent = Agent(TestModel(custom_output_text="summary"), output_type=str)
+    sidebar._active_session_id = session_id
+    sidebar._message_history = [ModelRequest(parts=[UserPromptPart(content="Keep me")])]
+    sidebar._run_compact_now = AsyncMock()
+
+    sidebar._on_compact_clicked(sidebar._compact_btn)
+    first_dialog = sidebar._open_dialog
+    assert first_dialog is not None
+    no_button = first_dialog.get_widget_for_response(Gtk.ResponseType.NO)
+    assert no_button is not None and no_button.has_default()
+    assert sidebar._busy is False
+    first_dialog.response(Gtk.ResponseType.NO)
+    sidebar._run_compact_now.assert_not_awaited()
+
+    async def _confirm():
+        sidebar._on_compact_clicked(sidebar._compact_btn)
+        second_dialog = sidebar._open_dialog
+        assert second_dialog is not None
+        second_dialog.response(Gtk.ResponseType.YES)
+        assert sidebar._compact_task is not None
+        await sidebar._compact_task
+
+    asyncio.run(_confirm())
+    sidebar._run_compact_now.assert_awaited_once()

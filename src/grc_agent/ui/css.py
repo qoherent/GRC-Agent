@@ -64,7 +64,7 @@ textview.chat-thinking-textview text {
 
 /* ---- buttons: explicit bounded affordance --------------------------- */
 .chat-toolbar-btn,
-.chat-planner-toggle,
+.chat-compact-btn,
 .chat-quick-prompt-btn,
 .chat-copy-btn,
 .chat-recent-delete-btn {
@@ -72,20 +72,20 @@ textview.chat-thinking-textview text {
     border-radius: 4px;
 }
 .chat-toolbar-btn:hover,
-.chat-planner-toggle:hover,
+.chat-compact-btn:hover,
 .chat-quick-prompt-btn:hover,
 .chat-copy-btn:hover,
 .chat-recent-delete-btn:hover {
     border-color: @STRONG@;
 }
-.chat-planner-toggle {
+.chat-compact-btn {
     font-size: 0.80em;
     min-height: 22px;
     padding: 2px 6px;
 }
-.chat-planner-toggle:checked {
-    border-color: @theme_selected_bg_color;
-    background-color: alpha(@theme_selected_bg_color, 0.18);
+.chat-agent-mode-label {
+    color: alpha(@theme_fg_color, 0.78);
+    font-size: 0.80em;
 }
 
 /* Recent-session list rows */

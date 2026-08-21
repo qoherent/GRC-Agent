@@ -587,21 +587,6 @@ class ChatSidebar(Gtk.Box):
             "Clear conversation history",
             cb=self._on_clear_history_clicked,
         )
-        self._compact_btn = _icon_btn(
-            "view-refresh-symbolic",
-            "Compact conversation history — summarize older messages (keeps recent context)",
-            cb=self._on_compact_clicked,
-        )
-
-        self._planner_toggle = Gtk.ToggleButton(label="Plan")
-        self._planner_toggle.set_tooltip_text(
-            "Switch to the read-only planner. In an existing conversation, "
-            "this immediately asks it to prepare or revise the plan."
-        )
-        self._planner_toggle.get_style_context().add_class("chat-planner-toggle")
-        self._planner_toggle.connect("toggled", self._on_planner_toggled)
-        bar.pack_start(self._planner_toggle, False, False, 0)
-
         # Active graph badge — expands to fill the toolbar's leftover space.
         self._graph_label = Gtk.Label(label="Active Graph: none")
         self._graph_label.set_ellipsize(Pango.EllipsizeMode.END)
@@ -679,15 +664,47 @@ class ChatSidebar(Gtk.Box):
         box.pack_start(self._send_btn, False, False, 0)
         vbox.pack_start(box, False, False, 0)
 
-        # Context usage label right under the text input box
+        # Context and conversation controls share one compact row under the
+        # composer. These are turn/session controls, not global toolbar actions.
+        context_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        context_row.get_style_context().add_class("chat-context-controls")
+
         self._context_label = Gtk.Label()
         self._context_label.set_xalign(0.0)
         self._context_label.set_halign(Gtk.Align.START)
+        self._context_label.set_hexpand(True)
         self._context_label.get_style_context().add_class("chat-context-label")
         self._context_label.set_margin_start(4)
         self._context_label.set_margin_top(2)
         self._context_label.set_margin_bottom(2)
-        vbox.pack_start(self._context_label, False, False, 0)
+        context_row.pack_start(self._context_label, True, True, 0)
+
+        self._planner_mode_label = Gtk.Label(label="GRC-Agent Active")
+        self._planner_mode_label.set_ellipsize(Pango.EllipsizeMode.END)
+        self._planner_mode_label.set_max_width_chars(17)
+        self._planner_mode_label.get_style_context().add_class("chat-agent-mode-label")
+        context_row.pack_start(self._planner_mode_label, False, False, 0)
+
+        self._planner_toggle = Gtk.Switch()
+        self._planner_toggle.set_valign(Gtk.Align.CENTER)
+        self._planner_toggle.set_tooltip_text(
+            "Switch between the GRC agent and the read-only planner. "
+            "Activating it in an existing conversation immediately requests a plan."
+        )
+        self._planner_toggle.get_accessible().set_name("Planner mode")
+        self._planner_toggle.connect("notify::active", self._on_planner_toggled)
+        context_row.pack_start(self._planner_toggle, False, False, 0)
+
+        self._compact_btn = Gtk.Button(label="Compact")
+        self._compact_btn.set_tooltip_text(
+            "Summarize older conversation messages while retaining a full transcript snapshot"
+        )
+        self._compact_btn.get_style_context().add_class("chat-compact-btn")
+        self._compact_btn.connect("clicked", self._on_compact_clicked)
+        self._compact_btn.set_sensitive(False)
+        context_row.pack_start(self._compact_btn, False, False, 0)
+
+        vbox.pack_start(context_row, False, False, 0)
 
         content.pack_start(vbox, False, False, 0)
         self._update_context_label()
@@ -927,11 +944,7 @@ class ChatSidebar(Gtk.Box):
         _log.info("Clear History: dialog shown, awaiting response")
 
     def _on_compact_clicked(self, _btn: Gtk.Button) -> None:
-        """Manual compaction (compact_now button): summarize the older part of
-        the conversation between runs, on the unified event loop — never the
-        GTK thread. The pre-compact history is snapshotted into the step store
-        first so ConversationSearch can still recall what the summary drops
-        (D3), and the send button becomes Stop so the user can cancel."""
+        """Confirm before manual compaction to prevent accidental summaries."""
         if self._busy or self._agent is None or not self._message_history:
             return
         if self._active_session_id is None:
@@ -940,8 +953,41 @@ class ChatSidebar(Gtk.Box):
             # (in-memory) copy of the summarized turns. Refuse.
             self.set_status("Cannot compact — history is not saved to a session yet.", error=True)
             return
-        self._set_busy(True)
-        self._compact_task = asyncio.ensure_future(self._run_compact_now())
+
+        dialog = Gtk.MessageDialog(
+            transient_for=self.get_toplevel()
+            if isinstance(self.get_toplevel(), Gtk.Window)
+            else None,
+            modal=True,
+            destroy_with_parent=True,
+            message_type=Gtk.MessageType.QUESTION,
+            buttons=Gtk.ButtonsType.YES_NO,
+            text="Compact Conversation?",
+        )
+        dialog.format_secondary_text(
+            "Older messages in the active context will be summarized using the current model. "
+            "The complete pre-compaction transcript remains saved for history and dataset collection."
+        )
+        dialog.set_default_response(Gtk.ResponseType.NO)
+        self._open_dialog = dialog
+
+        def _on_response(_dlg: Gtk.Dialog, response: int) -> None:
+            self._open_dialog = None
+            dialog.destroy()
+            if response != Gtk.ResponseType.YES:
+                return
+            if self._busy or self._agent is None or not self._message_history:
+                return
+            if self._active_session_id is None:
+                self.set_status(
+                    "Cannot compact — history is not saved to a session yet.", error=True
+                )
+                return
+            self._set_busy(True)
+            self._compact_task = asyncio.ensure_future(self._run_compact_now())
+
+        dialog.connect("response", _on_response)
+        dialog.show()
 
     async def _run_compact_now(self) -> None:
         try:
@@ -1098,6 +1144,7 @@ class ChatSidebar(Gtk.Box):
         self._executor_agent = executor
         self._planner_agent = planner
         self._agent = planner if self._agent_mode == "planner" else executor
+        self._update_agent_mode_label()
         self._model_build_error = model_error
         # Reflect the *running* agent's provider/model in the toolbar badge.
         # The provider is resolved from the model's base_url (not provider.name
@@ -1151,8 +1198,15 @@ class ChatSidebar(Gtk.Box):
             self._planner_toggle.set_active(False)
         finally:
             self._changing_agent_mode = False
+        self._update_agent_mode_label()
 
-    def _on_planner_toggled(self, button: Gtk.ToggleButton) -> None:
+    def _update_agent_mode_label(self) -> None:
+        if hasattr(self, "_planner_mode_label"):
+            self._planner_mode_label.set_text(
+                "Planner active" if self._agent_mode == "planner" else "GRC-Agent Active"
+            )
+
+    def _on_planner_toggled(self, button: Gtk.Switch, _pspec: Any = None) -> None:
         if self._changing_agent_mode:
             return
         if self._busy:
@@ -1170,6 +1224,7 @@ class ChatSidebar(Gtk.Box):
                 return
             self._agent_mode = "planner"
             self._agent = self._planner_agent
+            self._update_agent_mode_label()
             if self._message_history:
                 self.set_status("Planner active — reviewing this conversation.")
                 self.send_message(
@@ -1182,6 +1237,7 @@ class ChatSidebar(Gtk.Box):
         else:
             self._agent_mode = "executor"
             self._agent = self._executor_agent
+            self._update_agent_mode_label()
             self.set_status("GRC agent active — send a message when you want to execute the plan.")
 
     def set_active_provider(
