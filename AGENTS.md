@@ -171,8 +171,8 @@ uv run pytest tests/ --ignore=tests/test_integration.py --ignore=tests/test_butt
 #   test_block_library.py · test_chat_sidebar.py · test_context_compaction.py ·
 #   test_db_sessions.py · test_native_canvas.py · test_desktop_app.py · test_agent_factory.py ·
 #   test_separate_planner.py
-uv run pytest tests/test_session_traces.py    # fast, no LLM, no display — session/step-store DB
-uv run pytest tests/test_session_traces_advanced.py # fast, no LLM (TestModel); needs a display (xvfb-run) for ChatSidebar integration
+uv run pytest tests/test_session_persistence.py    # fast, no LLM, no display — session/step-store DB
+uv run pytest tests/test_session_persistence_advanced.py # fast, no LLM (TestModel); needs a display (xvfb-run) for ChatSidebar integration
 uv run pytest tests/test_exec_monitor.py      # fast, no LLM, no display
 uv run pytest tests/test_isolation.py         # settings/model isolation, no LLM (one test makes a live Ollama Cloud call if OLLAMA_CLOUD_API_KEY is set)
 uv run pytest tests/test_button_integration.py # tool/button integration, Ollama Cloud
@@ -189,8 +189,8 @@ widget trees and need a display (`xvfb-run`); the graph/layout/db/exec tests do 
 Ollama embeddings/chat for RAG) are not fully hermetic. `test_isolation.py`
 needs no GUI/display server; the sidebar/dialog/canvas clusters (test_chat_sidebar,
 test_native_canvas, test_desktop_app) build real GTK widget trees and need
-one (`xvfb-run`). `test_session_traces.py` is fully hermetic (each test redirects
-`GRC_AGENT_ENV` to a fresh tmp path). `test_session_traces_advanced.py` uses
+one (`xvfb-run`). `test_session_persistence.py` is fully hermetic (each test redirects
+`GRC_AGENT_ENV` to a fresh tmp path). `test_session_persistence_advanced.py` uses
 pydantic-ai's `TestModel` for real-agent-integration tests (no LLM, deterministic),
 plus concurrency stress tests (multi-thread writes, WAL validation), data-integrity
 edge cases (Unicode/emojis/large blobs), schema migration coverage (v1/v2/v3 → v4),

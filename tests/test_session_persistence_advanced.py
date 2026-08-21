@@ -1,6 +1,6 @@
-"""Advanced/sophisticated tests for session handling + the StepPersistence layer.
+"""Advanced tests for session handling and the StepPersistence layer.
 
-These go beyond the basic test_session_traces.py suite:
+These go beyond the basic test_session_persistence.py suite:
 - Real pydantic-ai Agent with TestModel streaming → real run_id/conversation_id/usage
 - Concurrency: N worker threads writing/reading the step store simultaneously
 - Concurrency: multi-thread init_db race

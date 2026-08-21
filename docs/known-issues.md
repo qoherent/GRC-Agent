@@ -8,92 +8,7 @@ Every entry cites a verified observation, not a suspicion.
 
 ---
 
-## 1. The provider badge misreports healthy connections
-
-**Where**: [`ui/providers.py`](../src/grc_agent/ui/providers.py) —
-`resolve_provider_from_base_url()`; consumed by
-[`chat_sidebar.py`](../src/grc_agent/chat_sidebar.py) `set_agent()`.
-
-The badge does not read the configured provider. It reverse-engineers it from
-the model's base URL:
-
-```python
-def resolve_provider_from_base_url(base_url: str) -> str:
-    if "11434" in base_url or "ollama.com" in base_url:
-        return "ollama"
-    if base_url:
-        return "openai_compatible"
-    return ""
-```
-
-`set_agent()` then compares that guess against the configured provider and
-sets `is_default=True` when they differ, which renders as **"Fallback default
-(configured provider unreachable)"**. So any provider whose base URL is
-neither an Ollama port nor OpenAI-compatible is reported as a failed fallback
-while it is working perfectly. It also mislabels a local Ollama reachable on a
-non-11434 port.
-
-**Proposed fix**: resolve the badge from the provider the agent was actually
-built with, rather than inferring it from a URL. `build_agent_from_cfg` already
-knows the answer; pass it through instead of re-deriving it downstream. That
-removes the guess entirely rather than adding another branch to it.
-
-**RESOLVED.** The resolver now maps every concrete provider by host
-(`chatgpt.com` -> codex, `ollama.com` -> ollama_cloud, `openrouter.ai` ->
-openrouter, `api.openai.com` -> openai, `:11434` -> ollama_local, else
-openai_compatible), and `set_agent`'s provider-name remap (chat_sidebar.py)
-re-badges a custom-port local Ollama correctly. The remaining ambiguity — a
-local Ollama served on a non-11434 port resolving to `openai_compatible` —
-is covered by the remap, which compares the resolved provider against the
-configured one and applies the configured label.
-
----
-
-## 2. Dead `openrouter` / `ollama_cloud` code paths
-
-**Where**: [`adapter/rag.py`](../src/grc_agent/adapter/rag.py),
-[`agent_factory.py`](../src/grc_agent/agent_factory.py),
-[`chat_sidebar.py`](../src/grc_agent/chat_sidebar.py) `_confirm_unreachable`.
-
-`bda0f2f` consolidated the backends to two, and `load_settings()` now
-normalizes the old names on read:
-
-```python
-if raw_provider in ("openrouter", "openai_compatible"):
-    provider = "openai_compatible"
-elif raw_provider in ("ollama", "ollama_cloud"):
-    provider = "ollama"
-```
-
-`load_settings()` can therefore never return `"openrouter"` or
-`"ollama_cloud"` — branches testing for exactly those strings were unreachable.
-(`save_settings()` rejects them outright.)
-
-**RESOLVED.** All settings-provider-driven dead branches were deleted (the
-scenario harness in `agent.py` and the normalization in `settings.py` keep
-their explicit backend strings — those describe *test* backends and the
-old-`.env` migration path, which are live). Deleting them surfaced one real
-defect the dead code had been hiding: `_ollama_context_length`'s cloud
-endpoint was keyed on the dead `provider == "ollama_cloud"` string, so since
-the v0.1.5 consolidation a cloud user's context-length lookup silently went
-to `localhost:11434`. It now derives the endpoint from the resolved
-`ollama_base_url` (the same source of truth `_build_model` uses) and attaches
-the API key when that URL is ollama.com. (The lookup lives in
-`agent_factory.resolve_model_context_length` (moved from chat_sidebar in
-`b0370e8`) and now feeds BOTH the context label and the compaction window —
-see `AGENTS.md`.)
-
-Two earlier instances of the same trap, both fixed on branch `26`: the
-EmbeddingGemma task prefix keyed on `provider != "openrouter"` (permanently
-true — prefix applied to every backend), and `resolve_model_context_length`
-keyed on `"openrouter"` alone (every OpenAI-compatible endpoint fell through
-to `None`). The env *keys* (`OPENROUTER_API_KEY`, `OLLAMA_CLOUD_MODEL`, …)
-remain readable as fallbacks so existing `.env` files keep working — that is
-a separate decision from the dead provider branches.
-
----
-
-## 3. Serial embedding calls during ingest
+## 1. Serial embedding calls during ingest
 
 **Where**: [`ingest.py`](../src/grc_agent/ingest.py) — `ingest_catalog` and
 `ingest_docs`.
@@ -111,24 +26,9 @@ largest ingest-latency lever, and it matters most against a local server.
 
 **Proposed fix**: batch the embed calls.
 
-**Silently partial index — FIXED.** Left here because it was found in the
-wild and is worth not reintroducing. A single mid-run embed failure used to
-disable embedding for the rest of the build while *keeping* what had already
-been collected, so the `vec0` table was created over a fraction of the corpus.
-No staleness check could detect it: `_db_meta` records only `embedding_model`
-and `corpus_version`, both of which still matched, and `rag.py` treats a
-vector-index-present DB as healthy — so queries returned `search_mode:
-"vector"` with silently incomplete recall.
-
-Observed live while enabling the llama.cpp backend: **4 vector rows against 718
-docs chunks** (and 288 against 584 catalog blocks), which ranked an AGC page
-top for "what is a stream tag" — worse than the lexical fallback it had
-replaced. `ingest.py` now discards partial embeddings and builds lexical-only,
-so the vector index either covers the whole corpus or does not exist.
-
 ---
 
-## 4. Modal dialogs stall the event loop
+## 2. Modal dialogs stall the event loop
 
 **Where**: [`chat_sidebar.py`](../src/grc_agent/chat_sidebar.py) —
 `_confirm_unreachable` uses `confirm.run()`.
@@ -158,7 +58,7 @@ remaining `.run()` dialog in the sidebar.
 
 ---
 
-## 5. GTK3 nested submenus (File → New) can fail to open on Wayland
+## 3. GTK3 nested submenus (File → New) can fail to open on Wayland
 
 **Where**: upstream GTK3 + GRC's own `Gtk.MenuBar.new_from_model`
 (`gnuradio/grc/gui/Bars.py`) — nothing in this codebase.
@@ -191,7 +91,7 @@ bar.
 
 ---
 
-## 6. ChatGPT (Codex) thinking traces are one-liners by design
+## 4. ChatGPT (Codex) thinking traces are one-liners by design
 
 **Where**: [`providers/openai_codex/model.py`](../src/grc_agent/providers/openai_codex/model.py)
 — `openai_reasoning_summary: "auto"`.
