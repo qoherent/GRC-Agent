@@ -3,15 +3,21 @@
 
 Owns the prose ``TextView`` path (MarkdownIt → BeautifulSoup → ``Gtk.TextBuffer``
 with named tags), inline block-name badges (child anchors), code blocks
-(``CodeBlock`` with Pygments), tables (``TableBlock``), and the prose
-width/rewrap subsystem. ``ChatSidebar`` holds one instance and delegates
+(``CodeBlock`` with Pygments), tables (``TableBlock``), and the column-width
+pin/rewrap subsystem. ``ChatSidebar`` holds one instance and delegates
 ``_render_markdown_to_box`` to it.
 
-The rewrap machinery exists because ``Gtk.TextView`` (unlike ``Gtk.Label``)
-cannot self-measure a word-wrap width, so prose bubbles that hug their content
-would collapse one-word-per-line without an explicit size request, and must be
-re-clamped when the sidebar is resized. That logic lives here, isolated, rather
-than scattered across the sidebar.
+Column-width pinning + horizontal-scroll isolation exist because a bare
+``Gtk.TextView``'s preferred width follows its unwrapped buffer content: a
+long unbroken token (code line, URL, path) grows the chat row's minimum
+width, which propagates through the NEVER-hscrollbar list into the outer
+``Gtk.HPaned`` and shoves the divider aside while tokens stream — and once
+allocated, the TextView's minimum sticks at that allocation. Every chat
+TextView — streamed, thinking, and rendered prose — therefore lives inside
+an AUTOMATIC-hscrollbar ``Gtk.ScrolledWindow`` (which, like ``CodeBlock`` and
+``TableBlock``, never propagates the child's minimum upward) and is pinned to
+the current column width for wrapping, re-pinned on resize. No content
+measurement, no per-widget heuristics.
 """
 
 from __future__ import annotations
@@ -261,15 +267,13 @@ class MarkdownView:
             for child in element.children:
                 self._element_to_buffer(child, buffer, tv, active_tags)
 
-    # -- prose TextView + width sizing -------------------------------------
+    # -- prose TextView building + column sizing --------------------------
     def _make_prose_textview(self) -> Gtk.TextView:
         tv = Gtk.TextView()
         tv.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
         tv.set_editable(False)
         tv.set_cursor_visible(False)
         tv.get_style_context().add_class("chat-agent-label")
-        tv.grc_is_prose = True  # marks it for _rewrap_prose_textviews, distinct
-        # from the unrelated "Thinking" expander's fixed-height textview.
         tv.set_left_margin(0)
         tv.set_right_margin(0)
         tv.set_top_margin(0)
@@ -279,6 +283,26 @@ class MarkdownView:
         tv.add_events(Gdk.EventMask.POINTER_MOTION_MASK)
         tv.connect("motion-notify-event", self._on_prose_motion_notify)
         return tv
+
+    @staticmethod
+    def wrap_hscrollable(tv: Gtk.TextView) -> Gtk.ScrolledWindow:
+        """Isolate ``tv``'s content-driven minimum from the chat column.
+
+        A ScrolledWindow with an AUTOMATIC hscrollbar reports a tiny minimum
+        regardless of its child (same mechanism as CodeBlock/TableBlock), so
+        a long unbroken token can never propagate a minimum into the row →
+        list → HPaned chain and shove the divider; the pin above still sets
+        the wrap width. NEVER vpolicy + propagate_natural_height lets prose
+        grow downward unbounded without a vertical scrollbar.
+        """
+        sw = Gtk.ScrolledWindow()
+        sw.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.NEVER)
+        sw.set_shadow_type(Gtk.ShadowType.NONE)
+        sw.set_propagate_natural_height(True)
+        sw.set_hexpand(True)
+        sw.set_halign(Gtk.Align.FILL)
+        sw.add(tv)
+        return sw
 
     def _make_plain_label(self, text: str) -> Gtk.Label:
         lbl = Gtk.Label(label=text)
@@ -290,27 +314,38 @@ class MarkdownView:
         lbl.get_style_context().add_class("chat-agent-label")
         return lbl
 
-    def _size_prose_textview_to_content(self, tv: Gtk.TextView, plain_text: str) -> None:
-        """Gtk.TextView reports only a minimal preferred width for word-wrapped
-        content — left alone, a content-hugging bubble collapses to that minimal
-        width and wraps one word per line. Measure the text's unwrapped Pango
-        extent, cap it at the available column width, and floor it at the badges'
-        own widths so a badge-heavy bubble still fits its pills."""
-        layout = tv.create_pango_layout(plain_text.strip())
-        _ink, logical = layout.get_pixel_extents()
+    # Horizontal chrome between the ListBox's allocated width and a message
+    # TextView's own content area: the per-row Copy button + spacing, the
+    # chat-agent-msg-box border+padding, and slack — measured ≈102px at the
+    # default theme (Copy button ~76 realized + spacing 4 + msg-box 18 + list
+    # chrome). The constant must OVER-estimate: since each TextView is inside
+    # an AUTOMATIC-hscrollbar ScrolledWindow, an over-estimate only makes the
+    # bubble wrap slightly narrower — while an under-estimate would show a
+    # bubble hscrollbar (and, pre-isolation, re-created the divider-shove
+    # ratchet).
+    _COLUMN_CHROME = 140
+
+    def pin_to_column(self, tv: Gtk.TextView, extra: int = 0) -> None:
+        """Pin ``tv``'s width request to the current chat column width.
+
+        This sets the WRAP width (a bare Gtk.TextView's preferred width is
+        content-driven, so without a request a wide column wraps one word per
+        line and an unallocated one collapses). It deliberately does NOT rely
+        on the request as a layout cap: once allocated, a TextView's minimum
+        sticks at that allocation, so capping minimums is the enclosing
+        AUTOMATIC-hscrollbar ScrolledWindow's job (min ~0, never propagated).
+        ``extra`` widens the subtraction for deeper-nested TextViews (e.g.
+        the Thinking expander's arrow/spacing).
+        """
+        tv.grc_is_pinned = True
+        tv.grc_pin_extra = extra
         allocated = self._listbox.get_allocated_width()
         available = (
             allocated
             if allocated > 160
             else (self._last_listbox_width if self._last_listbox_width > 160 else 320)
         )
-        max_width = max(160, available - 90)
-        width = min(logical.width, max_width)
-        badges = [c for c in tv.get_children() if getattr(c, "grc_is_badge", False)]
-        if badges:
-            min_for_pills = min(sum(c.get_preferred_width()[1] for c in badges), max_width)
-            width = max(width, min_for_pills)
-        tv.set_size_request(width, -1)
+        tv.set_size_request(max(160, available - self._COLUMN_CHROME - extra), -1)
 
     def _on_listbox_size_allocate(self, _listbox: Gtk.ListBox, allocation: Any) -> None:
         width = allocation.width
@@ -329,20 +364,12 @@ class MarkdownView:
         return False  # one-shot
 
     def _rewrap_prose_textviews(self, container: Gtk.Widget) -> None:
-        """Re-clamp every rendered prose bubble to the current width — needed for
+        """Re-pin every pinned TextView to the current column width — needed for
         history loaded before first size-allocate and for dragging the divider.
-
-        Reuses the sizing text stored on the textview (grc_plain_for_size)
-        rather than buffer.get_slice(): the slice carries a \ufffc placeholder
-        per pill badge (~1 char to Pango), which would collapse a badge-heavy
-        bubble on every resize."""
+        One uniform rule: full column width, no content measuring."""
         for child in container.get_children():
-            if getattr(child, "grc_is_prose", False):
-                plain = getattr(child, "grc_plain_for_size", None)
-                if plain is None:
-                    buffer = child.get_buffer()
-                    plain = buffer.get_slice(buffer.get_start_iter(), buffer.get_end_iter(), True)
-                self._size_prose_textview_to_content(child, plain)
+            if getattr(child, "grc_is_pinned", False):
+                self.pin_to_column(child, getattr(child, "grc_pin_extra", 0))
             elif isinstance(child, Gtk.Container):
                 self._rewrap_prose_textviews(child)
 
@@ -359,23 +386,19 @@ class MarkdownView:
 
             current_tv: Gtk.TextView | None = None
             current_buffer: Gtk.TextBuffer | None = None
-            current_plain: list[str] = []
 
             def _flush_prose():
-                nonlocal current_tv, current_buffer, current_plain
+                nonlocal current_tv, current_buffer
                 if current_tv is None or current_buffer is None:
                     return
                 content = current_buffer.get_slice(
                     current_buffer.get_start_iter(), current_buffer.get_end_iter(), True
                 ).strip()
                 if content:
-                    plain_text = "".join(current_plain).strip()
-                    current_tv.grc_plain_for_size = plain_text
-                    self._size_prose_textview_to_content(current_tv, plain_text)
-                    box.pack_start(current_tv, False, False, 0)
+                    self.pin_to_column(current_tv)
+                    box.pack_start(self.wrap_hscrollable(current_tv), False, False, 0)
                 current_tv = None
                 current_buffer = None
-                current_plain = []
 
             for element in soup.contents:
                 if not element.name:
@@ -387,9 +410,7 @@ class MarkdownView:
                             self._ensure_buffer_tags(current_buffer)
                         elif current_buffer.get_char_count() > 0:
                             self._insert_plain_tagged(current_buffer, "\n\n", [])
-                            current_plain.append("\n\n")
                         self._insert_prose_text_with_badges(current_buffer, t, [], current_tv)
-                        current_plain.append(t)
                     continue
 
                 tag = element.name
@@ -418,9 +439,7 @@ class MarkdownView:
                         self._ensure_buffer_tags(current_buffer)
                     elif current_buffer.get_char_count() > 0:
                         self._insert_plain_tagged(current_buffer, "\n\n", [])
-                        current_plain.append("\n\n")
                     self._element_to_buffer(element, current_buffer, current_tv, active_tags=[])
-                    current_plain.append(element.get_text())
 
             _flush_prose()
             box.show_all()

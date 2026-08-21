@@ -1246,7 +1246,6 @@ def test_collapsed_thinking_stream_does_not_force_flush_every_delta():
 
 def test_turn_completion_preserves_selection_in_older_message():
     """Finalizing one stream replaces only its temporary row, never older widgets."""
-    from gi.repository import Gtk
     from pydantic_ai.messages import ModelResponse, TextPart
 
     from grc_agent.chat_sidebar import ChatSidebar, _StreamCtx
@@ -1254,7 +1253,7 @@ def test_turn_completion_preserves_selection_in_older_message():
     sidebar = ChatSidebar()
     old_box = sidebar._start_agent_message()
     sidebar._render_markdown_to_box(old_box, "older selectable text")
-    old_tv = next(child for child in old_box.get_children() if isinstance(child, Gtk.TextView))
+    old_tv = _unwrap_textviews(old_box)[0]
     old_buffer = old_tv.get_buffer()
     old_buffer.select_range(
         old_buffer.get_iter_at_offset(0), old_buffer.get_iter_at_offset(5)
@@ -1266,7 +1265,7 @@ def test_turn_completion_preserves_selection_in_older_message():
         [ModelResponse(parts=[TextPart(content="new response")])],
     )
 
-    assert old_tv.get_parent() is old_box
+    assert old_tv.get_parent().get_parent() is old_box  # tv -> its hscroll sw -> box
     start, end = old_buffer.get_selection_bounds()
     assert old_buffer.get_text(start, end, True) == "older"
 
@@ -1282,7 +1281,7 @@ def test_busy_release_does_not_steal_focus_from_transcript():
     sidebar._flowgraph_proxy = object()
     box = sidebar._start_agent_message()
     sidebar._render_markdown_to_box(box, "keep transcript focus")
-    tv = next(child for child in box.get_children() if isinstance(child, Gtk.TextView))
+    tv = _unwrap_textviews(box)[0]
     window.show_all()
     tv.grab_focus()
     while Gtk.events_pending():
@@ -1862,8 +1861,6 @@ def test_badge_render_prose_textview():
     name becomes a GtkTextChildAnchor-embedded pill badge, not plain text."""
     from unittest.mock import MagicMock
 
-    from gi.repository import Gtk
-
     from grc_agent.chat_sidebar import ChatSidebar
 
     sidebar = ChatSidebar()
@@ -1880,7 +1877,7 @@ def test_badge_render_prose_textview():
     box = sidebar._start_agent_message()
     sidebar._render_markdown_to_box(box, "This refers to test_block_x in text.", clear=True)
 
-    textviews = [c for c in box.get_children() if isinstance(c, Gtk.TextView)]
+    textviews = _unwrap_textviews(box)
     assert len(textviews) == 1
     tv = textviews[0]
 
@@ -1909,8 +1906,6 @@ def test_badge_only_paragraph_not_dropped():
     but a trailing newline and silently drop the whole paragraph)."""
     from unittest.mock import MagicMock
 
-    from gi.repository import Gtk
-
     from grc_agent.chat_sidebar import ChatSidebar
 
     sidebar = ChatSidebar()
@@ -1927,7 +1922,7 @@ def test_badge_only_paragraph_not_dropped():
     box = sidebar._start_agent_message()
     sidebar._render_markdown_to_box(box, "test_block_x", clear=True)
 
-    textviews = [c for c in box.get_children() if isinstance(c, Gtk.TextView)]
+    textviews = _unwrap_textviews(box)
     assert len(textviews) == 1
 
 
@@ -1936,7 +1931,6 @@ def test_contiguous_prose_paragraphs_rendered_without_excess_widgets():
     with natural paragraph breaks rather than fragmenting into a separate widget
     per paragraph (which stacked box spacing on top of line margins and caused
     excessive height allocations)."""
-    from gi.repository import Gtk
 
     from grc_agent.chat_sidebar import ChatSidebar
 
@@ -1952,11 +1946,13 @@ def test_contiguous_prose_paragraphs_rendered_without_excess_widgets():
     sidebar._render_markdown_to_box(box, md_text, clear=True)
 
     children = box.get_children()
-    # Should have: TextView (heading + 2 paragraphs), CodeBlock (pre), TextView (concluding paragraph)
+    # Should have: prose TextView (heading + 2 paragraphs), CodeBlock (pre),
+    # prose TextView (concluding paragraph) — prose TextViews are wrapped in
+    # AUTOMATIC-hscrollbar ScrolledWindows.
     assert len(children) == 3
-    assert isinstance(children[0], Gtk.TextView)
-    assert isinstance(children[2], Gtk.TextView)
-    buf = children[0].get_buffer()
+    textviews = _unwrap_textviews(box)
+    assert len(textviews) == 2
+    buf = textviews[0].get_buffer()
     text = buf.get_slice(buf.get_start_iter(), buf.get_end_iter(), True)
     assert "Overview" in text
     assert "first paragraph" in text
@@ -2021,7 +2017,7 @@ def test_link_click_opens_uri(monkeypatch):
     this is the explicit replacement, not a new feature."""
     from unittest.mock import MagicMock
 
-    from gi.repository import Gdk, Gtk
+    from gi.repository import Gdk
 
     from grc_agent.chat_sidebar import ChatSidebar
 
@@ -2029,7 +2025,7 @@ def test_link_click_opens_uri(monkeypatch):
     box = sidebar._start_agent_message()
     sidebar._render_markdown_to_box(box, "Check [this link](https://example.com) out.", clear=True)
 
-    textviews = [c for c in box.get_children() if isinstance(c, Gtk.TextView)]
+    textviews = _unwrap_textviews(box)
     assert len(textviews) == 1
     buffer = textviews[0].get_buffer()
 
@@ -2065,6 +2061,7 @@ def test_table_renders_block_badges():
     from gi.repository import Gtk
 
     from grc_agent.chat_sidebar import ChatSidebar
+    from grc_agent.ui.table_block import TableBlock
 
     sidebar = ChatSidebar()
     proxy = MagicMock()
@@ -2083,8 +2080,8 @@ def test_table_renders_block_badges():
     table_md = "| Block | Type |\n|---|---|\n| tone1 | Source |\n| mixer | Adder |"
     sidebar._render_markdown_to_box(box, table_md, clear=True)
 
-    tables = [c for c in box.get_children() if isinstance(c, Gtk.ScrolledWindow)]
-    assert len(tables) == 1, "expected exactly one TableBlock (ScrolledWindow)"
+    tables = [c for c in box.get_children() if isinstance(c, TableBlock)]
+    assert len(tables) == 1, "expected exactly one TableBlock"
 
     # Count BlockBadge pills anywhere under the table (tone1 + mixer).
     pills = []
@@ -2145,13 +2142,33 @@ def test_copy_code_block_to_clipboard():
     assert "def hello_world():" in text
 
 
+def _unwrap_textviews(box):
+    """Collect every Gtk.TextView under ``box`` — prose TextViews live inside
+    AUTOMATIC-hscrollbar ScrolledWindows, so descend one container level."""
+    import gi
+
+    gi.require_version("Gtk", "3.0")
+    from gi.repository import Gtk
+
+    views = []
+    for child in box.get_children():
+        if isinstance(child, Gtk.TextView):
+            views.append(child)
+        elif isinstance(child, Gtk.ScrolledWindow):
+            inner = child.get_child()
+            if isinstance(inner, Gtk.TextView):
+                views.append(inner)
+    return views
+
+
 def test_prose_textview_wraps_at_available_width():
     """Gtk.TextView doesn't self-report a usable natural width for
     word-wrapped content (unlike Gtk.Label, which measures via Pango
-    internally) — left alone, the agent message bubble (which hugs its
-    content via hbox.set_halign(START)) collapses to a tiny width and wraps
-    one word per line. The rendered bubble must use most of the available
-    column width instead."""
+    internally) — left unpinned, the agent message bubble collapses to a
+    tiny width and wraps one word per line. The rendered bubble must be
+    pinned to most of the available column width instead (the enclosing
+    AUTOMATIC-hscrollbar ScrolledWindow isolates the column from the
+    TextView's content-driven minimum)."""
     from gi.repository import Gtk
 
     from grc_agent.chat_sidebar import ChatSidebar
@@ -2174,7 +2191,7 @@ def test_prose_textview_wraps_at_available_width():
     while Gtk.events_pending():
         Gtk.main_iteration()
 
-    textviews = [c for c in box.get_children() if isinstance(c, Gtk.TextView)]
+    textviews = _unwrap_textviews(box)
     assert len(textviews) == 1
     width, _height = textviews[0].get_size_request()
     assert width > 400
@@ -2187,7 +2204,7 @@ def test_prose_textview_rewraps_on_listbox_resize():
     (get_allocated_width() reads 0, so the narrow fallback width is used —
     e.g. session history loaded at startup before window.show_all()) must
     widen once the sidebar is actually laid out, via the listbox's
-    size-allocate handler re-clamping every rendered bubble."""
+    size-allocate handler re-pinning every rendered bubble to the column."""
     from gi.repository import Gtk
 
     from grc_agent.chat_sidebar import ChatSidebar
@@ -2200,7 +2217,7 @@ def test_prose_textview_rewraps_on_listbox_resize():
     )
     box = sidebar._start_agent_message()
     sidebar._render_markdown_to_box(box, long_text, clear=True)
-    tv = next(c for c in box.get_children() if isinstance(c, Gtk.TextView))
+    tv = _unwrap_textviews(box)[0]
     narrow_width, _height = tv.get_size_request()
 
     win = Gtk.Window()
@@ -2212,6 +2229,109 @@ def test_prose_textview_rewraps_on_listbox_resize():
 
     wide_width, _height = tv.get_size_request()
     assert wide_width > narrow_width
+
+    win.destroy()
+
+
+def test_streaming_never_shoves_paned_divider():
+    """End-to-end regression for the streaming width bug, at BOTH a wide and a
+    narrow starting geometry (the shove reproduced on the old code only from
+    a narrow sidebar): a bare stream Gtk.TextView's preferred width follows
+    its (unwrapped) buffer content and then sticks at its last allocation, so
+    long unbroken tokens (code lines, URLs) used to grow the chat column's
+    minimum width and shove the outer HPaned's divider aside mid-stream —
+    the sidebar visibly 'ate' the canvas as tokens arrived. With
+    AUTOMATIC-hscrollbar isolation + the column pin, neither the divider nor
+    the chat column may move while tokens stream, and the chat column must
+    stay freely shrinkable afterwards (divider drag)."""
+    from gi.repository import Gtk
+
+    from grc_agent.chat_sidebar import ChatSidebar, _StreamCtx
+
+    for start_pos, narrow in ((500, False), (782, True)):
+        win = Gtk.Window()
+        win.set_default_size(1000, 500)
+        canvas = Gtk.Label(label="canvas")
+        sidebar = ChatSidebar()  # loads the real CSS in its constructor
+        paned = Gtk.HPaned()
+        # Same packing as desktop_app.py: shrink=False lets pack2's minimum
+        # dictate the divider's leftmost reachable position.
+        paned.pack1(canvas, resize=True, shrink=False)
+        paned.pack2(sidebar, resize=True, shrink=False)
+        win.add(paned)
+        paned.set_position(start_pos)
+        win.show_all()
+        while Gtk.events_pending():
+            Gtk.main_iteration()
+        pos_before = paned.get_position()
+        col_before = sidebar._listbox.get_allocated_width()
+        if not narrow:
+            assert col_before > 300  # sane wide starting column
+
+        box = sidebar._start_agent_message()
+        ctx = _StreamCtx(box)
+        tv = sidebar._ensure_text(ctx)
+        pin, _h = tv.get_size_request()
+        assert 160 <= pin <= col_before  # pinned, not (-1, -1), not beyond column
+        buf = tv.get_buffer()
+        for _ in range(20):  # 20 long unbreakable lines stream in
+            buf.insert(buf.get_end_iter(), "x" * 400 + "\n")
+            while Gtk.events_pending():
+                Gtk.main_iteration()
+
+        assert paned.get_position() == pos_before
+        assert sidebar._listbox.get_allocated_width() == col_before
+
+        # Divider drag (user narrows the sidebar): the chat column must
+        # follow — the old allocation-sticky minimum used to block this at
+        # the high-water mark reached while streaming. (Only meaningful from
+        # the wide start; the narrow start already sits at the sidebar's
+        # minimum chrome width.)
+        if not narrow:
+            paned.set_position(850)
+            paned.check_resize()  # set_position alone doesn't trigger reallocation
+            while Gtk.events_pending():
+                Gtk.main_iteration()
+            assert sidebar._listbox.get_allocated_width() < col_before
+
+        win.destroy()
+
+
+def test_model_wait_indicator_lifecycle():
+    """The status bar's elapsed-time label is visible exactly while a model
+    request is in flight: start shows it with an immediate 0s tick and arms a
+    1s GLib source; a tick updates the text in place; stop hides the label and
+    removes the source. Belt-and-braces: the chat-task-done callback also stops
+    it (guards a future path that ends a task without unwinding the loop)."""
+    from gi.repository import GLib, Gtk
+
+    from grc_agent.chat_sidebar import ChatSidebar
+
+    win = Gtk.Window()
+    sidebar = ChatSidebar()
+    win.add(sidebar)
+    win.show_all()
+    while Gtk.events_pending():
+        Gtk.main_iteration()
+
+    assert not sidebar._wait_label.get_visible()
+
+    sidebar._model_wait_start()
+    assert sidebar._wait_label.get_visible()
+    assert sidebar._wait_label.get_text() == "Waiting for model\u2026 0s"
+    assert sidebar._wait_timer_id is not None
+
+    # Simulate the 1s tick twice: text updates in place, source stays armed.
+    sidebar._wait_started -= 63  # pretend 63s elapsed
+    assert sidebar._on_wait_tick() is GLib.SOURCE_CONTINUE
+    assert sidebar._wait_label.get_text() == "Waiting for model\u2026 1m03s"
+
+    sidebar._model_wait_stop()
+    assert not sidebar._wait_label.get_visible()
+    assert sidebar._wait_timer_id is None
+
+    # Task-done belt-and-braces: stop() is idempotent (no GLib warning).
+    sidebar._model_wait_stop()
 
     win.destroy()
 

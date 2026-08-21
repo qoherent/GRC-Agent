@@ -383,7 +383,7 @@ class _ChatTextView(Gtk.ScrolledWindow):
 
     def __init__(self) -> None:
         super().__init__()
-        self.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        self.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
         self.set_shadow_type(Gtk.ShadowType.NONE)
         self.set_min_content_height(64)
         self.set_max_content_height(160)
@@ -560,6 +560,9 @@ class ChatSidebar(Gtk.Box):
         # rule (M5) — saves save/preflight failures visible past the next
         # "Catalog indexed" transition.
         self._status_is_error: bool = False
+        # Model-wait elapsed indicator state (status bar right edge).
+        self._wait_timer_id: int | None = None
+        self._wait_started: float = 0.0
         # Auto-scroll tracking: True by default (follow new content). Cleared
         # by a user-initiated scroll-up (scroll-event signal), re-enabled when
         # the user scrolls back near the bottom or sends a new message. Replaces
@@ -570,8 +573,8 @@ class ChatSidebar(Gtk.Box):
         self._auto_scroll: bool = True
         self._flowgraph_proxy: object | None = None
         # MarkdownView (created in __init__ after the message list exists) owns
-        # the badge-regex cache, the prose width/rewrap state, and the listbox
-        # size-allocate connection.
+        # the badge-regex cache, the column-width pin/rewrap state, and the
+        # listbox size-allocate connection.
         self._md: MarkdownView | None = None
         self._message_history: list[ModelMessage] = []
         self._active_session_id: int | None = None
@@ -903,6 +906,17 @@ class ChatSidebar(Gtk.Box):
         self._status_label.set_ellipsize(Pango.EllipsizeMode.END)
         bar.pack_start(self._status_label, True, True, 0)
 
+        # Elapsed-time indicator shown ONLY while a model request is in
+        # flight (see _model_wait_start). Answers "is it dead or thinking?"
+        # during long server-side queues — verified live: a 4-minute silent
+        # queue on ollama_cloud read as a dead chat.
+        self._wait_label = Gtk.Label(label="")
+        self._wait_label.set_no_show_all(True)
+        self._wait_label.get_style_context().add_class("dim-label")
+        self._wait_label.set_halign(Gtk.Align.END)
+        self._wait_label.set_valign(Gtk.Align.CENTER)
+        bar.pack_end(self._wait_label, False, False, 0)
+
         content.pack_start(bar, False, False, 0)
 
     def set_status(self, msg: str, *, error: bool = False, background: bool = False) -> None:
@@ -922,6 +936,35 @@ class ChatSidebar(Gtk.Box):
             self._status_label.get_style_context().add_class("validation-invalid")
         else:
             self._status_label.get_style_context().remove_class("validation-invalid")
+
+    # -- model-wait elapsed indicator --------------------------------------
+    # One uniform rule: the label is visible exactly while a model request
+    # is awaited in the turn loop (start before `await _stream_request`, stop
+    # in the finally). Tool execution shows its own expanders — no timer
+    # there.
+
+    def _model_wait_start(self) -> None:
+        if self._wait_timer_id is not None:
+            return
+        self._wait_started = time.monotonic()
+        self._update_wait_label()
+        self._wait_label.show()
+        self._wait_timer_id = GLib.timeout_add_seconds(1, self._on_wait_tick)
+
+    def _on_wait_tick(self) -> bool:
+        self._update_wait_label()
+        return GLib.SOURCE_CONTINUE
+
+    def _update_wait_label(self) -> None:
+        secs = max(0, int(time.monotonic() - self._wait_started))
+        text = f"{secs}s" if secs < 60 else f"{secs // 60}m{secs % 60:02d}s"
+        self._wait_label.set_text(f"Waiting for model\u2026 {text}")
+
+    def _model_wait_stop(self) -> None:
+        if self._wait_timer_id is not None:
+            GLib.source_remove(self._wait_timer_id)
+            self._wait_timer_id = None
+        self._wait_label.hide()
 
     def set_active_graph(self, name: str | None, path: str | None = None) -> None:
         self._active_graph_name = name
@@ -1686,6 +1729,7 @@ class ChatSidebar(Gtk.Box):
         (streaming flush, scroll-to-bottom, busy reset) should be skipped to
         avoid GTK warnings/crashes on mid-destroy widgets (L7)."""
         self._shutting_down = True
+        self._model_wait_stop()
         if self._md is not None:
             self._md.set_shutting_down(True)
 
@@ -1908,8 +1952,13 @@ class ChatSidebar(Gtk.Box):
     def _ensure_text(self, ctx: _StreamCtx) -> Gtk.TextView:
         if ctx.text_lbl is None:
             ctx.text_lbl = self._make_stream_textview()
-            ctx.box.pack_start(ctx.text_lbl, False, False, 0)
-            ctx.text_lbl.show_all()
+            # AUTOMATIC-hscrollbar isolation: without it the stream
+            # TextView's content-driven (then allocation-sticky) minimum
+            # propagates row → list → HPaned and shoves the divider aside as
+            # long tokens stream in. Same pattern as CodeBlock/TableBlock.
+            sw = self._md.wrap_hscrollable(ctx.text_lbl) if self._md else ctx.text_lbl
+            ctx.box.pack_start(sw, False, False, 0)
+            sw.show_all()
         return ctx.text_lbl
 
     def _make_stream_textview(self) -> Gtk.TextView:
@@ -1924,6 +1973,12 @@ class ChatSidebar(Gtk.Box):
         tv.set_hexpand(True)
         tv.set_halign(Gtk.Align.FILL)
         tv.get_style_context().add_class("chat-agent-label")
+        # Pin to the chat column: a bare TextView's preferred width follows its
+        # unwrapped buffer content, so long unbroken streamed tokens (code
+        # lines, URLs) used to grow the row minimum and shove the outer
+        # HPaned divider aside mid-stream.
+        if self._md is not None:
+            self._md.pin_to_column(tv)
         tv.get_text = lambda: tv.get_buffer().get_text(  # type: ignore[attr-defined]
             tv.get_buffer().get_start_iter(), tv.get_buffer().get_end_iter(), True
         )
@@ -1935,6 +1990,11 @@ class ChatSidebar(Gtk.Box):
         tv.set_editable(False)
         tv.set_cursor_visible(False)
         tv.get_style_context().add_class("chat-thinking-textview")
+        # Same column pin as the stream/prose TextViews (extra: the expander's
+        # arrow/spacing around this deeper-nested view) — an expanded long
+        # thinking line must not shove the HPaned divider either.
+        if self._md is not None:
+            self._md.pin_to_column(tv, extra=24)
         tv.set_text = lambda t: tv.get_buffer().set_text(t)  # type: ignore[attr-defined]
         tv.get_text = lambda: tv.get_buffer().get_text(  # type: ignore[attr-defined]
             tv.get_buffer().get_start_iter(), tv.get_buffer().get_end_iter(), True
@@ -1959,7 +2019,7 @@ class ChatSidebar(Gtk.Box):
         exp.connect("notify::expanded", _on_expander_toggled)
 
         sw = Gtk.ScrolledWindow()
-        sw.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        sw.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
         sw.set_shadow_type(Gtk.ShadowType.NONE)
         sw.set_min_content_height(120)
         sw.set_max_content_height(500)
@@ -2610,7 +2670,11 @@ class ChatSidebar(Gtk.Box):
                 node = run.next_node
                 while node is not None and not isinstance(node, End):
                     if Agent.is_model_request_node(node):
-                        await self._stream_request(ctx, node, run)
+                        self._model_wait_start()
+                        try:
+                            await self._stream_request(ctx, node, run)
+                        finally:
+                            self._model_wait_stop()
                     elif Agent.is_call_tools_node(node):
                         self._close_text(ctx)
                         self._close_thinking(ctx)
@@ -2724,6 +2788,12 @@ class ChatSidebar(Gtk.Box):
             _log.error("chat task ended with unhandled exception: %s", exc, exc_info=exc)
         if self._busy:
             self._set_busy(False)
+        # Belt-and-braces: the turn loop's finally already stops the timer
+        # (including on cancellation, which unwinds through it); this catches
+        # any future path that ends a task without unwinding the loop. Note
+        # task.cancelled() returns early above — a cancelled task's timer is
+        # stopped by that finally, not here.
+        self._model_wait_stop()
 
     def _set_busy(self, busy: bool) -> None:
         self._busy = busy
