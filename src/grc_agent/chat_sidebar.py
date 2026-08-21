@@ -63,6 +63,7 @@ from .db import (
     delete_session,
     deserialize_messages,
     get_step_store,
+    load_plan_items,
     load_session,
     save_session,
 )
@@ -96,11 +97,9 @@ _log = logging.getLogger(__name__)
 # scrolled up to read earlier messages isn't yanked back down on every token.
 _SCROLL_STICK_THRESHOLD = 80
 
-# Minimum interval between streamed-text UI flushes (seconds). Without this,
-# every token called Gtk.Label.set_text(accumulated_text), re-running Pango's
-# line-wrap layout over the ENTIRE growing message each token = O(n^2) and a
-# frozen UI on long responses. Flushing at ~30fps keeps streaming smooth while
-# the final markdown render (at part/stream close) shows the polished result.
+# Minimum interval between visible-text UI flushes. Stream chunks accumulate
+# append-only and drain into Gtk.TextBuffer in batches; the final markdown
+# render still replaces only this turn's temporary stream row.
 _STREAM_FLUSH_INTERVAL = 0.033
 
 
@@ -151,44 +150,6 @@ def format_tokens(n: int) -> str:
     if n >= 1_000:
         return f"{n / 1_000:.1f}k".replace(".0k", "k")
     return str(n)
-
-
-def _tokens_per_second(output_tokens: int | None, duration_ms: int | None) -> float | None:
-    """Generation rate for the last turn, or None when it cannot be measured.
-
-    `output_tokens` is the turn's VISIBLE output (total minus reasoning) and
-    `duration_ms` is the time the model was actually generating — computed
-    natively from pydantic-ai's ModelRequest/ModelResponse timestamps (see
-    _generation_ms_from_messages), so tool-call time is excluded and the
-    number is the rate the user watched text stream, not tokens per
-    wall-clock turn second.
-
-    Returns None rather than 0 for a turn that produced no tokens or took no
-    measurable time — showing "0 tok/s" would read as a stalled backend.
-    """
-    if not output_tokens or not duration_ms or duration_ms <= 0:
-        return None
-    return output_tokens / (duration_ms / 1000)
-
-
-def _generation_ms_from_messages(new_msgs: list[Any]) -> int:
-    """Sum of (ModelResponse.timestamp - ModelRequest.timestamp) per pair.
-
-    pydantic-ai stamps high-precision local timestamps on ModelRequest
-    (send) and ModelResponse (received) — the delta per (request, response)
-    pair is that request's model processing time (TTFT + generation). Tool
-    execution happens between a response and the next request, so summing
-    the pairs excludes it. `new_msgs` must be THIS run's own messages
-    (`result.new_messages()` — input history and older runs excluded), so
-    no prior-turn leakage. Verified live: a tool-calling turn's pair-sum
-    matched the measured generation time and excluded the tool sleep.
-    """
-    total_ms = 0.0
-    # The pairing is inherently (n, n-1): the last message has no successor.
-    for prev, m in zip(new_msgs, new_msgs[1:], strict=False):
-        if m.__class__.__name__ == "ModelResponse" and prev.__class__.__name__ == "ModelRequest":
-            total_ms += (m.timestamp - prev.timestamp).total_seconds() * 1000
-    return int(total_ms)
 
 
 def _extract_httpx_message(resp) -> str:
@@ -300,6 +261,91 @@ def _clean_message_history_for_new_turn(
     return cleaned
 
 
+def _messages_call_tool(messages: list[ModelMessage], tool_name: str) -> bool:
+    """Whether this run emitted a call to one exact Pydantic AI function tool."""
+    return any(
+        isinstance(part, ToolCallPart) and part.tool_name == tool_name
+        for message in messages
+        for part in getattr(message, "parts", [])
+    )
+
+
+def _without_truncated_thinking_tail(
+    messages: list[ModelMessage],
+) -> tuple[list[ModelMessage], bool]:
+    """Detach a provider-length response that contains reasoning and no output.
+
+    Pydantic AI raises ``UnexpectedModelBehavior`` for this exact structural
+    state. Keeping the 65k-token repetition in active history makes the next
+    request and every re-render pay for unusable output; callers archive the
+    full transcript before accepting this cleaned history.
+    """
+    if not messages:
+        return messages, False
+    last = messages[-1]
+    if (
+        isinstance(last, ModelResponse)
+        and last.finish_reason == "length"
+        and last.parts
+        and all(isinstance(part, ThinkingPart) for part in last.parts)
+    ):
+        return messages[:-1], True
+    return messages, False
+
+
+class _ChunkAccumulator:
+    """Append-only streamed text with O(1) chunk ingestion and delta drains."""
+
+    __slots__ = ("_chunks", "_flushed", "_length", "_joined")
+
+    def __init__(self, text: str = "") -> None:
+        self._chunks = [text] if text else []
+        self._flushed = 0
+        self._length = len(text)
+        self._joined: str | None = text or ""
+
+    def append(self, text: str) -> None:
+        if not text:
+            return
+        self._chunks.append(text)
+        self._length += len(text)
+        self._joined = None
+
+    def reset(self, text: str = "") -> None:
+        self._chunks = [text] if text else []
+        self._flushed = 0
+        self._length = len(text)
+        self._joined = text or ""
+
+    def clear(self) -> None:
+        self.reset()
+
+    def drain_new(self) -> str:
+        if self._flushed >= len(self._chunks):
+            return ""
+        delta = "".join(self._chunks[self._flushed :])
+        self._flushed = len(self._chunks)
+        return delta
+
+    def __iadd__(self, text: str):
+        self.append(text)
+        return self
+
+    def __len__(self) -> int:
+        return self._length
+
+    def __bool__(self) -> bool:
+        return bool(self._length)
+
+    def __str__(self) -> str:
+        if self._joined is None:
+            self._joined = "".join(self._chunks)
+        return self._joined
+
+    def __eq__(self, other: object) -> bool:
+        return str(self) == other if isinstance(other, str) else super().__eq__(other)
+
+
 class _StreamCtx:
     """Per-call mutable streaming state — held outside ``send_message``
     so the node/event handler helpers can stay small and flat."""
@@ -312,7 +358,6 @@ class _StreamCtx:
         "think_body",
         "think_expander",
         "think_acc",
-        "think_flushed",
         "think_dirty",
         "tools",
         "full_raw_text",
@@ -321,20 +366,15 @@ class _StreamCtx:
 
     def __init__(self, box: Gtk.Box) -> None:
         self.box = box
-        self.text_lbl: Gtk.Label | None = None
-        self.text_acc = ""
+        self.text_lbl: Gtk.TextView | None = None
+        self.text_acc = _ChunkAccumulator()
         self.text_dirty = False
         self.think_body: Any = None
         self.think_expander: Gtk.Expander | None = None
-        self.think_acc = ""
-        # Chars of think_acc already appended to the buffer. Flushing appends
-        # only the delta beyond this (never replaces the buffer), so the
-        # thinking ScrolledWindow keeps the user's scroll position while
-        # streaming — a full buffer replacement would snap it back to the top.
-        self.think_flushed = 0
+        self.think_acc = _ChunkAccumulator()
         self.think_dirty = False
         self.tools: dict[str, Gtk.Expander] = {}
-        self.full_raw_text = ""
+        self.full_raw_text = _ChunkAccumulator()
         self.last_flush = 0.0
 
 
@@ -544,6 +584,9 @@ class ChatSidebar(Gtk.Box):
         self._clear_generation: int = 0
         self._chat_task: asyncio.Task | None = None
         self._compact_task: asyncio.Task | None = None
+        self._implement_plan_task: asyncio.Task | None = None
+        self._implement_plan_row: Gtk.ListBoxRow | None = None
+        self._implement_plan_button: Gtk.Button | None = None
         # Set by shutting_down() (called from desktop_app.py's _shutdown)
         # just before stop_chat(). _run_agent_turn's finally block checks
         # this to skip widget operations on widgets that are mid-destroy
@@ -813,10 +856,6 @@ class ChatSidebar(Gtk.Box):
                 text = (
                     f"<span size='small'>Context: {format_tokens(last_input_tokens)} tokens</span>"
                 )
-
-        rate = getattr(self, "_last_turn_rate", None)
-        if rate:
-            text = text.replace("</span>", f" \u00b7 {rate:.0f} tok/s</span>")
 
         if has_usage:
             cost_text = (
@@ -1295,6 +1334,7 @@ class ChatSidebar(Gtk.Box):
             self._agent = self._planner_agent
             self._update_agent_mode_label()
             if self._message_history:
+                self._remove_implement_plan_action()
                 self.set_status("Planner active — reviewing this conversation.")
                 self.send_message(
                     "Create or revise a complete plan for the current request. "
@@ -1395,6 +1435,10 @@ class ChatSidebar(Gtk.Box):
         self._clear_generation += 1
         if self._chat_task and not self._chat_task.done():
             self._chat_task.cancel()
+        if self._implement_plan_task and not self._implement_plan_task.done():
+            self._implement_plan_task.cancel()
+        self._implement_plan_task = None
+        self._remove_implement_plan_action()
         self._message_history = []
         self._active_session_id = None
         self._select_executor()
@@ -1411,6 +1455,8 @@ class ChatSidebar(Gtk.Box):
         return True  # re-arm
 
     def _render_history(self) -> None:  # noqa: C901
+        self._implement_plan_row = None
+        self._implement_plan_button = None
         for child in self._listbox.get_children():
             self._listbox.remove(child)
 
@@ -1448,6 +1494,28 @@ class ChatSidebar(Gtk.Box):
         self._scroll_to_bottom(force=True)
         self._update_context_label()
 
+    def _replace_streaming_turn(
+        self, ctx: _StreamCtx, new_messages: list[ModelMessage]
+    ) -> None:
+        """Replace only this turn's temporary stream row with rich widgets.
+
+        Rebuilding the whole ListBox destroyed selections and focus in every
+        earlier message at the end of each turn. Older rows are immutable and
+        stay in place; only the one transient aggregate stream bubble is
+        replaced by this run's final per-response rendering.
+        """
+        parent = ctx.box.get_parent()
+        row = parent.get_parent() if parent is not None else None
+        if not isinstance(row, Gtk.ListBoxRow) or row.get_parent() is not self._listbox:
+            self._render_history()
+            return
+        self._listbox.remove(row)
+        for message in new_messages:
+            if isinstance(message, ModelResponse):
+                box = self._start_agent_message()
+                self._render_last_message_rich(box, message)
+        self._update_context_label()
+
     def _render_welcome_screen(self) -> None:
         """Delegates to WelcomeView (welcome card + recent sessions)."""
         self._welcome.render(self.current_page, self._active_session_id)
@@ -1455,6 +1523,7 @@ class ChatSidebar(Gtk.Box):
     def _send_quick_prompt(self, text: str) -> None:
         if self._busy or self.current_page is None:
             return
+        self._remove_implement_plan_action()
         self.grab_entry_focus()
         self.send_message(text)
 
@@ -1562,11 +1631,55 @@ class ChatSidebar(Gtk.Box):
             except Exception:
                 _log.exception("Failed to remove session resurrected by in-flight save")
 
+    async def _archive_truncated_thinking(
+        self,
+        messages: list[ModelMessage],
+        session_id: int | None,
+        agent_mode: str,
+    ) -> bool:
+        """Preserve failed reasoning in StepPersistence before active-history cleanup."""
+        if session_id is None:
+            return False
+        try:
+            from pydantic_ai_harness.step_persistence import (
+                ContinuableSnapshot,
+                RunRecord,
+            )
+
+            store = get_step_store()
+            conversation_id = conversation_id_for_session(session_id)
+            agent_name = f"grc_{agent_mode}"
+            run_id = f"{agent_name}-truncated-{uuid4().hex[:8]}"
+            await store.register_run(
+                RunRecord(
+                    run_id=run_id,
+                    conversation_id=conversation_id,
+                    agent_name=agent_name,
+                    metadata={"kind": "truncated_thinking_transcript"},
+                )
+            )
+            await store.save_snapshot(
+                ContinuableSnapshot(
+                    run_id=run_id,
+                    step_index=0,
+                    messages=messages,
+                    conversation_id=conversation_id,
+                    agent_name=agent_name,
+                )
+            )
+            return True
+        except Exception:
+            _log.exception("Failed to archive truncated thinking transcript")
+            return False
+
     def stop_chat(self) -> None:
         if self._chat_task and not self._chat_task.done():
             self._chat_task.cancel()
         if self._compact_task and not self._compact_task.done():
             self._compact_task.cancel()
+        if self._implement_plan_task and not self._implement_plan_task.done():
+            self._implement_plan_task.cancel()
+            self._implement_plan_task = None
 
     def shutting_down(self) -> None:
         """Signal that the app is shutting down — any in-flight widget cleanup
@@ -1615,7 +1728,7 @@ class ChatSidebar(Gtk.Box):
         if isinstance(part, TextPart):
             self._close_thinking(ctx)
             self._close_text(ctx)
-            ctx.text_acc = part.content or ""
+            ctx.text_acc.reset(part.content or "")
             ctx.full_raw_text += part.content or ""
             self._ensure_text(ctx)
             ctx.text_dirty = True
@@ -1676,10 +1789,9 @@ class ChatSidebar(Gtk.Box):
         elif isinstance(part, ThinkingPart):
             self._close_text(ctx)
             self._ensure_thinking(ctx)
-            ctx.think_acc = part.content or ""
-            # A new part replaces the previous one's content: reset the delta
-            # watermark and clear the buffer so only this part is shown.
-            ctx.think_flushed = 0
+            ctx.think_acc.reset(part.content or "")
+            # A new part replaces the previous one's content: clear the buffer
+            # so only this part is shown.
             ctx.think_body.get_buffer().set_text("")
             ctx.full_raw_text += part.content or ""
             ctx.think_dirty = True
@@ -1710,18 +1822,29 @@ class ChatSidebar(Gtk.Box):
             ctx.think_dirty = True
             self._flush_streaming(ctx)
 
-    def _flush_streaming(self, ctx: _StreamCtx, *, force: bool = False) -> None:
-        """Push accumulated streamed text/thinking to their labels at an adaptive
-        interval. Each ``Gtk.Label.set_text`` re-runs Pango's line-wrap layout over
-        the full (growing) text, so calling it per token is O(n^2). Adaptive
-        throttling scales the flush interval with text length to prevent Pango layout
-        computation from starving the single-threaded event loop on high-velocity
-        token streams. A forced flush (part start/close, stream end) bypasses the
-        interval so transitions never show stale text."""
+    def _flush_streaming(self, ctx: _StreamCtx, *, force: bool = False) -> None:  # noqa: C901
+        """Drain append-only stream chunks into GTK text buffers at a bounded rate.
+
+        Collapsed reasoning stays out of GTK layout until part close; expanded
+        reasoning updates at 4 Hz. A forced close flush preserves every byte.
+        """
         now = time.monotonic()
         if not force:
+            # Reasoning is secondary and collapsed by default. Do not spend
+            # the GTK thread laying out hidden streamed text; if the user
+            # expands it, update at 4 Hz. The full lossless buffer is flushed
+            # once when the part closes.
+            thinking_only = ctx.think_dirty and not ctx.text_dirty
+            if (
+                thinking_only
+                and ctx.think_expander is not None
+                and not ctx.think_expander.get_expanded()
+            ):
+                return
             text_len = len(ctx.text_acc) + len(ctx.think_acc)
-            if text_len > 5000:
+            if thinking_only:
+                interval = 0.25
+            elif text_len > 5000:
                 interval = 0.066
             elif text_len > 2000:
                 interval = 0.050
@@ -1732,7 +1855,7 @@ class ChatSidebar(Gtk.Box):
 
         flushed = False
         if ctx.text_dirty and ctx.text_lbl is not None:
-            ctx.text_lbl.set_text(ctx.text_acc)
+            self._flush_text(ctx)
             ctx.text_dirty = False
             flushed = True
         if ctx.think_dirty and ctx.think_body is not None:
@@ -1750,34 +1873,61 @@ class ChatSidebar(Gtk.Box):
         whole buffer would reset the thinking ScrolledWindow to its initial
         scroll position, yanking a user who scrolled to read."""
         buffer = ctx.think_body.get_buffer()
-        delta = ctx.think_acc[ctx.think_flushed :]
+        delta = ctx.think_acc.drain_new()
         if delta:
             buffer.insert(buffer.get_end_iter(), delta)
-        ctx.think_flushed = len(ctx.think_acc)
         ctx.think_dirty = False
 
+    def _flush_text(self, ctx: _StreamCtx) -> None:
+        """Append only new visible text; markdown is rendered after the part closes."""
+        buffer = ctx.text_lbl.get_buffer()
+        delta = ctx.text_acc.drain_new()
+        if delta:
+            buffer.insert(buffer.get_end_iter(), delta)
+        ctx.text_dirty = False
+
     def _close_text(self, ctx: _StreamCtx) -> None:
+        if ctx.text_lbl is None:
+            return
         self._flush_streaming(ctx, force=True)
         ctx.text_lbl = None
-        ctx.text_acc = ""
+        ctx.text_acc.clear()
         ctx.text_dirty = False
 
     def _close_thinking(self, ctx: _StreamCtx) -> None:
+        if ctx.think_body is None:
+            return
         self._flush_streaming(ctx, force=True)
         if ctx.think_expander is not None:
             ctx.think_expander.set_label("Thought")
         ctx.think_body = None
         ctx.think_expander = None
-        ctx.think_acc = ""
-        ctx.think_flushed = 0
+        ctx.think_acc.clear()
         ctx.think_dirty = False
 
-    def _ensure_text(self, ctx: _StreamCtx) -> Gtk.Label:
+    def _ensure_text(self, ctx: _StreamCtx) -> Gtk.TextView:
         if ctx.text_lbl is None:
-            ctx.text_lbl = self._make_text_label()
+            ctx.text_lbl = self._make_stream_textview()
             ctx.box.pack_start(ctx.text_lbl, False, False, 0)
             ctx.text_lbl.show_all()
         return ctx.text_lbl
+
+    def _make_stream_textview(self) -> Gtk.TextView:
+        tv = Gtk.TextView()
+        tv.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
+        tv.set_editable(False)
+        tv.set_cursor_visible(False)
+        tv.set_left_margin(0)
+        tv.set_right_margin(0)
+        tv.set_top_margin(0)
+        tv.set_bottom_margin(0)
+        tv.set_hexpand(True)
+        tv.set_halign(Gtk.Align.FILL)
+        tv.get_style_context().add_class("chat-agent-label")
+        tv.get_text = lambda: tv.get_buffer().get_text(  # type: ignore[attr-defined]
+            tv.get_buffer().get_start_iter(), tv.get_buffer().get_end_iter(), True
+        )
+        return tv
 
     def _make_thinking_textview(self, text: str = "") -> Gtk.TextView:
         tv = Gtk.TextView()
@@ -1851,20 +2001,20 @@ class ChatSidebar(Gtk.Box):
         clipboard.set_text(text, -1)
         self.set_status("Copied message to clipboard.")
         if btn is not None:
-            btn.set_image(Gtk.Image.new_from_icon_name("emblem-ok-symbolic", Gtk.IconSize.MENU))
-            btn.set_tooltip_text("Copied!")
+            btn.set_label("Copied")
+            btn.set_tooltip_text("Copied")
 
             def _revert() -> bool:
-                btn.set_image(Gtk.Image.new_from_icon_name("edit-copy-symbolic", Gtk.IconSize.MENU))
+                btn.set_label("Copy")
                 btn.set_tooltip_text("Copy message")
                 return False
 
             GLib.timeout_add(1500, _revert)
 
-    def _update_copy_text(self, box: Gtk.Box, text: str) -> None:
+    def _update_copy_text(self, box: Gtk.Box, text: Any) -> None:
         parent = box.get_parent()
         if parent and hasattr(parent, "_grc_copy_btn"):
-            parent._grc_copy_btn._grc_copy_text = text
+            parent._grc_copy_btn._grc_copy_text = str(text)
 
     def _append_user_message(self, text: str) -> None:
         lbl = Gtk.Label(label=text)
@@ -1879,13 +2029,12 @@ class ChatSidebar(Gtk.Box):
         hbox.set_halign(Gtk.Align.END)
         hbox.get_style_context().add_class("chat-user-msg-box")
 
-        copy_btn = Gtk.Button()
-        copy_btn.set_relief(Gtk.ReliefStyle.NONE)
+        copy_btn = Gtk.Button(label="Copy")
         copy_btn.set_focus_on_click(False)
         copy_btn.set_valign(Gtk.Align.START)
-        img = Gtk.Image.new_from_icon_name("edit-copy-symbolic", Gtk.IconSize.MENU)
-        copy_btn.set_image(img)
         copy_btn.set_tooltip_text("Copy message")
+        copy_btn.get_accessible().set_name("Copy message")
+        copy_btn.get_style_context().add_class("chat-copy-btn")
         copy_btn.connect("clicked", lambda b: self._copy_to_clipboard(text, b))
 
         hbox.pack_start(copy_btn, False, False, 0)
@@ -1902,13 +2051,12 @@ class ChatSidebar(Gtk.Box):
         hbox.set_halign(Gtk.Align.FILL)
         hbox.pack_start(box, True, True, 0)
 
-        copy_btn = Gtk.Button()
-        copy_btn.set_relief(Gtk.ReliefStyle.NONE)
+        copy_btn = Gtk.Button(label="Copy")
         copy_btn.set_focus_on_click(False)
         copy_btn.set_valign(Gtk.Align.START)
-        img = Gtk.Image.new_from_icon_name("edit-copy-symbolic", Gtk.IconSize.MENU)
-        copy_btn.set_image(img)
         copy_btn.set_tooltip_text("Copy message")
+        copy_btn.get_accessible().set_name("Copy message")
+        copy_btn.get_style_context().add_class("chat-copy-btn")
 
         copy_btn._grc_copy_text = ""
         copy_btn.connect(
@@ -2059,7 +2207,95 @@ class ChatSidebar(Gtk.Box):
             for child in self._listbox.get_children():
                 self._listbox.remove(child)
 
-    def _add_message_row(self, child: Gtk.Widget) -> None:
+    def _remove_implement_plan_action(self) -> None:
+        row = self._implement_plan_row
+        if row is not None and row.get_parent() is self._listbox:
+            self._listbox.remove(row)
+        self._implement_plan_row = None
+        self._implement_plan_button = None
+
+    def _append_implement_plan_action(self, session_id: int) -> None:
+        """Render the user-controlled planner → executor handoff in chat."""
+        self._remove_implement_plan_action()
+
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        box.set_hexpand(True)
+        box.get_style_context().add_class("chat-plan-action-box")
+
+        label = Gtk.Label(label="Plan ready for the GRC agent.")
+        label.set_xalign(0.0)
+        label.set_halign(Gtk.Align.FILL)
+        box.pack_start(label, False, False, 0)
+
+        button = Gtk.Button(label="Implement the Plan")
+        button.set_hexpand(True)
+        button.set_halign(Gtk.Align.FILL)
+        button.set_tooltip_text(
+            "Switch to GRC-Agent and begin implementing the durable plan"
+        )
+        button.get_accessible().set_name("Implement the Plan")
+        button.get_style_context().add_class("chat-implement-plan-btn")
+        button.set_sensitive(not self._busy)
+        button.connect(
+            "clicked",
+            lambda clicked: self._on_implement_plan_clicked(clicked, session_id),
+        )
+        box.pack_start(button, False, False, 0)
+
+        self._implement_plan_button = button
+        self._implement_plan_row = self._add_message_row(box)
+
+    async def _show_implement_plan_if_ready(self, session_id: int) -> None:
+        """Show the handoff only when the planner left a durable plan."""
+        try:
+            items = await load_plan_items(session_id)
+        except Exception:
+            _log.exception("Failed to read durable plan for implementation action")
+            self.set_status("Plan saved, but its implementation action could not be loaded.", error=True)
+            return
+        if (
+            items
+            and self._active_session_id == session_id
+            and self._agent_mode == "planner"
+        ):
+            self._append_implement_plan_action(session_id)
+
+    def _on_implement_plan_clicked(self, button: Gtk.Button, session_id: int) -> None:
+        if self._busy or self._implement_plan_task is not None:
+            return
+        button.set_sensitive(False)
+        self._implement_plan_task = asyncio.ensure_future(
+            self._implement_durable_plan(session_id)
+        )
+
+    async def _implement_durable_plan(self, session_id: int) -> None:
+        try:
+            if self._active_session_id != session_id:
+                self.set_status("The plan belongs to a different chat session.", error=True)
+                return
+            items = await load_plan_items(session_id)
+            if not items:
+                self._remove_implement_plan_action()
+                self.set_status("The durable plan is empty. Ask Planner to create it again.", error=True)
+                return
+
+            self._select_executor()
+            self._remove_implement_plan_action()
+            sent = self.send_message(
+                "Implement the approved plan now. Re-inspect the live graph before editing, "
+                "follow the durable plan, and report the completed changes."
+            )
+            if not sent and self._implement_plan_button is not None:
+                self._implement_plan_button.set_sensitive(True)
+        except Exception:
+            _log.exception("Failed to start durable plan implementation")
+            if self._implement_plan_button is not None:
+                self._implement_plan_button.set_sensitive(True)
+            self.set_status("Could not start plan implementation. Try again.", error=True)
+        finally:
+            self._implement_plan_task = None
+
+    def _add_message_row(self, child: Gtk.Widget) -> Gtk.ListBoxRow:
         self._clear_welcome_screen()
         row = Gtk.ListBoxRow()
         row.set_activatable(False)
@@ -2074,6 +2310,7 @@ class ChatSidebar(Gtk.Box):
         # The _auto_scroll flag handles the "user scrolled up to read" case
         # during streaming — but for a new row, we always want to show it.
         self._scroll_to_bottom(force=True)
+        return row
 
     def _make_final_summary_widget(self, actions: list[str], explanation: str) -> Gtk.Box:
         """Render the model's final structured output (GrcAgentResponse) as a
@@ -2240,6 +2477,7 @@ class ChatSidebar(Gtk.Box):
         if not text.strip() or self._busy:
             return
         self._entry.set_text("")
+        self._remove_implement_plan_action()
         self.send_message(text)
 
     def send_message(self, text: str) -> bool:
@@ -2291,6 +2529,8 @@ class ChatSidebar(Gtk.Box):
         rich_rendered = False
         origin_page = self.current_page
         origin_gen = self._clear_generation
+        origin_agent_mode = self._agent_mode
+        origin_session_id = self._active_session_id
         ctx: _StreamCtx | None = None
         active_run: Any = None
         try:
@@ -2338,6 +2578,15 @@ class ChatSidebar(Gtk.Box):
                 return
 
             ctx = _StreamCtx(self._start_agent_message())
+            cleaned_history, had_truncated_thinking = _without_truncated_thinking_tail(
+                self._message_history
+            )
+            if had_truncated_thinking and await self._archive_truncated_thinking(
+                self._message_history,
+                origin_session_id,
+                origin_agent_mode,
+            ):
+                self._message_history = cleaned_history
             self._message_history = _clean_message_history_for_new_turn(self._message_history)
             async with self._agent.iter(
                 text,
@@ -2371,17 +2620,32 @@ class ChatSidebar(Gtk.Box):
                     self._update_context_label()
 
             if run.result is not None:
+                planner_wrote_plan = origin_agent_mode == "planner" and _messages_call_tool(
+                    run.result.new_messages(), "write_plan"
+                )
                 self._message_history = run.result.all_messages()
                 await self._save_history()
-                self._render_history()
+                self._replace_streaming_turn(ctx, run.result.new_messages())
+                if planner_wrote_plan and origin_session_id is not None:
+                    await self._show_implement_plan_if_ready(origin_session_id)
                 rich_rendered = True
         except asyncio.CancelledError:
             if self.current_page is origin_page and self._clear_generation == origin_gen:
                 if active_run is not None:
                     try:
-                        self._message_history = _clean_message_history_for_new_turn(
+                        failed_messages = _clean_message_history_for_new_turn(
                             active_run.all_messages()
                         )
+                        cleaned_messages, had_truncated_thinking = (
+                            _without_truncated_thinking_tail(failed_messages)
+                        )
+                        if had_truncated_thinking and await self._archive_truncated_thinking(
+                            failed_messages,
+                            origin_session_id,
+                            origin_agent_mode,
+                        ):
+                            failed_messages = cleaned_messages
+                        self._message_history = failed_messages
                     except Exception:
                         self._remember_user_message(text)
                 else:
@@ -2392,36 +2656,39 @@ class ChatSidebar(Gtk.Box):
             raise
         except Exception as e:
             _log.exception("agent run failed")
+            truncated_thinking_archived = False
             if self.current_page is origin_page:
                 if active_run is not None:
                     try:
-                        self._message_history = _clean_message_history_for_new_turn(
+                        failed_messages = _clean_message_history_for_new_turn(
                             active_run.all_messages()
                         )
+                        cleaned_messages, had_truncated_thinking = (
+                            _without_truncated_thinking_tail(failed_messages)
+                        )
+                        if had_truncated_thinking and await self._archive_truncated_thinking(
+                            failed_messages,
+                            origin_session_id,
+                            origin_agent_mode,
+                        ):
+                            failed_messages = cleaned_messages
+                            truncated_thinking_archived = True
+                        self._message_history = failed_messages
                     except Exception:
                         self._remember_user_message(text)
                 else:
                     self._remember_user_message(text)
                 await self._save_history()
-                self._append_error(_format_turn_error(e))
+                if truncated_thinking_archived:
+                    self._append_error(
+                        "Model reasoning repeated until the provider output limit. "
+                        "The full failed trace was archived, and the unusable repetition was removed "
+                        "from active context. Send Continue to resume from the completed tool steps."
+                    )
+                else:
+                    self._append_error(_format_turn_error(e))
                 rich_rendered = True
         finally:
-            # Generation rate for the status line. Visible output tokens
-            # (turn total minus hidden reasoning) over the time the model was
-            # actually generating, computed natively from pydantic-ai's own
-            # ModelRequest/ModelResponse timestamps (tool-call time excluded).
-            if active_run is not None and getattr(active_run, "result", None) is not None:
-                try:
-                    usage = getattr(active_run, "usage", None)
-                    output_tokens = getattr(usage, "output_tokens", 0) or 0 if usage else 0
-                    details = (getattr(usage, "details", None) or {}) if usage else {}
-                    reasoning = details.get("reasoning_tokens", 0) or 0
-                    self._last_turn_rate = _tokens_per_second(
-                        max(0, output_tokens - reasoning),
-                        _generation_ms_from_messages(active_run.result.new_messages()),
-                    )
-                except Exception:
-                    _log.exception("Failed to compute generation rate")
             self._active_run = None
             self._update_context_label()
             # Paint any throttled-but-unflushed tail before deciding whether to
@@ -2441,7 +2708,7 @@ class ChatSidebar(Gtk.Box):
                 and ctx.full_raw_text
                 and self.current_page is origin_page
             ):
-                self._render_markdown_to_box(ctx.box, ctx.full_raw_text)
+                self._render_markdown_to_box(ctx.box, str(ctx.full_raw_text))
             self._set_busy(False)
             self._scroll_to_bottom()
 
@@ -2466,6 +2733,8 @@ class ChatSidebar(Gtk.Box):
         self._clear_hist_btn.set_sensitive(not busy)
         self._compact_btn.set_sensitive(not busy and bool(self._message_history))
         self._planner_toggle.set_sensitive(not busy)
+        if self._implement_plan_button is not None:
+            self._implement_plan_button.set_sensitive(not busy)
         if busy:
             self._send_btn.set_image(
                 Gtk.Image.new_from_icon_name(
@@ -2485,7 +2754,10 @@ class ChatSidebar(Gtk.Box):
             self._entry.set_sensitive(can_type)
             self._update_send_sensitivity()
             if can_type:
-                self._entry.grab_focus()
+                toplevel = self.get_toplevel()
+                focus = toplevel.get_focus() if isinstance(toplevel, Gtk.Window) else None
+                if focus in (None, self._entry.tv, self._send_btn):
+                    self._entry.grab_focus()
 
     def _on_user_scroll(self, _sw: Gtk.ScrolledWindow, event: Gdk.EventScroll) -> bool:
         """Track user scroll intent. If the user scrolls UP, stop auto-scrolling

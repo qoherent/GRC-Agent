@@ -1750,17 +1750,6 @@ def test_thinking_delta_without_content_does_not_crash_the_turn():
     assert ctx.think_acc == "so far", "a content-free delta must leave the buffer alone"
 
 
-def test_token_rate_is_omitted_rather_than_shown_as_zero():
-    from grc_agent.chat_sidebar import _tokens_per_second
-
-    assert _tokens_per_second(160, 4000) == 40.0
-    # A turn with no output, or no measurable duration, has no rate — showing
-    # "0 tok/s" would read as a stalled backend.
-    assert _tokens_per_second(0, 4000) is None
-    assert _tokens_per_second(160, 0) is None
-    assert _tokens_per_second(None, None) is None
-
-
 def test_is_musl_false_positive_on_glibc_host_with_musl_loader():
     """Regression: the Debian/Ubuntu `musl` package (a rust
     cross-compilation dependency) installs /lib/ld-musl-x86_64.so.1 alongside

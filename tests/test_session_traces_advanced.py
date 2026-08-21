@@ -569,15 +569,6 @@ def test_chatsidebar_run_agent_turn_records_step_rows(tmp_path):
         for p in getattr(m, "parts", [])
     )
 
-    # The tok/s status-line rate must be computed from the same numbers the
-    # run reports (visible output over native generation time) — TestModel
-    # generates in <1ms so the rate is typically None; the consistency
-    # contract is what's asserted.
-
-    rate = getattr(sidebar, "_last_turn_rate", None)
-    assert rate is None or rate > 0
-
-
 def test_manual_compaction_preserves_full_history_and_reasoning_in_same_db(
     tmp_path, monkeypatch
 ):

@@ -106,8 +106,11 @@ async def _execution_plan_reminder(ctx: RunContext[Any]) -> str | None:
         return None
     return (
         "<execution-plan>\n"
-        "The user prepared this plan in Planner mode. Treat it as read-only: follow it, "
-        "re-inspect live state before edits, and ask before materially changing its scope.\n\n"
+        "The user prepared this plan in Planner mode. Treat it as read-only. Execute it only "
+        "when the current user request explicitly asks for implementation; otherwise use it as "
+        "reference. Before edits, re-inspect live state and ask before materially changing scope.\n\n"
+        "Never enumerate or reconstruct a block schema from memory. Call inspect_graph or "
+        "query_knowledge for the exact schema, then act only on the returned fields.\n\n"
         f"{render_plan(items)}\n"
         "</execution-plan>"
     )

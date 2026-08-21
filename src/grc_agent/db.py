@@ -7,6 +7,7 @@ from typing import Any
 
 from pydantic_ai import ModelMessagesTypeAdapter
 from pydantic_ai.messages import ModelMessage
+from pydantic_ai_harness.planning import PlanItem, SqlitePlanStore
 from pydantic_ai_harness.step_persistence import SqliteStepStore
 
 from .settings import env_path
@@ -47,6 +48,16 @@ def get_db_path() -> Path:
     base_dir = env_path().parent
     db_dir = base_dir / ".grc_agent"
     return db_dir / "chat_sessions.db"
+
+
+async def load_plan_items(session_id: int) -> list[PlanItem]:
+    """Read one saved chat's durable plan through the harness-owned store."""
+    init_db()
+    store = SqlitePlanStore(
+        str(get_db_path()),
+        session=conversation_id_for_session(session_id),
+    )
+    return await store.get_items()
 
 
 def get_connection() -> sqlite3.Connection:

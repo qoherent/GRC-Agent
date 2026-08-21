@@ -108,6 +108,7 @@ class MarkdownView:
         else:
             lbl.set_text(text)
         lbl.set_xalign(0.0)
+        lbl.set_selectable(True)
         return lbl
 
     # -- prose TextBuffer building -----------------------------------------
@@ -166,12 +167,23 @@ class MarkdownView:
         self._insert_plain_tagged(buffer, text[last_end:], tags)
 
     def _on_link_tag_event(
-        self, _tag: Any, _widget: Any, event: Any, _iter: Any, href: str
+        self, tag: Any, widget: Any, event: Any, _iter: Any, href: str
     ) -> bool:
-        """Mirrors Gtk.Label's built-in activate-link default handler."""
+        """Open a link on click, never when release completes text selection."""
+        if event.type == Gdk.EventType.BUTTON_PRESS:
+            tag.grc_press_xy = (int(event.x), int(event.y))
+            return False
         if href and event.type == Gdk.EventType.BUTTON_RELEASE:
-            Gtk.show_uri_on_window(None, href, event.time)
-            return True
+            start = getattr(tag, "grc_press_xy", None)
+            tag.grc_press_xy = None
+            if start is not None and not widget.drag_check_threshold(
+                start[0],
+                start[1],
+                int(event.x),
+                int(event.y),
+            ):
+                Gtk.show_uri_on_window(None, href, event.time)
+                return True
         return False
 
     def _on_prose_motion_notify(self, tv: Gtk.TextView, event: Any) -> bool:

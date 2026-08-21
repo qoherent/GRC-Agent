@@ -10,7 +10,7 @@ from conftest import _count_sessions_for_path, _seed_session
 
 
 def test_chat_sidebar_copy_and_rich_rendering():
-    from gi.repository import Gtk
+    from gi.repository import Gdk, Gtk
     from pydantic_ai.messages import ModelResponse, TextPart, ThinkingPart, ToolCallPart
 
     from grc_agent.chat_sidebar import ChatSidebar
@@ -23,6 +23,10 @@ def test_chat_sidebar_copy_and_rich_rendering():
     parent = box.get_parent()
     assert parent is not None
     assert parent._grc_copy_btn._grc_copy_text == "test copy text"
+    assert parent._grc_copy_btn.get_label() == "Copy"
+    parent._grc_copy_btn.clicked()
+    assert Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD).wait_for_text() == "test copy text"
+    assert parent._grc_copy_btn.get_label() == "Copied"
 
     # 2. Test horizontal-scrolling table rendering
     sidebar._render_markdown_to_box(box, "| Head |\n|---|\n| cell |")
@@ -614,7 +618,7 @@ def test_streaming_text_flush_is_throttled(monkeypatch):
     bypasses it. Time is mocked for determinism."""
     from gi.repository import Gtk
 
-    from grc_agent.chat_sidebar import ChatSidebar, _StreamCtx
+    from grc_agent.chat_sidebar import ChatSidebar, _ChunkAccumulator, _StreamCtx
 
     sidebar = ChatSidebar()
     ctx = _StreamCtx(Gtk.Box())
@@ -625,7 +629,7 @@ def test_streaming_text_flush_is_throttled(monkeypatch):
     monkeypatch.setattr("grc_agent.chat_sidebar.time.monotonic", lambda: t[0])
 
     # First flush at t=0 with last_flush=0.0 -> (0 - 0.0) < interval -> skip.
-    ctx.text_acc = "chunk1"
+    ctx.text_acc = _ChunkAccumulator("chunk1")
     ctx.text_dirty = True
     sidebar._flush_streaming(ctx)
     assert ctx.text_lbl.get_text() == ""  # throttled, not painted
@@ -636,15 +640,15 @@ def test_streaming_text_flush_is_throttled(monkeypatch):
     assert ctx.text_lbl.get_text() == "chunk1"
     assert ctx.text_dirty is False
 
-    # A second chunk immediately after is throttled again.
-    ctx.text_acc = "chunk2"
+    # A second chunk in the same text part is append-only and throttled again.
+    ctx.text_acc += "chunk2"
     ctx.text_dirty = True
     sidebar._flush_streaming(ctx)  # t=0.05, last_flush=0.05 -> skip
     assert ctx.text_lbl.get_text() == "chunk1"
 
     # force=True bypasses the interval (used on part start/close/stream end).
     sidebar._flush_streaming(ctx, force=True)
-    assert ctx.text_lbl.get_text() == "chunk2"
+    assert ctx.text_lbl.get_text() == "chunk1chunk2"
 
 
 def test_streaming_thinking_flush_throttled(monkeypatch):
@@ -652,22 +656,23 @@ def test_streaming_thinking_flush_throttled(monkeypatch):
     tokens are throttled the same way and force=True flushes them."""
     from gi.repository import Gtk
 
-    from grc_agent.chat_sidebar import ChatSidebar, _StreamCtx
+    from grc_agent.chat_sidebar import ChatSidebar, _ChunkAccumulator, _StreamCtx
 
     sidebar = ChatSidebar()
     ctx = _StreamCtx(Gtk.Box())
     sidebar._ensure_thinking(ctx)
     assert ctx.think_body is not None
+    ctx.think_expander.set_expanded(True)
 
     t = [0.0]
     monkeypatch.setattr("grc_agent.chat_sidebar.time.monotonic", lambda: t[0])
 
-    ctx.think_acc = "thought1"
+    ctx.think_acc = _ChunkAccumulator("thought1")
     ctx.think_dirty = True
     sidebar._flush_streaming(ctx)  # t=0, last_flush=0.0 -> throttled
     assert ctx.think_body.get_text() == ""
 
-    t[0] = 0.05
+    t[0] = 0.30
     sidebar._flush_streaming(ctx)
     assert ctx.think_body.get_text() == "thought1"
 
@@ -1085,6 +1090,76 @@ def test_planner_toggle_cannot_switch_while_busy():
     assert sidebar._planner_mode_label.get_text() == "GRC-Agent Active"
 
 
+def test_planner_write_shows_implement_action_and_click_runs_executor(tmp_path, monkeypatch):
+    """A successful durable write_plan is the UI trigger; the user click then
+    flips modes and dispatches one visible executor turn with shared history."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from pydantic_ai import Agent
+    from pydantic_ai.models.test import TestModel
+    from pydantic_ai_harness.planning import Planning
+
+    from grc_agent.agent_factory import _plan_store_resolver
+    from grc_agent.chat_sidebar import ChatSidebar
+    from grc_agent.db import load_plan_items, save_session
+
+    monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
+    graph = tmp_path / "implement-plan.grc"
+    graph.touch()
+    session_id = save_session(None, str(graph), [])
+    assert session_id is not None
+
+    planner = Agent(
+        TestModel(call_tools=["write_plan"]),
+        output_type=str,
+        capabilities=[
+            Planning(
+                store_resolver=_plan_store_resolver,
+                tools=["write_plan", "read_plan"],
+            )
+        ],
+    )
+    executor = Agent(TestModel(custom_output_text="implemented"), output_type=str)
+    sidebar = ChatSidebar()
+    sidebar.set_agents(executor, planner)
+    sidebar._agent_mode = "planner"
+    sidebar._agent = planner
+    sidebar._update_agent_mode_label()
+    sidebar._active_session_id = session_id
+    sidebar._flowgraph_proxy = MagicMock()
+    sidebar._flowgraph_proxy._canvas_manager = None
+    sidebar._save_history = AsyncMock()
+
+    async def _run():
+        await sidebar._run_agent_turn("Create the plan")
+        assert await load_plan_items(session_id)
+        button = sidebar._implement_plan_button
+        assert button is not None
+        assert button.get_label() == "Implement the Plan"
+        assert button.get_sensitive() is True
+
+        button.clicked()
+        handoff_task = sidebar._implement_plan_task
+        assert handoff_task is not None
+        await handoff_task
+        assert sidebar._chat_task is not None
+        await sidebar._chat_task
+
+    asyncio.run(_run())
+
+    assert sidebar._agent_mode == "executor"
+    assert sidebar._agent is executor
+    assert sidebar._planner_toggle.get_active() is False
+    assert sidebar._planner_mode_label.get_text() == "GRC-Agent Active"
+    assert sidebar._implement_plan_row is None
+    assert any(
+        part.__class__.__name__ == "UserPromptPart"
+        and "Implement the approved plan now" in str(part.content)
+        for message in sidebar._message_history
+        for part in getattr(message, "parts", [])
+    )
+
+
 def test_planner_turn_persists_thinking_in_shared_session_history(tmp_path, monkeypatch):
     """Planner reasoning and reply use the same canonical session payload the
     executor uses, so dataset export does not lose the role's pre-compaction trace."""
@@ -1135,6 +1210,127 @@ def test_planner_turn_persists_thinking_in_shared_session_history(tmp_path, monk
         for message in history
         for part in getattr(message, "parts", [])
     )
+
+
+def test_collapsed_thinking_stream_does_not_force_flush_every_delta():
+    """A thinking delta must not close/force-flush a nonexistent text part.
+
+    This exact cross-part flush made a 65k-token reasoning loop consume one CPU
+    core by inserting and laying out the growing thought on every delta.
+    """
+    from pydantic_ai.messages import (
+        PartDeltaEvent,
+        PartStartEvent,
+        ThinkingPart,
+        ThinkingPartDelta,
+    )
+
+    from grc_agent.chat_sidebar import ChatSidebar, _StreamCtx
+
+    sidebar = ChatSidebar()
+    sidebar._scroll_to_bottom = lambda *_args, **_kwargs: None
+    ctx = _StreamCtx(sidebar._start_agent_message())
+    sidebar._on_part_start(ctx, PartStartEvent(index=0, part=ThinkingPart(content="")))
+
+    event = PartDeltaEvent(index=0, delta=ThinkingPartDelta(content_delta="abc"))
+    for _ in range(10_000):
+        sidebar._on_part_delta(ctx, event)
+
+    buffer = ctx.think_body.get_buffer()
+    assert buffer.get_char_count() == 0  # collapsed: no hidden GTK layout work
+    assert len(ctx.think_acc) == 30_000
+
+    sidebar._flush_streaming(ctx, force=True)
+    assert buffer.get_char_count() == 30_000
+
+
+def test_turn_completion_preserves_selection_in_older_message():
+    """Finalizing one stream replaces only its temporary row, never older widgets."""
+    from gi.repository import Gtk
+    from pydantic_ai.messages import ModelResponse, TextPart
+
+    from grc_agent.chat_sidebar import ChatSidebar, _StreamCtx
+
+    sidebar = ChatSidebar()
+    old_box = sidebar._start_agent_message()
+    sidebar._render_markdown_to_box(old_box, "older selectable text")
+    old_tv = next(child for child in old_box.get_children() if isinstance(child, Gtk.TextView))
+    old_buffer = old_tv.get_buffer()
+    old_buffer.select_range(
+        old_buffer.get_iter_at_offset(0), old_buffer.get_iter_at_offset(5)
+    )
+
+    stream_ctx = _StreamCtx(sidebar._start_agent_message())
+    sidebar._replace_streaming_turn(
+        stream_ctx,
+        [ModelResponse(parts=[TextPart(content="new response")])],
+    )
+
+    assert old_tv.get_parent() is old_box
+    start, end = old_buffer.get_selection_bounds()
+    assert old_buffer.get_text(start, end, True) == "older"
+
+
+def test_busy_release_does_not_steal_focus_from_transcript():
+    from gi.repository import Gtk
+
+    from grc_agent.chat_sidebar import ChatSidebar
+
+    window = Gtk.OffscreenWindow()
+    sidebar = ChatSidebar()
+    window.add(sidebar)
+    sidebar._flowgraph_proxy = object()
+    box = sidebar._start_agent_message()
+    sidebar._render_markdown_to_box(box, "keep transcript focus")
+    tv = next(child for child in box.get_children() if isinstance(child, Gtk.TextView))
+    window.show_all()
+    tv.grab_focus()
+    while Gtk.events_pending():
+        Gtk.main_iteration()
+
+    sidebar._set_busy(False)
+    assert window.get_focus() is tv
+    window.destroy()
+
+
+def test_truncated_thinking_is_archived_before_active_history_cleanup(tmp_path, monkeypatch):
+    from pydantic_ai.messages import ModelRequest, ModelResponse, ThinkingPart, UserPromptPart
+    from pydantic_ai_harness.step_persistence import continue_run
+
+    from grc_agent.chat_sidebar import ChatSidebar, _without_truncated_thinking_tail
+    from grc_agent.db import conversation_id_for_session, get_step_store, save_session
+
+    monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
+    graph = tmp_path / "truncated.grc"
+    graph.touch()
+    session_id = save_session(None, str(graph), [])
+    assert session_id is not None
+
+    messages = [
+        ModelRequest(parts=[UserPromptPart(content="continue")]),
+        ModelResponse(
+            parts=[ThinkingPart(content="repeated reasoning")],
+            finish_reason="length",
+        ),
+    ]
+    cleaned, removed = _without_truncated_thinking_tail(messages)
+    assert removed is True
+    assert cleaned == messages[:1]
+
+    sidebar = ChatSidebar()
+    assert asyncio.run(
+        sidebar._archive_truncated_thinking(messages, session_id, "executor")
+    )
+    runs = asyncio.run(
+        get_step_store().list_runs(
+            conversation_id=conversation_id_for_session(session_id)
+        )
+    )
+    archived = next(
+        run for run in runs if run.metadata.get("kind") == "truncated_thinking_transcript"
+    )
+    snapshot_messages = asyncio.run(continue_run(get_step_store(), run_id=archived.run_id))
+    assert snapshot_messages == messages
 
 
 def test_save_history_is_async_and_offloads_to_thread(monkeypatch):
@@ -1627,6 +1823,40 @@ def test_badge_regex_matching():
     assert sidebar._md._badge_regex_cache is None
 
 
+def test_markdown_link_drag_selects_without_opening(monkeypatch):
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from gi.repository import Gdk, Gtk
+
+    from grc_agent.chat_sidebar import ChatSidebar
+
+    sidebar = ChatSidebar()
+    tag = SimpleNamespace()
+    widget = MagicMock()
+    show_uri = MagicMock()
+    monkeypatch.setattr(Gtk, "show_uri_on_window", show_uri)
+
+    press = SimpleNamespace(type=Gdk.EventType.BUTTON_PRESS, x=10, y=10, time=1)
+    release = SimpleNamespace(type=Gdk.EventType.BUTTON_RELEASE, x=40, y=10, time=2)
+    assert sidebar._md._on_link_tag_event(tag, widget, press, None, "https://example.com") is False
+    widget.drag_check_threshold.return_value = True
+    assert sidebar._md._on_link_tag_event(tag, widget, release, None, "https://example.com") is False
+    show_uri.assert_not_called()
+
+    assert sidebar._md._on_link_tag_event(tag, widget, press, None, "https://example.com") is False
+    widget.drag_check_threshold.return_value = False
+    assert sidebar._md._on_link_tag_event(tag, widget, release, None, "https://example.com") is True
+    show_uri.assert_called_once()
+
+
+def test_markdown_table_inline_text_is_selectable():
+    from grc_agent.chat_sidebar import ChatSidebar
+
+    label = ChatSidebar()._md._inline_label("cell text", bold=False)
+    assert label.get_selectable() is True
+
+
 def test_badge_render_prose_textview():
     """Prose markdown blocks render into a Gtk.TextView; a mentioned block
     name becomes a GtkTextChildAnchor-embedded pill badge, not plain text."""
@@ -1812,10 +2042,16 @@ def test_link_click_opens_uri(monkeypatch):
     opened = MagicMock()
     monkeypatch.setattr("grc_agent.ui.markdown_view.Gtk.show_uri_on_window", opened)
 
-    event = MagicMock()
-    event.type = Gdk.EventType.BUTTON_RELEASE
-    event.time = 999
-    handled = sidebar._md._on_link_tag_event(link_tags[0], None, event, None, "https://example.com")
+    widget = MagicMock()
+    widget.drag_check_threshold.return_value = False
+    press = MagicMock(type=Gdk.EventType.BUTTON_PRESS, x=10, y=10, time=998)
+    release = MagicMock(type=Gdk.EventType.BUTTON_RELEASE, x=10, y=10, time=999)
+    sidebar._md._on_link_tag_event(
+        link_tags[0], widget, press, None, "https://example.com"
+    )
+    handled = sidebar._md._on_link_tag_event(
+        link_tags[0], widget, release, None, "https://example.com"
+    )
 
     assert handled is True
     opened.assert_called_once_with(None, "https://example.com", 999)

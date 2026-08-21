@@ -79,4 +79,5 @@ class TableBlock(Gtk.ScrolledWindow):
         lbl = Gtk.Label()
         lbl.set_markup(f"<b>{safe}</b>" if bold else safe)
         lbl.set_xalign(0.0)
+        lbl.set_selectable(True)
         return lbl

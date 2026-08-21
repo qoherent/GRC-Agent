@@ -144,6 +144,19 @@ textview.chat-thinking-textview text {
     padding: 5px 7px;
     background-color: alpha(@theme_fg_color, 0.035);
 }
+.chat-plan-action-box {
+    border: 1px solid @STRONG@;
+    border-radius: 8px;
+    padding: 7px;
+}
+.chat-implement-plan-btn {
+    border: 1px solid @theme_selected_bg_color;
+    border-radius: 4px;
+    min-height: 30px;
+}
+.chat-implement-plan-btn:hover {
+    background: alpha(@theme_selected_bg_color, 0.18);
+}
 
 /* Block-name pill badge */
 .chat-block-badge {
