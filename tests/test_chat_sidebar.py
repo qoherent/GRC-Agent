@@ -148,17 +148,17 @@ def test_active_graph_label_format():
     sidebar = ChatSidebar()
 
     # Initial state
-    assert sidebar._graph_label.get_text() == "Active Graph: none"
+    assert sidebar._graph_label.get_text() == "Active Graph · none"
     assert "No flowgraph currently active" in sidebar._graph_label.get_tooltip_text()
 
     # Set active graph with path
     sidebar.set_active_graph("my_cool_flowgraph", "/path/to/my_cool_flowgraph.grc")
-    assert sidebar._graph_label.get_text() == "Active Graph: my_cool_flowgraph"
+    assert sidebar._graph_label.get_text() == "Active Graph · my_cool_flowgraph"
     assert "/path/to/my_cool_flowgraph.grc" in sidebar._graph_label.get_tooltip_text()
 
     # Clear active graph
     sidebar.set_active_graph(None)
-    assert sidebar._graph_label.get_text() == "Active Graph: none"
+    assert sidebar._graph_label.get_text() == "Active Graph · none"
 
 
 def test_ui_micro_interactions_and_shortcuts():
@@ -172,6 +172,7 @@ def test_ui_micro_interactions_and_shortcuts():
     assert not sidebar.grab_entry_focus()
     sidebar.set_input_enabled(True)
     assert sidebar._entry.get_sensitive()
+    assert sidebar._entry.get_min_content_height() == 64
 
     # 2. Active Provider badge tooltips
     sidebar.set_active_provider(
@@ -180,7 +181,7 @@ def test_ui_micro_interactions_and_shortcuts():
         is_default=False,
         base_url="https://openrouter.ai/api/v1",
     )
-    assert "deepseek-v4-flash" in sidebar._provider_label.get_text()
+    assert sidebar._provider_label.get_text() == "OpenRouter · deepseek-v4-flash"
     tooltip = sidebar._provider_label.get_tooltip_text()
     assert "OpenRouter" in tooltip
     assert "https://openrouter.ai/api/v1" in tooltip
@@ -1485,6 +1486,8 @@ def test_send_fix_when_free_aborts_when_user_switched_tabs():
 
 def test_context_label_updates_with_pydantic_ai_usage():
     """Context label must extract token usage natively from Pydantic AI ModelResponse.usage."""
+    from decimal import Decimal
+
     from pydantic_ai.messages import (
         ModelRequest,
         ModelResponse,
@@ -1500,6 +1503,7 @@ def test_context_label_updates_with_pydantic_ai_usage():
         resolve_model_context_length,
     )
     from grc_agent.chat_sidebar import ChatSidebar, format_tokens
+    from grc_agent.db import deserialize_messages, serialize_messages
 
     assert format_tokens(1200) == "1.2k"
     assert format_tokens(14710) == "14.7k"
@@ -1524,17 +1528,58 @@ def test_context_label_updates_with_pydantic_ai_usage():
     sidebar = ChatSidebar()
     sidebar.set_active_provider("ollama_cloud", "deepseek-v4-flash:cloud")
 
-    sidebar._message_history = [
-        ModelRequest(parts=[UserPromptPart(content="Hello")]),
-        ModelResponse(
-            parts=[TextPart(content="Hi")], usage=RequestUsage(input_tokens=3300, output_tokens=300)
-        ),
-    ]
+    sidebar._message_history = deserialize_messages(
+        serialize_messages(
+            [
+                ModelRequest(parts=[UserPromptPart(content="Hello")]),
+                ModelResponse(
+                    parts=[TextPart(content="Hi")],
+                    usage=RequestUsage(
+                        input_tokens=3300,
+                        output_tokens=300,
+                        cost=Decimal("0.0012345"),
+                    ),
+                ),
+            ]
+        )
+    )
 
     sidebar._update_context_label()
     text = sidebar._context_label.get_label()
     assert "3.3k / 1M tokens" in text
     assert "0%" in text
+    assert "Cost: $0.0012345" in text
+    assert "Native Pydantic AI last-turn cost: $0.0012345" in (
+        sidebar._context_label.get_tooltip_text()
+    )
+
+    # Never present a partial cross-provider sum as the session total.
+    sidebar._message_history.append(
+        ModelResponse(
+            parts=[TextPart(content="Unpriced")],
+            usage=RequestUsage(input_tokens=20, output_tokens=5),
+        )
+    )
+    sidebar._update_context_label()
+    assert "Cost: unavailable" in sidebar._context_label.get_label()
+
+    # A new user prompt starts a new native RunUsage total; prior-turn cost
+    # must not be added to it or lost-history compaction would skew the label.
+    sidebar._message_history.extend(
+        [
+            ModelRequest(parts=[UserPromptPart(content="Next turn")]),
+            ModelResponse(
+                parts=[TextPart(content="Priced again")],
+                usage=RequestUsage(
+                    input_tokens=50,
+                    output_tokens=10,
+                    cost=Decimal("0.0002"),
+                ),
+            ),
+        ]
+    )
+    sidebar._update_context_label()
+    assert "Cost: $0.0002" in sidebar._context_label.get_label()
 
 
 def test_badge_regex_matching():

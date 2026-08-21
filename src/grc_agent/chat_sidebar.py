@@ -14,6 +14,7 @@ import json
 import logging
 import time
 from collections.abc import Callable
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -344,8 +345,8 @@ class _ChatTextView(Gtk.ScrolledWindow):
         super().__init__()
         self.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
         self.set_shadow_type(Gtk.ShadowType.NONE)
-        self.set_min_content_height(36)
-        self.set_max_content_height(120)
+        self.set_min_content_height(64)
+        self.set_max_content_height(160)
         self.set_propagate_natural_height(True)
         self.set_hexpand(True)
         self.get_style_context().add_class("chat-entry-frame")
@@ -353,6 +354,7 @@ class _ChatTextView(Gtk.ScrolledWindow):
         self.tv = Gtk.TextView()
         self.tv.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
         self.tv.set_hexpand(True)
+        self.tv.get_accessible().set_name("Chat message")
         self.add(self.tv)
 
     def get_text(self) -> str:
@@ -393,16 +395,36 @@ class _ChatTextView(Gtk.ScrolledWindow):
         return self.tv.connect(detailed_signal, handler, *args)
 
 
-def _collect_token_usage(msgs) -> tuple[int, int, int, int]:
-    """Extract (last_input, last_output, last_reasoning, total_session) tokens
-    from pydantic-ai ModelResponse.usage objects."""
+def _collect_token_usage(msgs) -> tuple[int, int, int, int, Decimal | None, bool]:
+    """Extract token totals and native Pydantic AI cost for the latest turn.
+
+    A turn can contain several model requests around tool calls, so its cost is
+    the sum after the latest user prompt. It is complete only when every such
+    response has ``usage.cost``; otherwise ``None`` prevents a partial sum.
+    """
     last_input = last_output = last_reasoning = total = 0
+    turn_cost = Decimal(0)
+    has_usage = False
+    cost_complete = True
     for msg in msgs:
+        if msg.__class__.__name__ == "ModelRequest":
+            if any(isinstance(part, UserPromptPart) for part in getattr(msg, "parts", [])):
+                turn_cost = Decimal(0)
+                has_usage = False
+                cost_complete = True
+            continue
         if msg.__class__.__name__ != "ModelResponse" or not hasattr(msg, "usage") or not msg.usage:
             continue
         u = msg.usage
         inp = getattr(u, "input_tokens", 0) or 0
         out = getattr(u, "output_tokens", 0) or 0
+        native_cost = getattr(u, "cost", None)
+        if inp or out or native_cost is not None:
+            has_usage = True
+            if native_cost is None:
+                cost_complete = False
+            else:
+                turn_cost += native_cost
         if inp:
             last_input = inp
             last_output = out
@@ -413,7 +435,19 @@ def _collect_token_usage(msgs) -> tuple[int, int, int, int]:
                 reasoning = getattr(u, "reasoning_tokens", 0) or 0
             last_reasoning = reasoning
         total += getattr(u, "total_tokens", 0) or 0
-    return last_input, last_output, last_reasoning, total
+    return (
+        last_input,
+        last_output,
+        last_reasoning,
+        total,
+        turn_cost if has_usage and cost_complete else None,
+        has_usage,
+    )
+
+
+def _format_native_cost(cost: Decimal) -> str:
+    """Render Pydantic AI's exact USD Decimal without inventing precision."""
+    return f"${format(cost.normalize(), 'f')}"
 
 
 def _run_usage_output_override(run: Any, last_output: int, last_reasoning: int) -> tuple[int, int]:
@@ -429,6 +463,23 @@ def _run_usage_output_override(run: Any, last_output: int, last_reasoning: int) 
         getattr(u, "output_tokens", 0) or 0,
         details.get("reasoning_tokens", 0) or 0,
     )
+
+
+def _run_usage_cost_override(
+    run: Any, last_turn_cost: Decimal | None, has_usage: bool
+) -> tuple[Decimal | None, bool]:
+    """Use the active run's aggregate native cost while it is available."""
+    if run is None:
+        return last_turn_cost, has_usage
+    usage = getattr(run, "usage", None)
+    if usage is None or not (
+        getattr(usage, "requests", 0)
+        or getattr(usage, "input_tokens", 0)
+        or getattr(usage, "output_tokens", 0)
+        or getattr(usage, "cost", None) is not None
+    ):
+        return last_turn_cost, has_usage
+    return getattr(usage, "cost", None), True
 
 
 class ChatSidebar(Gtk.Box):
@@ -571,6 +622,7 @@ class ChatSidebar(Gtk.Box):
         ) -> Gtk.Button:
             b = Gtk.Button.new_from_icon_name(icon_name, Gtk.IconSize.SMALL_TOOLBAR)
             b.set_tooltip_text(tooltip)
+            b.get_accessible().set_name(tooltip)
             b.get_style_context().add_class("chat-toolbar-btn")
             if signal:
                 b.connect("clicked", lambda *_: self.emit(signal))
@@ -588,11 +640,12 @@ class ChatSidebar(Gtk.Box):
             cb=self._on_clear_history_clicked,
         )
         # Active graph badge — expands to fill the toolbar's leftover space.
-        self._graph_label = Gtk.Label(label="Active Graph: none")
-        self._graph_label.set_ellipsize(Pango.EllipsizeMode.END)
-        self._graph_label.set_max_width_chars(15)
+        self._graph_label = Gtk.Label(label="Active Graph · none")
+        self._graph_label.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
+        self._graph_label.set_max_width_chars(26)
+        self._graph_label.get_style_context().add_class("chat-header-badge")
         self.set_active_graph(None)
-        bar.pack_start(self._graph_label, True, True, 4)
+        bar.pack_start(self._graph_label, True, True, 2)
 
         # Active provider badge — reflects the *running* agent's actual
         # provider/model, not the saved .env (which can diverge after a
@@ -603,11 +656,10 @@ class ChatSidebar(Gtk.Box):
             "The provider/model the running chat agent is using right now. "
             "Settings changes apply immediately on Save."
         )
-        # Non-expanding + ellipsize START so the model id (the useful tail) stays
-        # visible while the graph badge gets the toolbar's variable space.
-        self._provider_label.set_ellipsize(Pango.EllipsizeMode.START)
-        self._provider_label.set_max_width_chars(14)
-        bar.pack_start(self._provider_label, False, False, 0)
+        self._provider_label.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
+        self._provider_label.set_max_width_chars(34)
+        self._provider_label.get_style_context().add_class("chat-header-badge")
+        bar.pack_start(self._provider_label, True, True, 0)
 
         # Settings
         self._gear_btn = _icon_btn(
@@ -673,6 +725,8 @@ class ChatSidebar(Gtk.Box):
         self._context_label.set_xalign(0.0)
         self._context_label.set_halign(Gtk.Align.START)
         self._context_label.set_hexpand(True)
+        self._context_label.set_ellipsize(Pango.EllipsizeMode.END)
+        self._context_label.set_max_width_chars(48)
         self._context_label.get_style_context().add_class("chat-context-label")
         self._context_label.set_margin_start(4)
         self._context_label.set_margin_top(2)
@@ -721,6 +775,8 @@ class ChatSidebar(Gtk.Box):
             last_output_tokens,
             last_reasoning_tokens,
             total_session_tokens,
+            last_turn_cost,
+            has_usage,
         ) = _collect_token_usage(msgs)
         # The run's own aggregated usage is the authoritative per-turn total:
         # all_messages() includes prior turns' responses, and the
@@ -730,6 +786,9 @@ class ChatSidebar(Gtk.Box):
         # turn.
         last_output_tokens, last_reasoning_tokens = _run_usage_output_override(
             getattr(self, "_active_run", None), last_output_tokens, last_reasoning_tokens
+        )
+        last_turn_cost, has_usage = _run_usage_cost_override(
+            getattr(self, "_active_run", None), last_turn_cost, has_usage
         )
 
         active_provider = getattr(self, "_active_provider", "") or ""
@@ -759,6 +818,14 @@ class ChatSidebar(Gtk.Box):
         if rate:
             text = text.replace("</span>", f" \u00b7 {rate:.0f} tok/s</span>")
 
+        if has_usage:
+            cost_text = (
+                f"Cost: {_format_native_cost(last_turn_cost)}"
+                if last_turn_cost is not None
+                else "Cost: unavailable"
+            )
+            text = text.replace("</span>", f" · {cost_text}</span>")
+
         if hasattr(self, "_context_label"):
             # Escalation ramp via CSS classes (ui/css.py): quiet at 0-74%,
             # bold at 75-89%, theme accent at >=90%. No hardcoded colors.
@@ -780,6 +847,8 @@ class ChatSidebar(Gtk.Box):
                 f"Last turn input context: {last_input_tokens:,} tokens\n"
                 f"Last turn output: {last_output_tokens:,} tokens{reasoning_str}\n"
                 f"Total session tokens: {total_session_tokens:,} tokens\n"
+                f"Native Pydantic AI last-turn cost: "
+                f"{_format_native_cost(last_turn_cost) if last_turn_cost is not None else 'unavailable for one or more provider/model responses'}\n"
                 f"Max model context: {f'{max_context:,}' if max_context else 'unknown'}"
             )
 
@@ -818,7 +887,7 @@ class ChatSidebar(Gtk.Box):
     def set_active_graph(self, name: str | None, path: str | None = None) -> None:
         self._active_graph_name = name
         self._active_graph_path = path
-        self._graph_label.set_text(f"Active Graph: {name}" if name else "Active Graph: none")
+        self._graph_label.set_text(f"Active Graph · {name}" if name else "Active Graph · none")
         if name and path:
             self._graph_label.set_tooltip_text(f"Active Flowgraph: {name}\nFull Path: {path}")
         elif name:

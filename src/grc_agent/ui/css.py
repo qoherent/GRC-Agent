@@ -40,6 +40,14 @@ textview.chat-thinking-textview text {
 .chat-status-bar { border-top: 1px solid @SOFT@; }
 .chat-side-toggle { border-right: 1px solid @SOFT@; }
 
+/* Active graph and backend are bounded status badges, so the header's
+   flexible width reads as useful state instead of unexplained empty space. */
+.chat-header-badge {
+    border: 1px solid @SOFT@;
+    border-radius: 4px;
+    padding: 3px 7px;
+}
+
 /* ---- content containers (clear boundaries) -------------------------- */
 .chat-code-block,
 .chat-entry-frame,

@@ -111,18 +111,18 @@ PROVIDER_KEY_PLACEHOLDER = {
 # Local and cloud Ollama get distinct badges so a saved switch is visibly
 # applied (the old single "ollama" badge was indistinguishable).
 PROVIDER_BADGE_LABEL = {
-    "ollama_local": "ollama",
-    "ollama_cloud": "ollama cloud",
-    "openrouter": "openrouter",
-    "openai": "openai",
-    "openai_compatible": "openai-compat",
-    "anthropic": "anthropic",
-    "google": "gemini",
-    "groq": "groq",
-    "mistral": "mistral",
-    "cohere": "cohere",
-    "xai": "xai",
-    "openai_codex": "chatgpt",
+    "ollama_local": "Ollama Local",
+    "ollama_cloud": "Ollama Cloud",
+    "openrouter": "OpenRouter",
+    "openai": "OpenAI",
+    "openai_compatible": "OpenAI Compat",
+    "anthropic": "Anthropic",
+    "google": "Gemini",
+    "groq": "Groq",
+    "mistral": "Mistral",
+    "cohere": "Cohere",
+    "xai": "xAI",
+    "openai_codex": "ChatGPT",
 }
 
 # Canonical endpoint per provider. None = user-editable URL persisted under
