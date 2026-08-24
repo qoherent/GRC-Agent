@@ -49,10 +49,14 @@ flowchart LR
 - **Inspect & edit structurally** — the agent reads blocks, connections, and
   parameters; adds, removes, rewires, and re-parameterizes through one
   validated, rolled-back-on-failure edit. **Every edit requires your approval
-  first** — you see the agent's one-line reason and a structured summary of
-  the proposed change before it applies (Approve / Deny / Always accept,
-  re-enable anytime from the composer). The canvas redraws immediately,
+  first** (the default "Manual" mode) — you see the agent's one-line reason and
+  a structured summary of the proposed change before it applies (Approve / Deny
+  / Always accept). The composer's **Mode toggle** switches to "Auto" to apply
+  changes without asking, and back any time. The canvas redraws immediately,
   GRC's native undo/redo keeps working — what it changed is what you see.
+- **Plan before you implement** — a separate read-only Planner mode researches
+  and drafts a durable step-by-step plan; nothing changes until you click
+  "Implement the Plan" to hand it to the executor.
 - **Diagnose failed runs** — when a run fails, the agent gets the return code,
   reads the full console log itself, and proposes the fix.
 - **Preview generated code** — renders the exact Python GNU Radio would
