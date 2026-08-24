@@ -62,6 +62,8 @@ class SettingsDialog(Gtk.Dialog):
         self._build_execution_section(grid)
         grid.attach(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL), 0, 9, 2, 1)
         self._build_embeddings_section(grid)
+        grid.attach(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL), 0, 14, 2, 1)
+        self._build_theme_section(grid)
 
         info = Gtk.Label(label="Changes apply immediately on Save.")
         info.get_style_context().add_class("dim-label")
@@ -114,7 +116,6 @@ class SettingsDialog(Gtk.Dialog):
         # unreachable just because the catalog has not caught up.
         self.model_combo = Gtk.ComboBoxText.new_with_entry()
         self.model_entry = self.model_combo.get_child()
-        self.model_entry.set_text(cfg["model"])
         self.model_entry.set_activates_default(True)
         self.model_combo.set_hexpand(True)
         self.model_combo.set_tooltip_text(
@@ -225,6 +226,26 @@ class SettingsDialog(Gtk.Dialog):
 
         self.embed_combo.connect("changed", lambda _c: self._sync_embed_fields())
 
+    def _build_theme_section(self, grid: Gtk.Grid) -> None:
+        hdr = Gtk.Label()
+        hdr.set_markup("<b>Appearance &amp; Theme</b>")
+        hdr.set_xalign(0.0)
+        grid.attach(hdr, 0, 15, 2, 1)
+
+        lbl_t = Gtk.Label(label="Theme:")
+        lbl_t.set_xalign(0.0)
+        lbl_t.set_tooltip_text("Switch between Dark (Black), Light, or System Default theme")
+        self.theme_combo = Gtk.ComboBoxText()
+        self.theme_combo.append("dark", "Dark (Black)")
+        self.theme_combo.append("light", "Light")
+        self.theme_combo.append("system", "System Default")
+        current_theme = self._cfg.get("theme", "system")
+        self.theme_combo.set_active_id(
+            current_theme if current_theme in ("dark", "light", "system") else "system"
+        )
+        grid.attach(lbl_t, 0, 16, 1, 1)
+        grid.attach(self.theme_combo, 1, 16, 1, 1)
+
     def _sync_embed_fields(self) -> None:
         idx = self.embed_combo.get_active()
         backend = EMBED_BACKEND_ORDER[idx] if idx >= 0 else "lexical"
@@ -298,9 +319,7 @@ class SettingsDialog(Gtk.Dialog):
             )
         else:  # openai_compatible — any OpenAI-shaped endpoint
             self.url_label.set_text("Base URL:")
-            self.url_entry.set_text(
-                cfg.get("openai_compatible_base_url", "https://openrouter.ai/api/v1")
-            )
+            self.url_entry.set_text(cfg["openai_compatible_base_url"])
             self.url_entry.set_placeholder_text(
                 "e.g. http://localhost:8080/v1 (llama.cpp), http://localhost:1234/v1 (LM Studio), https://api.groq.com/openai/v1"
             )
@@ -316,15 +335,18 @@ class SettingsDialog(Gtk.Dialog):
         key_var = PROVIDER_API_KEY.get(provider)
         key_val = self.key_entry.get_text().strip()
         canonical = PROVIDER_BASE_URL[provider]
-        if canonical is not None:
-            base_url = canonical
-        elif provider == "ollama_local":
-            base_url = self.url_entry.get_text().strip() or "http://localhost:11434"
-        else:
-            base_url = self.url_entry.get_text().strip() or "https://openrouter.ai/api/v1"
+        # Editable URL: pass the raw field through; save_settings applies the
+        # provider's own documented default when it is empty (the dialog must
+        # not hardcode a second, divergent default).
+        base_url = (
+            canonical
+            if canonical is not None
+            else self.url_entry.get_text().strip()
+        )
         eidx = self.embed_combo.get_active()
         embed_backend = EMBED_BACKEND_ORDER[eidx] if eidx >= 0 else "lexical"
-        return provider, model, key_var, key_val, base_url, embed_backend
+        theme_mode = self.theme_combo.get_active_id() or "system"
+        return provider, model, key_var, key_val, base_url, embed_backend, theme_mode
 
     def _on_response(self, _dlg: Gtk.Dialog, response: int) -> None:
         # Read widget values BEFORE destroy — reading after destroy returns

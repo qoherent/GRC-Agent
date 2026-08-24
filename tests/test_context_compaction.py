@@ -66,14 +66,18 @@ def test_compaction_under_budget_preserves_exact_history():
     asyncio.run(_run())
 
 
-def test_compaction_over_budget_evicts_old_tool_returns_keeps_last_n():
+def test_compaction_over_budget_evicts_old_tool_returns_keeps_last_n(tmp_path, monkeypatch):
     """When token budget is exceeded, Tier 1 (ClearToolResults) clears older tool
     return contents to placeholder while preserving the most recent 3 pairs
     intact. Payloads must exceed min_clear_tokens (2000 tokens ~ 8000 chars) —
     small results (query_knowledge answers) are never worth reclaiming, and the
     model must not lose the answer to its own recent question mid-turn (the
     session-14 40-request loop regression)."""
-    # Set a small target_tokens so compaction triggers
+    # Set a small target_tokens so compaction triggers. The env var is read
+    # via get_env_value (the .env FILE) first, so redirect GRC_AGENT_ENV to
+    # an empty tmp .env — a deployment .env carrying the escape hatch must
+    # not silently override the test's own value.
+    monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
     cfg = {"provider": "ollama_local", "ollama_base_url": "http://localhost:11434"}
     os.environ["GRC_COMPACTION_TARGET_TOKENS"] = "1500"
     try:
@@ -161,9 +165,11 @@ def test_compaction_over_budget_evicts_old_tool_returns_keeps_last_n():
     asyncio.run(_run())
 
 
-def test_sliding_window_preserves_first_user_prompt():
-    """When history is exceptionally long, Tier 2 (SlidingWindowCompaction)
-    preserves the original user prompt (preserve_first_user_message=True)."""
+def test_sliding_window_preserves_first_user_prompt(tmp_path, monkeypatch):
+    """When history is exceptionally long, the zero-LLM backstop
+    (SlidingWindowCompaction) preserves the original user prompt
+    (preserve_first_user_message=True)."""
+    monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
     cfg = {"provider": "ollama_local", "ollama_base_url": "http://localhost:11434"}
     os.environ["GRC_COMPACTION_TARGET_TOKENS"] = "200"
     try:
@@ -344,7 +350,7 @@ def test_chat_sidebar_renders_compacted_messages_cleanly():
     assert "inspect_graph" in expander.get_label()
 
 
-def test_summarizing_tier_fires_over_budget_and_replaces_old_turns():
+def test_summarizing_tier_fires_over_budget_and_replaces_old_turns(tmp_path, monkeypatch):
     """The summarizing tier (ResilientSummarizingCompaction, D1 model
     inheritance) replaces turns older than keep_messages with a summary
     SystemPromptPart when the cheap tiers cannot fit the history under
@@ -356,6 +362,7 @@ def test_summarizing_tier_fires_over_budget_and_replaces_old_turns():
         _SUMMARY_PREFIX,
     )
 
+    monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
     cfg = {"provider": "ollama_local", "ollama_base_url": "http://localhost:11434"}
     os.environ["GRC_COMPACTION_TARGET_TOKENS"] = "1500"
     try:
@@ -428,11 +435,11 @@ def test_summarizing_tier_fires_over_budget_and_replaces_old_turns():
     asyncio.run(_run())
 
 
-def test_summarizing_failure_degrades_keeps_history(monkeypatch):  # noqa: ARG001
+def test_summarizing_failure_degrades_keeps_history(monkeypatch):
     """D2: a summarization failure must never hard-fail the turn — the
     ResilientSummarizingCompaction returns the pre-compact history unchanged
     (the harness's own compact_now builds the throwaway RunContext)."""
-    from pydantic_ai_harness.compaction._manual import compact_now
+    from pydantic_ai_harness.compaction import compact_now
 
     from grc_agent.agent_factory import ResilientSummarizingCompaction
 
@@ -472,8 +479,8 @@ def test_conversation_search_recalls_compacted_detail(tmp_path, monkeypatch):
     compaction = TieredCompaction(
         tiers=[
             ClearToolResults(max_tokens=1, keep_pairs=3),
-            make_summarizing_strategy().__class__(  # same params as production
-                max_messages=1, keep_messages=2, keep_user_messages=True
+            make_summarizing_strategy().__class__(  # same class as production
+                max_messages=1, keep_messages=2, keep_user_messages=True  # smaller keep so the tier fires
             ),
         ],
         # Small target + padded turn-1 prompt so the summarizing tier ACTUALLY
@@ -584,7 +591,6 @@ def test_automatic_compaction_archives_first_pre_compaction_history(tmp_path, mo
 
     monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
     db._initialized_paths.clear()
-    db._cleanup_done.clear()
     db._step_stores.clear()
     store = get_step_store()
 
@@ -708,8 +714,7 @@ def test_clear_tool_results_min_clear_tokens_gates_on_total_reclaim():
     combined size is trivial (< 2000 tokens), NOTHING is cleared (a turn of
     only small query_knowledge answers keeps them all); when a bulky
     inspect_graph result is present, the gate passes and it is blanked."""
-    from pydantic_ai_harness.compaction import ClearToolResults
-    from pydantic_ai_harness.compaction._manual import compact_now
+    from pydantic_ai_harness.compaction import ClearToolResults, compact_now
 
     strat = ClearToolResults(
         max_tokens=1, keep_pairs=0, min_clear_tokens=2_000, placeholder="[CLEARED]"

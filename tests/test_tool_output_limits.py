@@ -64,10 +64,10 @@ def test_oversized_return_spilled_with_handle_and_preview(tmp_path):
     ret = _tool_result(result, "big_tool")
     content = str(ret.content)
     assert "read_tool_result" in content  # the model is told how to read it back
-    assert len(content) < 5_000  # 20k-char payload was replaced by a bounded notice
+    assert len(content) < 5_000  # 30k-char payload was replaced by a bounded notice
     assert "NEEDLE_AT_START" in content  # preview keeps the head
-    # The 20k-char MIDDLE is what got spilled: the notice holds only the bounded
-    # head+tail preview, never the full payload (head-tail by design, preview_chars=1000) - the bulk of 'x'*20000 must be gone from inline history.
+    # The 30k-char MIDDLE is what got spilled: the notice holds only the bounded
+    # head+tail preview, never the full payload (head-tail by design, preview_chars=1000) - the bulk of 'x'*30000 must be gone from inline history.
     assert "x" * 2_000 not in content
     # the spill file exists on disk under the store root
     spills = list((tmp_path / "overflow").rglob("*"))

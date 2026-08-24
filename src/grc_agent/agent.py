@@ -512,20 +512,6 @@ def fresh_agent(fixture):
     return fg, tmp, tmp_dir
 
 
-async def _with_state_lock(ctx: RunContext[Any], fn):
-    """Run the zero-arg callable `fn` under ctx.deps's state lock if it
-    exposes one — a no-op passthrough otherwise (the native desktop app's
-    NativeFlowgraphProxy returns None from get_state_lock since gbulb runs
-    everything on one thread; the scenario harness passes a raw flowgraph
-    as deps, which has no lock at all)."""
-    if hasattr(ctx.deps, "get_state_lock"):
-        lock = ctx.deps.get_state_lock()
-        if lock is not None:
-            async with lock:
-                return fn()
-    return fn()
-
-
 # Module-level tool functions
 async def inspect_graph_func(ctx: RunContext[Any], targets: list[str] | str | None = None) -> str:
     """Read-only inspection of the active graph. Returns topology, block instances, connections, parameter values, and validation status.
@@ -533,9 +519,9 @@ async def inspect_graph_func(ctx: RunContext[Any], targets: list[str] | str | No
     Args:
         targets: Block/variable instance name(s) to scope inspection to (e.g. ["samp_rate", "blocks_head_0"] or "samp_rate"). Omit or pass null to inspect the full graph.
     """
-    result = await _with_state_lock(
-        ctx, lambda: inspect_graph(ctx.deps, targets=targets, view="overview")
-    )
+    result = inspect_graph(ctx.deps, targets=targets, view="overview")
+    if not result.get("ok", True):
+        raise ModelRetry(f"Inspection failed. Errors: {result.get('errors') or '(no detail)'}")
     return json.dumps(result)
 
 
@@ -561,12 +547,13 @@ async def query_knowledge_func(
             Clamped to 1-20.
     """
     k = max(_QUERY_KNOWLEDGE_MIN_K, min(_QUERY_KNOWLEDGE_MAX_K, k))
-    if domain == "catalog":
-        res = await asyncio.to_thread(query_catalog, query, k)
-        return json.dumps(res)
-    else:
-        res = await asyncio.to_thread(query_docs, query, k)
-        return json.dumps(res)
+    engine = query_catalog if domain == "catalog" else query_docs
+    res = await asyncio.to_thread(engine, query, k)
+    if not res.get("ok", True):
+        raise ModelRetry(
+            f"Knowledge lookup failed ({domain}): {res.get('message') or '(no detail)'}"
+        )
+    return json.dumps(res)
 
 
 async def generate_python_func(ctx: RunContext[Any], k: int = 5) -> str:
@@ -587,7 +574,7 @@ async def generate_python_func(ctx: RunContext[Any], k: int = 5) -> str:
             see every Embedded Python Block/Module's source in one call.
     """
     try:
-        result = await _with_state_lock(ctx, lambda: preview_flowgraph_py(ctx.deps, k=k))
+        result = preview_flowgraph_py(ctx.deps, k=k)
     except ValueError as exc:
         raise ModelRetry(str(exc)) from exc
     return json.dumps(result)
@@ -606,13 +593,13 @@ async def change_graph_func(
     """Apply a batch of structural graph edits in a single transaction.
 
     Runs in a fixed phase order regardless of argument order: remove_connections,
-    remove_blocks, add_blocks, update_params, update_states, add_connections. A
-    type-controlling param (e.g. 'type') set to the literal string 'auto' is
-    resolved from an explicit, non-'auto' value on a connected neighbor —
-    including one added and connected in this same call — but only if at
-    least one side of the connection has such a value; set an explicit type
-    on at least one side rather than 'auto' on both, or the call fails with
-    an actionable error instead of guessing.
+    remove_blocks, add_blocks, update_params, resolve 'auto' types, update_states,
+    add_connections. A type-controlling param (e.g. 'type') set to the literal
+    string 'auto' is resolved from an explicit, non-'auto' value on a connected
+    neighbor — including one added and connected in this same call — but only if
+    at least one side of the connection has such a value; set an explicit type on
+    at least one side rather than 'auto' on both, or the call fails with an
+    actionable error instead of guessing.
 
     Args:
         add_blocks: New blocks to create.
@@ -632,18 +619,15 @@ async def change_graph_func(
     )
     update_states_dict = [s.model_dump() for s in update_states] if update_states else None
 
-    res = await _with_state_lock(
-        ctx,
-        lambda: change_graph(
-            ctx.deps,
-            add_blocks=add_blocks_dict,
-            remove_blocks=remove_blocks,
-            update_params=update_params_dict,
-            update_states=update_states_dict,
-            add_connections=add_connections,
-            remove_connections=remove_connections,
-            force=force,
-        ),
+    res = change_graph(
+        ctx.deps,
+        add_blocks=add_blocks_dict,
+        remove_blocks=remove_blocks,
+        update_params=update_params_dict,
+        update_states=update_states_dict,
+        add_connections=add_connections,
+        remove_connections=remove_connections,
+        force=force,
     )
     if not res.get("ok"):
         # force=True only ever bypasses the native-validation gate
@@ -664,32 +648,38 @@ async def change_graph_func(
     # Tell the live GTK canvas (if any) to redraw — the agent mutated the very
     # same in-memory FlowGraph the canvas renders (single-process, shared
     # object), so there is nothing to reload from disk; notify_edit just queues
-    # a draw, scrolls to new blocks, and refreshes the sync baseline. The
-    # outcome is surfaced so a desync isn't silent; on a raw flowgraph deps
-    # (scenario harness) notify_edit is absent and this is skipped.
+    # a draw, scrolls to new blocks, and refreshes the sync baseline. Its result
+    # is deliberately NOT reported to the model: NativeFlowgraphProxy.notify_edit
+    # returns {"ok": True} unconditionally and after_agent_edit logs GTK failures
+    # rather than signalling them, so a `canvas_synced` field could only ever say
+    # True — false assurance is worse than none. On a raw flowgraph deps (scenario
+    # harness) notify_edit is absent and this is skipped.
     if hasattr(ctx.deps, "notify_edit"):
-        res["canvas_synced"] = (await ctx.deps.notify_edit()).get("ok", False)
+        await ctx.deps.notify_edit()
     return json.dumps(res)
 
 
 async def get_run_log_func(ctx: RunContext[Any]) -> str:
     """Read the console output (stdout + stderr) of the most recent flowgraph run.
 
-    Returns the full captured log from the last Execute action, whether it succeeded
+    Returns the captured log from the last Execute action, whether it succeeded
     or failed. Use this after running a flowgraph to diagnose runtime errors (e.g.
     hardware not found, parameter mismatches, GPU/CPU issues) that are not visible
     in the static graph structure.
 
     The log is retained until the next run — you can call this tool at any time
-    after a run to re-read the output.
+    after a run to re-read the output. If it was longer than the monitor's
+    buffer, the oldest output is dropped and "log_truncated" is set.
     """
     get_fn = getattr(ctx.deps, "get_run_log", None)
     if get_fn is None or not callable(get_fn):
-        return json.dumps(
-            {
-                "log_text": "",
-                "message": "No execution log available — no run monitor wired.",
-            }
+        # A missing monitor is a wiring fault in this app, not an empty result.
+        # Reporting it as ordinary data made it indistinguishable from "no run
+        # yet" — the model would read a broken environment as a normal one.
+        raise ModelRetry(
+            "The run monitor is not available, so no execution log can be read. This is an "
+            "environment fault, not an empty log — do not retry this tool; tell the user that "
+            "run-log capture is unavailable and continue without it."
         )
     data = get_fn()
     if data is None:
@@ -738,16 +728,13 @@ async def save_block_func(
             overwrite=overwrite,
         )
     else:
-        res = await _with_state_lock(
-            ctx,
-            lambda: save_block_to_library(
-                ctx.deps,
-                instance_name,
-                block_id=block_id,
-                label=label,
-                category=category,
-                overwrite=overwrite,
-            ),
+        res = save_block_to_library(
+            ctx.deps,
+            instance_name,
+            block_id=block_id,
+            label=label,
+            category=category,
+            overwrite=overwrite,
         )
     if not res.get("ok"):
         raise ModelRetry(f"Failed to save block. Errors: {res.get('errors') or '(no detail)'}")
@@ -825,34 +812,24 @@ async def validate_flowgraph_state(ctx: RunContext[Any], output: str) -> str:
                     has_mutated = True
                     break
     if has_mutated:
-        # Hold the same state lock as the tool functions for harness
-        # consistency. In this single-process gbulb desktop app,
-        # NativeFlowgraphProxy.get_state_lock() returns None (no races),
-        # so _with_state_lock is a no-op passthrough — but mirroring the
-        # tool pattern keeps the harness safe if this validator ever
-        # gains an await or runs under a different harness.
-        def _do_validate():
-            fg = ctx.deps
-            # is_valid()/iter_error_messages() only read _error_messages, which
-            # only validate() populates (rewrite() clears it without refilling)
-            # — call it explicitly rather than assuming some earlier tool call
-            # in this turn happened to leave it fresh.
-            fg.validate()
-            if not fg.is_valid():
-                validation_errors = []
-                for elem, msg in fg.iter_error_messages():
-                    parent = getattr(elem, "parent_block", None)
-                    if parent is not None and parent is not elem:
-                        validation_errors.append(f"{parent.name}: {elem}: {msg}")
-                    else:
-                        validation_errors.append(f"{elem}: {msg}")
-                raise ModelRetry(
-                    f"The flowgraph has validation errors after mutation: {validation_errors}. "
-                    "You must run change_graph to correct these errors (or set force=True if they are unresolvable) before completing the response."
-                )
-            return output
-
-        return await _with_state_lock(ctx, _do_validate)
+        fg = ctx.deps
+        # is_valid()/iter_error_messages() only read _error_messages, which
+        # only validate() populates (rewrite() clears it without refilling)
+        # — call it explicitly rather than assuming some earlier tool call
+        # in this turn happened to leave it fresh.
+        fg.validate()
+        if not fg.is_valid():
+            validation_errors = []
+            for elem, msg in fg.iter_error_messages():
+                parent = getattr(elem, "parent_block", None)
+                if parent is not None and parent is not elem:
+                    validation_errors.append(f"{parent.name}: {elem}: {msg}")
+                else:
+                    validation_errors.append(f"{elem}: {msg}")
+            raise ModelRetry(
+                f"The flowgraph has validation errors after mutation: {validation_errors}. "
+                "You must run change_graph to correct these errors (or set force=True if they are unresolvable) before completing the response."
+            )
     return output
 
 

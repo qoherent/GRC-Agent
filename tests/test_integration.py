@@ -75,6 +75,12 @@ def _selected_backends():
     """
     forced = os.getenv("GRC_TEST_BACKEND")
     if forced:
+        if forced not in _BACKEND_AVAILABILITY:
+            raise SystemExit(
+                f"Unknown GRC_TEST_BACKEND={forced!r}; expected one of "
+                f"{sorted(_BACKEND_AVAILABILITY)}. A typo must fail loudly,"
+                " never silently fall back to local Ollama."
+            )
         return [forced]
     if _BACKEND_AVAILABILITY["ollama_cloud"]():
         return ["ollama_cloud"]
@@ -86,7 +92,7 @@ if not _AVAILABLE_BACKENDS:
     pytest.skip(
         "No LLM backend available. Set OLLAMA_CLOUD_API_KEY (preferred), "
         "OPENROUTER_API_KEY, or start Ollama on 127.0.0.1:11434, or force one "
-        "with GRC_TEST_BACKEND=ollama|ollama_cloud|openrouter.",
+        "with GRC_TEST_BACKEND=ollama|ollama_cloud|openrouter|openai_compatible.",
         allow_module_level=True,
     )
 
@@ -470,7 +476,7 @@ def test_ollama_cloud_summarizing_compaction_and_conversation_search(monkeypatch
 
     from pydantic_ai import UsageLimits
     from pydantic_ai.messages import SystemPromptPart
-    from pydantic_ai_harness.compaction._manual import compact_now
+    from pydantic_ai_harness.compaction import compact_now
     from pydantic_ai_harness.conversation_search import ConversationSearch, SnapshotHistorySource
     from pydantic_ai_harness.step_persistence import StepPersistence
 

@@ -77,9 +77,22 @@ PROVIDER_API_KEY = {
     "openai_codex": None,
 }
 
+# Providers whose API key is OPTIONAL: they have a key var above (a self-hosted
+# endpoint may still require auth) but work without one, so a missing key is not
+# a startup error. Kept here with the other provider facts rather than as an
+# inline literal at the one call site, and checked against PROVIDER_API_KEY so a
+# provider that loses its key var cannot linger in this set.
+PROVIDER_KEY_OPTIONAL = frozenset({"ollama_local", "openai_compatible"})
+assert all(PROVIDER_API_KEY.get(p) for p in PROVIDER_KEY_OPTIONAL), (
+    "PROVIDER_KEY_OPTIONAL entries must still declare a key var in PROVIDER_API_KEY"
+)
+
+
 PROVIDER_MODEL_PLACEHOLDER = {
     "ollama_local": "qwen3.8:latest",
-    "ollama_cloud": "deepseek-v4-flash:cloud",
+    # Both ollama providers share one model key (OLLAMA_CHAT_MODEL), so the
+    # placeholder must not suggest a second, drifted default.
+    "ollama_cloud": "qwen3.8:latest",
     "openrouter": "deepseek/deepseek-v4-flash, anthropic/claude-sonnet-5…",
     "openai": "gpt-5.6-terra — click Load to list yours",
     "openai_compatible": "model id served by your endpoint",
@@ -144,6 +157,20 @@ PROVIDER_BASE_URL = {
     "xai": "https://api.x.ai/v1",
     "openai_codex": "",
 }
+
+
+# The `save_settings` keyword each user-editable endpoint persists under.
+# Derived-consistent with PROVIDER_BASE_URL above: exactly the providers whose
+# canonical URL is None (i.e. user-editable) appear here, asserted at import so
+# adding an editable provider to one table without the other fails loudly
+# instead of silently dropping the user's URL on save.
+PROVIDER_BASE_URL_SETTING = {
+    "ollama_local": "ollama_base_url",
+    "openai_compatible": "openai_compatible_base_url",
+}
+assert set(PROVIDER_BASE_URL_SETTING) == {
+    p for p, url in PROVIDER_BASE_URL.items() if url is None
+}, "PROVIDER_BASE_URL_SETTING must cover exactly the user-editable providers"
 
 
 # Host fragment -> provider id, for mapping a running model's base_url back

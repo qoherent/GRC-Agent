@@ -70,12 +70,18 @@ class WelcomeView:
     """Builds the welcome card + recent-sessions list into the chat listbox."""
 
     def __init__(
-        self, listbox: Gtk.ListBox, on_quick_prompt, on_open_session, on_delete_session
+        self,
+        listbox: Gtk.ListBox,
+        on_quick_prompt,
+        on_open_session,
+        on_delete_session,
+        on_clear_all_sessions=None,
     ) -> None:
         self._listbox = listbox
         self._on_quick_prompt = on_quick_prompt
         self._on_open_session = on_open_session
         self._on_delete_session = on_delete_session
+        self._on_clear_all_sessions = on_clear_all_sessions
 
     def render(self, current_page, active_session_id: int | None) -> None:
         self._listbox.add(self._welcome_card(current_page))
@@ -108,7 +114,7 @@ class WelcomeView:
         if current_page is not None:
             sub_lbl.set_markup(
                 "<span size='small'>"
-                "Ask a question or request a modification for this flowgraph."
+                "Ask a question or request flowgraph changes."
                 "</span>"
             )
             welcome_box.pack_start(sub_lbl, False, False, 0)
@@ -132,9 +138,7 @@ class WelcomeView:
         else:
             sub_lbl.set_markup(
                 "<span size='small'>"
-                "No flowgraph is currently open.\n"
-                "Open or create a flowgraph in GRC (<b>File &gt; New</b> or <b>File &gt; Open</b>), "
-                "or select a recent session below:"
+                "Open or create a flowgraph in GRC to begin, or pick a recent session:"
                 "</span>"
             )
             welcome_box.pack_start(sub_lbl, False, False, 0)
@@ -150,8 +154,18 @@ class WelcomeView:
             0,
         )
         lbl = Gtk.Label()
-        lbl.set_markup("<b>Recent Sessions</b>")
+        lbl.set_markup("<b>Recent</b>")
         hdr_box.pack_start(lbl, False, False, 0)
+
+        if self._on_clear_all_sessions is not None:
+            clear_btn = Gtk.Button(label="Delete all sessions")
+            clear_btn.set_tooltip_text("Delete all saved chat sessions")
+            clear_btn.get_style_context().add_class("chat-compact-btn")
+            clear_btn.set_halign(Gtk.Align.END)
+            clear_btn.set_hexpand(True)
+            clear_btn.connect("clicked", lambda *_: self._on_clear_all_sessions())
+            hdr_box.pack_end(clear_btn, False, False, 0)
+
         self._listbox.add(hdr_box)
 
         for s in sessions:

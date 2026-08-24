@@ -26,7 +26,6 @@ def _isolated_env(tmp_path, monkeypatch):
     from grc_agent import db
 
     db._initialized_paths.clear()
-    db._cleanup_done.clear()
     db._step_stores.clear()
     yield
 
@@ -229,11 +228,14 @@ def test_plan_reminder_never_leaks_into_message_history(tmp_path):
     assert "CachePoint" not in rendered
 
 
-def test_compact_now_leaves_plan_rows_untouched(tmp_path):
+def test_harness_compact_now_replaces_history():
+    # Harness-level check: compact_now is a pure in-memory call (no DB in
+    # its path), so only the history-shape assertion is real — a plan-row
+    # assertion here would be guaranteed by construction, not by behavior.
+    # The app's own compact-now path (snapshot-before-replace) is covered by
+    # test_chat_sidebar's compact button tests.
     from pydantic_ai_harness.compaction import SlidingWindowCompaction, compact_now
 
-    conversation_id = _conversation(_make_session(tmp_path))
-    _seed_plan(conversation_id, "Durable step")
     history = [
         ModelRequest(parts=[UserPromptPart(content=f"user-{i}")])
         if i % 2 == 0
@@ -253,7 +255,6 @@ def test_compact_now_leaves_plan_rows_untouched(tmp_path):
     )
 
     assert compacted != history
-    assert _plan_contents(conversation_id) == ["Durable step"]
 
 
 def test_planner_factory_uses_durable_store_and_executor_has_no_planning(monkeypatch):

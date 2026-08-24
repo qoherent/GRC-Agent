@@ -4,7 +4,6 @@ Minimal set per the clustered test plan; shared fixtures/helpers live in conftes
 """
 
 import json
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -17,7 +16,6 @@ from conftest import (
 
 from grc_agent.adapter import (
     change_graph,
-    generate_flowgraph_py,
     inspect_graph,
     load_flow_graph,
     preview_flowgraph_py,
@@ -60,6 +58,27 @@ def test_inspect_graph_target_formats(temp_dial_tone):
     res_scoped = inspect_graph(fg, targets=["samp_rate", "analog_sig_source_x_0"])
     assert res_scoped["ok"] is True
     assert len(res_scoped["graph"]["blocks"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_inspect_graph_func_raises_model_retry_on_unknown_target(temp_dial_tone):
+    """One uniform rule: a domain-tool failure raises ModelRetry with the
+    actionable payload, rather than returning ok=false as a successful result
+    the model has to notice on its own. The retry text must carry the valid
+    block names so the model can correct itself without another round trip."""
+    from unittest.mock import MagicMock
+
+    from pydantic_ai.exceptions import ModelRetry
+
+    fg = load_flow_graph(str(temp_dial_tone))
+    ctx = MagicMock()
+    ctx.deps = fg
+
+    with pytest.raises(ModelRetry) as exc:
+        await inspect_graph_func(ctx, targets="no_such_block")
+    msg = str(exc.value)
+    assert "no_such_block" in msg
+    assert "samp_rate" in msg, "the valid-block list must survive into the retry text"
 
 
 @pytest.mark.asyncio
@@ -598,33 +617,6 @@ def test_change_graph_port_key_rekey_is_not_a_false_positive(temp_empty):
     assert "my_strobe:strobe->my_pad:in" in snap["graph"]["connections"]
 
 
-def test_generate_flowgraph_py_validates_first(temp_broken):
-    fg = load_flow_graph(str(temp_broken))
-    with pytest.raises(ValueError, match="not valid"):
-        generate_flowgraph_py(fg, tempfile.mkdtemp())
-
-
-def test_generate_flowgraph_py_rejects_hb(temp_run_null_sink):
-    fg = load_flow_graph(str(temp_run_null_sink))
-    rop = fg.options_block.params["generate_options"]
-    rop.set_value("hb")
-    rop.rewrite()
-    with pytest.raises(ValueError, match="Hierarchical blocks"):
-        generate_flowgraph_py(fg, tempfile.mkdtemp())
-
-
-def test_generate_flowgraph_py_run_options_override(temp_run_null_sink):
-    fg = load_flow_graph(str(temp_run_null_sink))
-    assert fg.get_option("run_options") == "prompt"
-    output_dir = Path(temp_run_null_sink).parent / "run"
-    file_path = generate_flowgraph_py(fg, output_dir)
-    content = file_path.read_text()
-    assert "Press Enter to quit" not in content
-    # The 'run' override is transient — the flowgraph's configured option is
-    # restored after generation.
-    assert fg.get_option("run_options") == "prompt"
-
-
 def test_preview_flowgraph_py_validates_first(temp_broken):
     fg = load_flow_graph(str(temp_broken))
     with pytest.raises(ValueError, match="not valid"):
@@ -641,8 +633,8 @@ def test_preview_flowgraph_py_rejects_hb(temp_run_null_sink):
 
 
 def test_preview_flowgraph_py_shows_real_run_options(temp_run_null_sink):
-    # Unlike generate_flowgraph_py, preview must NOT override run_options —
-    # it shows the flowgraph's actual configured generated output.
+    # Preview must NOT override run_options — it shows the flowgraph's
+    # actual configured generated output.
     fg = load_flow_graph(str(temp_run_null_sink))
     assert fg.get_option("run_options") == "prompt"
     result = preview_flowgraph_py(fg)

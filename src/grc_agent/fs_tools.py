@@ -41,6 +41,12 @@ from pydantic_ai.tools import AgentDepsT
 # the 12-hex content hash that read_file headers surface and write/edit
 # accept back as ``expected_hash`` — reusing it keeps the hash contract
 # identical across the parent tools and this subclass.
+#
+# These three have NO public equivalent as of pydantic_ai_harness 0.23:
+# ``filesystem.__all__`` is only {FileSystem, FileSystemToolset,
+# READ_ONLY_TOOL_NAMES}. Re-checked on every harness bump — if any of them
+# gains a public name, switch to it; the coupling is deliberate, not an
+# oversight.
 from pydantic_ai_harness.filesystem._capability import _DEFAULT_PROTECTED
 from pydantic_ai_harness.filesystem._toolset import (
     FileSystemToolset,
@@ -66,23 +72,31 @@ def _no_flow_graph() -> Any | None:
 
 _active_grc_path_fn: Callable[[], Path | str | None] = _no_grc
 _active_flow_graph_fn: Callable[[], Any | None] = _no_flow_graph
+_project_dir_fn: Callable[[], Path | str | None] = _no_grc
 
 
 def set_active_graph_providers(
     grc_path_fn: Callable[[], Path | str | None],
     flow_graph_fn: Callable[[], Any | None],
+    project_dir_fn: Callable[[], Path | str | None] | None = None,
 ) -> None:
-    """Install the callables that resolve the active flowgraph.
+    """Install the callables that resolve the active flowgraph and project directory.
 
-    Both are invoked lazily on every filesystem tool call, so tab switches
-    and saves are followed automatically. ``grc_path_fn`` returns the active
-    page's file path (``None``/empty for an unsaved tab); ``flow_graph_fn``
-    returns the live shared ``FlowGraph`` object (or ``None`` — reads of the
-    active `.grc` then fall back to the on-disk file).
+    Invoked lazily on every filesystem tool call. ``grc_path_fn`` returns the
+    active page's file path; ``flow_graph_fn`` returns the live shared
+    ``FlowGraph`` object; ``project_dir_fn`` returns the explicit project directory.
     """
-    global _active_grc_path_fn, _active_flow_graph_fn
+    global _active_grc_path_fn, _active_flow_graph_fn, _project_dir_fn
     _active_grc_path_fn = grc_path_fn
     _active_flow_graph_fn = flow_graph_fn
+    if project_dir_fn is not None:
+        _project_dir_fn = project_dir_fn
+
+
+def set_project_dir_provider(project_dir_fn: Callable[[], Path | str | None]) -> None:
+    """Install the callable that resolves the explicit project directory."""
+    global _project_dir_fn
+    _project_dir_fn = project_dir_fn
 
 
 def active_grc_path() -> Path | None:
@@ -93,15 +107,21 @@ def active_grc_path() -> Path | None:
     return Path(raw).resolve()
 
 
-# Placeholder root used only while no flowgraph is saved. It must be a real
-# syntactic path for the parent __init__'s resolve()/realpath() calls, but it
-# never names a directory that exists — every tool call is gated on
-# ``active_grc_path()`` in _safe_resolve before any I/O touches it.
+def active_project_dir() -> Path | None:
+    """Resolved explicit project directory, or ``None`` if unset."""
+    raw = _project_dir_fn()
+    if not raw:
+        return None
+    p = Path(raw).resolve()
+    return p if p.is_dir() else None
+
+
+# Placeholder root used only while no flowgraph or project folder is saved.
 _UNSAVED_ROOT = Path("/grc-agent-unsaved-root")
 
 _NO_ACTIVE_GRAPH_MSG = (
-    "No active flowgraph is saved to disk, so there is no project folder to "
-    "operate in. Ask the user to save the flowgraph first (File > Save), then retry."
+    "No project directory is set or saved to disk, so there is no project folder to "
+    "operate in. Select a Project directory in the sidebar or save the flowgraph first."
 )
 
 # Read access is denied outright (the harness's own protected list only makes
@@ -205,10 +225,13 @@ class GrcFileSystemToolset(FileSystemToolset[AgentDepsT]):
             max_find_results=max_find_results,
         )
 
-    # -- dynamic root ------------------------------------------------------
+    # -- project root ------------------------------------------------------
 
     @property
     def _root(self) -> Path:
+        proj = active_project_dir()
+        if proj is not None:
+            return proj
         grc = active_grc_path()
         return grc.parent.resolve() if grc is not None else _UNSAVED_ROOT
 
@@ -225,8 +248,8 @@ class GrcFileSystemToolset(FileSystemToolset[AgentDepsT]):
         """Swallow the parent's static assignment — the dynamic root wins."""
 
     def _safe_resolve(self, path: str, *, write: bool = False, check_allowed: bool = True) -> Path:
-        """Gate every tool on a saved active flowgraph, then resolve as usual."""
-        if active_grc_path() is None:
+        """Gate every tool on a configured project folder, then resolve as usual."""
+        if self._root == _UNSAVED_ROOT:
             raise ValueError(_NO_ACTIVE_GRAPH_MSG)
         return super()._safe_resolve(path, write=write, check_allowed=check_allowed)
 

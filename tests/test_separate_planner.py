@@ -17,7 +17,6 @@ def _isolated_env(tmp_path, monkeypatch):
     from grc_agent import db
 
     db._initialized_paths.clear()
-    db._cleanup_done.clear()
     db._step_stores.clear()
 
 

@@ -124,7 +124,7 @@ def parse_redirect(text: str, expected_state: str) -> str:
     return value
 
 
-async def exchange_code(code: str, verifier: str, redirect_uri: str = REDIRECT_URI) -> Credential:
+async def exchange_code(code: str, verifier: str) -> Credential:
     """Trade the authorization code for a token pair and persist it."""
     async with httpx.AsyncClient(timeout=_EXCHANGE_TIMEOUT) as client:
         r = await client.post(
@@ -134,7 +134,7 @@ async def exchange_code(code: str, verifier: str, redirect_uri: str = REDIRECT_U
                 "client_id": CLIENT_ID,
                 "code": code,
                 "code_verifier": verifier,
-                "redirect_uri": redirect_uri,
+                "redirect_uri": REDIRECT_URI,
             },
             headers={"Content-Type": "application/x-www-form-urlencoded"},
         )

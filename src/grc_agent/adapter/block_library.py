@@ -8,13 +8,10 @@ Sole gnuradio-importing surface for this feature, alongside graph.py/rag.py
 — adapter/ is the sole gnuradio importer (AGENTS.md)."""
 
 import collections
-import logging
 from pathlib import Path
 from typing import Any
 
 from grc_agent.adapter.graph import _atomic_write_text, get_platform
-
-_log = logging.getLogger(__name__)
 
 _DEFAULT_CATEGORY = "[Custom]"
 

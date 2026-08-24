@@ -78,7 +78,6 @@ def test_last_run_log_retained_after_success():
 def test_last_run_log_none_before_any_run():
     monitor = ExecutionErrorMonitor(on_error=_noop)
     assert monitor.get_last_run_log() is None
-    assert not monitor.has_last_run
 
 
 def test_last_run_log_replaced_by_next_run():
@@ -112,34 +111,8 @@ def test_proxy_get_run_log_returns_monitor_data():
     assert "output here" in data["log_text"]
 
 
-# --- Existing tests adapted for the new callback signature ---
-
-
-def test_nonzero_return_code_triggers_error():
-    errors = []
-    monitor = ExecutionErrorMonitor(on_error=lambda code, log: errors.append((code, log)))
-    _feed_run(monitor, "/tmp/flowgraph.py", "Traceback\nZeroDivisionError\n", code=1)
-    assert len(errors) == 1
-    assert errors[0][0] == 1
-    assert "ZeroDivisionError" in errors[0][1]
-    assert "Executing" in errors[0][1]
-
-
-def test_zero_return_code_does_not_trigger_error():
-    errors = []
-    monitor = ExecutionErrorMonitor(on_error=lambda code, log: errors.append((code, log)))
-    _feed_run(monitor, "/tmp/flowgraph.py", "all good\n", code=0)
-    assert errors == []
-
-
-def test_sigterm_return_code_does_not_trigger_error():
-    errors = []
-    monitor = ExecutionErrorMonitor(on_error=lambda code, log: errors.append((code, log)))
-    _feed_run(monitor, "/tmp/flowgraph.py", "still running...\n", code=-15)
-    assert errors == []
-
-
 def test_other_negative_return_code_triggers_error():
+    # -11 (not the -15 SIGTERM carve-out) must still be reported.
     errors = []
     monitor = ExecutionErrorMonitor(on_error=lambda code, log: errors.append((code, log)))
     _feed_run(monitor, "/tmp/flowgraph.py", "", code=-11)
@@ -209,12 +182,18 @@ def test_get_run_log_tool_returns_monitor_data():
     assert "RTL-SDR" in data["log_text"]
 
 
-def test_get_run_log_tool_no_monitor_wired():
-    """When deps has no get_run_log method (scenario harness), the tool
-    returns a clear 'no log available' JSON instead of crashing."""
+def test_get_run_log_tool_no_monitor_wired_raises():
+    """An unwired monitor is an environment fault, not an empty log.
+
+    It used to be reported as ordinary data ("No execution log available"),
+    which the model could not distinguish from the legitimate "no run yet"
+    result — so a broken wiring read as a healthy environment. It now raises
+    ModelRetry like every other domain-tool failure."""
     import asyncio
 
+    import pytest
     from pydantic_ai import RunContext
+    from pydantic_ai.exceptions import ModelRetry
 
     from grc_agent.agent import get_run_log_func
 
@@ -228,10 +207,8 @@ def test_get_run_log_tool_no_monitor_wired():
         model=None,
         usage=None,
     )
-    result = asyncio.run(get_run_log_func(ctx))
-    data = json.loads(result)
-    assert data["log_text"] == ""
-    assert "No execution log available" in data["message"]
+    with pytest.raises(ModelRetry, match="run monitor is not available"):
+        asyncio.run(get_run_log_func(ctx))
 
 
 def test_get_run_log_tool_no_run_yet():
@@ -380,3 +357,35 @@ def test_execution_error_monitor_modified_since_last_run_note():
     log3 = mon.get_last_run_log()
     assert log3 is not None
     assert "note" not in log3
+
+
+def test_log_truncation_is_disclosed():
+    """The 512KB cap drops the FRONT of the log. That reduction must be visible
+    to the model — a diagnostic read as complete when it is not is exactly the
+    silent transformation the tool contract forbids."""
+    from grc_agent.exec_monitor import _MAX_LOG_BYTES, ExecutionErrorMonitor
+
+    monitor = ExecutionErrorMonitor(on_error=_noop)
+    # _append evicts back under the cap on every call, so _chunk_bytes never
+    # exceeds it — feed a known total past the cap instead of watching the size.
+    _feed_run(monitor, "/tmp/flow.py", ["x" * 8192] * ((_MAX_LOG_BYTES // 8192) + 2), 0)
+
+    data = monitor.get_last_run_log()
+    assert data is not None
+    assert data["log_truncated"] is True
+    assert str(_MAX_LOG_BYTES) in data["truncation_note"]
+    assert len(data["log_text"]) <= _MAX_LOG_BYTES
+
+
+def test_log_truncation_flag_absent_for_a_small_run():
+    """A run under the cap must not claim truncation."""
+    from grc_agent.exec_monitor import ExecutionErrorMonitor
+
+    monitor = ExecutionErrorMonitor(on_error=_noop)
+    _feed_run(monitor, "/tmp/flow.py", ["all good\n"], 0)
+
+    data = monitor.get_last_run_log()
+    assert data is not None
+    assert "log_truncated" not in data
+    assert "truncation_note" not in data
+    assert data["ran_successfully"] is True

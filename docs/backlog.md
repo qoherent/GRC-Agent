@@ -54,12 +54,13 @@ Active feature requests, architectural improvements, and planned capabilities. C
   - **V1 data-plane capture** (research-grounded): probe/file-sink block → `numpy.fromfile` → PIL PNG → `ToolReturn(content=[BinaryContent(..., media_type='image/png')])` — verified in installed pydantic-ai 2.31.0 that OpenAIChatModel (our Ollama `/v1` path) maps this to a base64 `image_url` user part, Codex/Anthropic map it natively, and session DB + `SqliteStepStore`'s 64 KiB media externalization round-trip it. V2 (literal X11 QT-window screenshots) is a separate spike with Wayland/PID uncertainties.
   - **Prerequisite**: a live vision-model spike (all current default models are text-only; no uniform vision-capability probe exists) — pick/configure a vision-capable model first.
   - **Companion**: adopt the harness `tool_output_limits` capability (`Spill`/`Truncate` with `read_tool_result` read-back) so large tool outputs — and any captured artifacts — park lossless handles out of context instead of flooding it (production-time complement to the compaction stack).
+  - **✅ Shipped**: wired in `agent_factory.py` — `Band(over=20_000)` spills oversized tool returns to `.grc_agent/tool_overflow` with `read_tool_result` read-back (see AGENTS.md Tool Surface).
   - **Research note — large files**: the data-analyst pattern's answer to big files is *engine-side analysis*, not bigger context: park the object out-of-context and compute over it (DuckDB-style). For us that maps to a bounded, read-only `query_file` tool over big project `.csv/.json` (SQL SELECT gate, no write statements) rather than raising the 1000-line read cap — MAYBE, pending a real use case.
 
 ---
 
 ### 5. Deterministic Block Placement (algorithm-based layout)
-* **Status**: 💡 Agreed direction — design open
+* **Status**: ✅ Shipped — `adapter/layout.py` `compute_full_layout()` (header band + grandalf Sugiyama-style flow band, full-canvas relayout from `change_graph`'s `add_blocks` path only). The sketch below is kept for the record; the implementation is authoritative (see AGENTS.md's layout conventions).
 * **Scope**: Fix the "blocks thrown at random places" problem. When `change_graph` adds blocks (or any new component appears), the whole workspace must be rearranged deterministically — and **positions must stay algorithm-based, never LLM-based**: block coordinates are deliberately filtered out of the model's context (they would flood it and confuse it), so the model can never be asked to choose positions.
 * **User requirements (paraphrased)**:
   - **Variables/parameters first**: all variable and parameter blocks are listed horizontally along the top of the workspace — the universal GNU Radio convention. Order doesn't matter, but alphabetical is preferred.
@@ -81,6 +82,14 @@ Active feature requests, architectural improvements, and planned capabilities. C
 * **Key Considerations & Investigation Points**:
   - **Hardware & User Permission Investigation**: Investigate how shell execution interacts with host device permissions (e.g., SDR USB access, missing `udev` rules, `plugdev`/`usrp` group membership) to automatically detect or prevent permission errors without requiring the user to run full GUI IDEs or workflows with `sudo`.
   - **Security & Sandboxing Boundaries**: Evaluate local directory-sandboxed allowlists vs. isolated execution (e.g. Modal sandboxes or local containers), balancing safety against the need to access host GNU Radio C++ bindings and physically connected SDR hardware.
+
+---
+
+### 7. Native GTK3 Theming & Optional Canvas Dark Palette
+* **Status**: ✅ Shipped (UI & Sidebar Theming); 📥 Proposed (Optional Cairo Canvas Dark Mode)
+* **Scope**:
+  - **✅ Shipped in 0.3.1**: Pure GTK3 symbolic theming (`@theme_bg_color`, `@theme_fg_color`, `@theme_selected_bg_color`, and `alpha(@theme_fg_color, ...)`), 3-way theme switching (`system`, `dark`, `light`) paired with native installed desktop themes (`Yaru-dark`, `Adwaita-dark`), and dynamic Pygments syntax highlighting (`monokai` vs `friendly`) based on background relative luminance.
+  - **📥 Future / Optional**: Dynamic in-memory patch for GNU Radio's Cairo canvas palette (`gnuradio.grc.gui.canvas.colors`) to optionally support dark schematic canvas backgrounds while preserving port data-type color legibility.
 
 ---
 

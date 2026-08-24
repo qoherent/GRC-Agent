@@ -35,7 +35,7 @@ def get_platform() -> Any:
 
 
 def get_gui_platform() -> Any:
-    """GUI Platform (gnuradio.grc.gui) for the canvas subprocess. Kept lazy
+    """GUI Platform (gnuradio.grc.gui) for the in-process MainWindow. Kept lazy
     and separate from the headless get_platform() so importing adapter never
     pulls GTK/gi — adapter stays the sole importer of gnuradio (core *and*
     gui), and headless paths (unit tests, scenario harness) stay GTK-free.
@@ -61,7 +61,7 @@ def get_gui_platform() -> Any:
 
 
 def gui_application_cls() -> Any:
-    """Lazy accessor for the GRC GUI Application class (canvas subprocess).
+    """Lazy accessor for the GRC GUI Application class (in-process).
     Same self-contained gi setup as get_gui_platform."""
     import gi
 
@@ -70,22 +70,6 @@ def gui_application_cls() -> Any:
     from gnuradio.grc.gui.Application import Application
 
     return Application
-
-
-def hide_panels_by_default(app: Any) -> None:
-    """Hide GRC's panels (block library, console, and variable editor) by default."""
-    from gnuradio.grc.gui import Actions
-
-    for action in (
-        Actions.TOGGLE_BLOCKS_WINDOW,
-        Actions.TOGGLE_CONSOLE_WINDOW,
-        Actions.TOGGLE_FLOW_GRAPH_VAR_EDITOR,
-    ):
-        try:
-            if action.get_active():
-                app._handle_action(action)
-        except Exception:
-            _log.warning("Failed to hide GRC panel via action %s", action, exc_info=True)
 
 
 def set_blocks_panel_visibility(app: Any, visible: bool) -> bool:
@@ -123,7 +107,7 @@ def register_execution_messenger(callback: Callable[[str], None]) -> None:
 
 
 def flow_graph_content_hash(flow_graph: Any) -> str:
-    """Hash of what write_flow_graph_atomic would currently write for this
+    """Hash of the serialization the atomic save path writes for this
     flow_graph — directly comparable to a hash of the on-disk file's raw
     bytes (e.g. native_canvas.py's `_sha256_file`/`last_disk_hash`), since it's
     the exact same serialization. Used to detect in-memory edits that
@@ -700,7 +684,9 @@ def inspect_graph(  # noqa: C901
 def _atomic_write_text(payload: str, path: Path) -> None:
     """Atomically replace ``path``'s content with ``payload`` (temp → fsync →
     os.replace → directory fsync). Does NOT take a lock — callers that need
-    cross-process mutual exclusion use ``_flowgraph_lock``."""
+    cross-process mutual exclusion acquire ``fcntl.flock`` on
+    ``.grc_agent/<name>.lock`` themselves (see change_graph's save path and
+    native_canvas.sync_manual_edit)."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(prefix=path.name + ".", dir=str(path.parent))
@@ -727,41 +713,11 @@ def _atomic_write_text(payload: str, path: Path) -> None:
         raise
 
 
-@contextlib.contextmanager
-def _flowgraph_lock(path: Path):
-    """Acquire LOCK_EX|LOCK_NB on ``.grc_agent/<name>.lock`` derived from
-    ``path``. Non-blocking: raises BlockingIOError immediately if contended
-    (never blocks the single gbulb UI thread). Callers handle the contention
-    case — change_graph rolls back as ``save_failed``, sync_manual_edit
-    defers to the next poll tick."""
-    path = Path(path)
-    lock_dir = path.parent / ".grc_agent"
-    lock_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-    lock_path = lock_dir / (path.name + ".lock")
-    with lock_path.open("a", encoding="utf-8") as lock_file:
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        try:
-            yield
-        finally:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
-
-
-def write_flow_graph_atomic(flow_graph: Any, path: Path) -> None:
-    """Serialize ``flow_graph`` and atomically write to ``path``. Acquires an
-    exclusive flock on ``.grc_agent/<name>.lock`` so a concurrent process
-    editing the same ``.grc`` can't interleave writes. Callers needing a
-    wider critical section (backup, hash-check, snapshot) should acquire
-    ``_flowgraph_lock`` themselves and call
-    ``_atomic_write_text(_serialize_flow_graph(fg), path)`` directly."""
-    path = Path(path)
-    with _flowgraph_lock(path):
-        _atomic_write_text(_serialize_flow_graph(flow_graph), path)
-
 
 def _sanitize_data(data: Any) -> Any:
     """Recursively normalize non-breaking spaces (U+00A0) in strings, lists, and dicts."""
     if isinstance(data, str):
-        return data.replace("\u00a0", " ").replace("\xa0", " ")
+        return data.replace("\u00a0", " ")
     if isinstance(data, dict):
         return {k: _sanitize_data(v) for k, v in data.items()}
     if isinstance(data, list):
@@ -785,7 +741,7 @@ def set_param(block: Any, param_key: str, value: str) -> None:
             )
         return
 
-    raw_value = str(value).replace("\u00a0", " ").replace("\xa0", " ")
+    raw_value = str(value).replace("\u00a0", " ")
     template = _VARIABLE_TEMPLATE_RE.match(raw_value)
     if template:
         bare = template.group(1)
@@ -1243,13 +1199,13 @@ def change_graph(  # noqa: C901
         revert_error = _revert_flow_graph(flow_graph, initial_data)
         if revert_error:
             mutation_errors.append({"code": "rollback_failed", "message": revert_error})
-        return {"ok": False, "errors": mutation_errors}
+        return {"ok": False, "error_type": "mutation_failed", "errors": mutation_errors}
 
     if errors:
         revert_error = _revert_flow_graph(flow_graph, initial_data)
         if revert_error:
             errors.append({"code": "rollback_failed", "message": revert_error})
-        return {"ok": False, "errors": errors}
+        return {"ok": False, "error_type": "batch_failed", "errors": errors}
 
     # See inspect_graph's identical call for why this is required: without
     # it, is_valid() reports "valid" regardless of actual state (confirmed
@@ -1291,7 +1247,7 @@ def change_graph(  # noqa: C901
         revert_error = _revert_flow_graph(flow_graph, initial_data)
         if revert_error:
             gate_errors.append({"code": "rollback_failed", "message": revert_error})
-        return {"ok": False, "errors": gate_errors}
+        return {"ok": False, "error_type": "mutation_failed", "errors": gate_errors}
 
     # Write atomically with lock and backup
     try:
@@ -1353,10 +1309,10 @@ def change_graph(  # noqa: C901
 
 
 def _check_codegen_preconditions(flow_graph: Any) -> None:
-    """Shared gate for generate_flowgraph_py/preview_flowgraph_py: the graph
-    must be valid, and hierarchical-block or C++ output can't be generated
-    this way (a hierarchical block's own Generator subclass does an os.mkdir
-    as a side effect of construction — not just of writing — so there is no
+    """Shared gate for preview_flowgraph_py: the graph must be valid, and
+    hierarchical-block or C++ output can't be generated this way (a
+    hierarchical block's own Generator subclass does an os.mkdir as a side
+    effect of construction — not just of writing — so there is no
     side-effect-free path for it here; C++ output requires a separate build
     step this harness doesn't perform)."""
     flow_graph.validate()
@@ -1371,46 +1327,16 @@ def _check_codegen_preconditions(flow_graph: Any) -> None:
         raise ValueError("C++ output requires a build step — not supported.")
 
 
-def generate_flowgraph_py(flow_graph: Any, output_dir: "Path | str") -> Path:
-    """Generate a runnable Python script from a flowgraph.
-
-    Validates the graph, rejects hierarchical blocks (hb*) and C++ output.
-    Overrides run_options to 'run' (no input() prompt) — MUST call
-    .rewrite() after setting the value, or the cached _evaluated stays
-    stale and the generated script still contains input('Press Enter to
-    quit:').
-    """
-    _check_codegen_preconditions(flow_graph)
-
-    rop = flow_graph.options_block.params["run_options"]
-    original = rop.value
-    rop.set_value("run")
-    rop.rewrite()
-    try:
-        out = Path(output_dir)
-        out.mkdir(parents=True, exist_ok=True)
-        from gnuradio.grc.core.generator.Generator import Generator
-
-        gen = Generator(flow_graph, str(out))
-        gen.write()
-        file_path = Path(gen.file_path)
-    finally:
-        rop.set_value(original)
-        rop.rewrite()
-
-    return file_path
-
-
 def preview_flowgraph_py(flow_graph: Any, k: int = 5) -> dict[str, Any]:
     """Render the Python source GNU Radio would generate from the current
     flowgraph, without writing anything to disk.
 
-    Shares generate_flowgraph_py's validity/hier-block/C++ gate, but does
-    NOT apply that function's run_options override — this shows the
-    flowgraph's actual configured output (e.g. a real 'no_gui' script may
-    still contain input('Press Enter to quit:') if that's how run_options
-    is set), since the point here is showing what GRC would really
-    generate, not what a Run/Stop launch needs.
+    Shares the codegen validity/hier-block/C++ gate, but applies no
+    run_options override — this shows the flowgraph's actual configured
+    output (e.g. a real 'no_gui' script may still contain
+    input('Press Enter to quit:') if that's how run_options is set), since
+    the point here is showing what GRC would really generate, not what a
+    Run/Stop launch needs.
 
     GNU Radio's own Generator (gnuradio.grc.core.generator.top_block.
     TopBlockGenerator) already separates in-memory rendering from disk

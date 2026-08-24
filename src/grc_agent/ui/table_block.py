@@ -13,7 +13,7 @@ from __future__ import annotations
 import gi
 
 gi.require_version("Gtk", "3.0")
-from gi.repository import GLib, Gtk
+from gi.repository import Gtk
 
 
 def parse_table(table_soup) -> tuple[list[str], list[list[str]]]:
@@ -73,11 +73,4 @@ class TableBlock(Gtk.ScrolledWindow):
 
     @staticmethod
     def _cell(text: str, render_inline, *, bold: bool):
-        if render_inline is not None:
-            return render_inline(text or "", bold)
-        safe = GLib.markup_escape_text(text or "", -1)
-        lbl = Gtk.Label()
-        lbl.set_markup(f"<b>{safe}</b>" if bold else safe)
-        lbl.set_xalign(0.0)
-        lbl.set_selectable(True)
-        return lbl
+        return render_inline(text or "", bold)

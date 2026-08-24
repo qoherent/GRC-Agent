@@ -39,6 +39,11 @@ def get_db_and_model(domain: str) -> tuple[str, str | None]:
     return str(db_path), model
 
 
+# The embeddings endpoint is a single local llama.cpp server on a UNIX
+# socket; the OpenAI-shaped host is a placeholder the uds transport ignores.
+_EMBED_BASE_URL = "http://llamacpp/v1"
+
+
 def _embed_endpoint() -> tuple[str, str, str | None]:
     """Shared (base_url, api_key, uds_path) selection for local llama.cpp
     embedding calls.
@@ -51,7 +56,7 @@ def _embed_endpoint() -> tuple[str, str, str | None]:
     # dispatches via asyncio.to_thread, ingestion runs off-loop), so this
     # never stalls the GTK main loop.
     token = embed_runtime.ensure_server()
-    return "http://llamacpp/v1", token, str(embed_runtime.socket_path())
+    return _EMBED_BASE_URL, token, str(embed_runtime.socket_path())
 
 
 # (base_url, api_key, uds, client) as ONE tuple, replaced by a single atomic
@@ -106,15 +111,13 @@ def _embed(model: str, input_text: str | list[str]) -> list[float] | list[list[f
     try:
         response = client.embeddings.create(model=model, input=input_text, encoding_format="float")
     except APIConnectionError as exc:
-        base_url, _, _uds = _embed_endpoint()
         hint = (
             "The local llama.cpp embedding server is not answering; reinstall it from Settings."
         )
-        raise RuntimeError(f"Cannot reach the embeddings endpoint at {base_url}. {hint}") from exc
+        raise RuntimeError(f"Cannot reach the embeddings endpoint at {_EMBED_BASE_URL}. {hint}") from exc
     except APIStatusError as exc:
-        base_url, _, _uds = _embed_endpoint()
         hint = f"HTTP {exc.status_code}: {exc.message}"
-        raise RuntimeError(f"Embeddings request failed at {base_url}. {hint}") from exc
+        raise RuntimeError(f"Embeddings request failed at {_EMBED_BASE_URL}. {hint}") from exc
     if isinstance(input_text, list):
         return [d.embedding for d in response.data]
     return response.data[0].embedding
@@ -366,13 +369,25 @@ def _build_db(domain: str, db_path: str, model: str | None) -> None:  # noqa: C9
                 # lexical-only by design. Do NOT rebuild merely because the
                 # vector index is absent — that would re-attempt (and
                 # re-fail) embedding on every single query while the backend
-                # stays down. Only a genuine corpus change should give
-                # embedding a fresh chance.
-                if not meta or meta.get("corpus_version") != _corpus_version(domain):
-                    reason = "lexical-only DB is stale or missing metadata"
+                # stays down. Only a genuine corpus change — or a requested
+                # embedding model the DB was never built with (a lexical
+                # build records no model, so switching the backend to
+                # llamacpp must trigger the rebuild the "embedding model
+                # changed" check above cannot see) — gives embedding a
+                # fresh chance.
+                corpus_changed = not meta or meta.get("corpus_version") != _corpus_version(domain)
+                model_changed = model is not None and meta.get("embedding_model") != model
+                if corpus_changed or model_changed:
+                    if corpus_changed:
+                        reason = "lexical-only DB is stale or missing metadata"
+                    else:
+                        reason = (
+                            f"embedding model changed (was '{meta.get('embedding_model')}', "
+                            f"now '{model}')"
+                        )
 
             if reason:
-                print(f"[grc-agent] {domain} vector DB stale: {reason}. Rebuilding...")
+                _log.info("%s vector DB stale: %s. Rebuilding...", domain, reason)
                 os.remove(db_path)
             elif not dim_verified:
                 # DB is valid but the embedding dim couldn't be verified
@@ -399,9 +414,10 @@ def _build_db(domain: str, db_path: str, model: str | None) -> None:  # noqa: C9
             entry["total"] = total
 
     try:
-        print(
-            f"[grc-agent] {domain} vector DB not found or stale — building it now "
-            f"(first run only, may take a few minutes)..."
+        _log.info(
+            "%s vector DB not found or stale — building it now "
+            "(first run only, may take a few minutes)...",
+            domain,
         )
         from grc_agent import ingest
 
@@ -409,7 +425,7 @@ def _build_db(domain: str, db_path: str, model: str | None) -> None:  # noqa: C9
             count = ingest.ingest_catalog(db_path, model, on_progress=_on_progress)
         else:
             count = ingest.ingest_docs(db_path, model, on_progress=_on_progress)
-        print(f"[grc-agent] {domain} vector DB build complete: {db_path}")
+        _log.info("%s vector DB build complete: %s", domain, db_path)
         # `indexed` is the count actually indexed for lexical search (len(rows)),
         # which can be < `total` if some items failed to render — so the GUI's
         # "entries ready" message doesn't overclaim the processed count. It may
@@ -517,6 +533,7 @@ def _query_index(
     """
     db_path, model = get_db_and_model(domain)
     embed_error: str | None = None
+    query_capped = False
     query_vec: list[float] | None = None
     if model is not None:
         try:
@@ -565,11 +582,11 @@ def _query_index(
             distance_by_rowid = {}
             output_truncated = len(fts_rows) > limit
             search_mode = "lexical"
-            if fts_result and fts_result[1]:
-                extra_note = f" (lexical query capped to {_FTS_MAX_TOKENS} tokens)"
-                embed_error = (
-                    (embed_error or "") + extra_note if embed_error else extra_note.strip()
-                )
+            # Separate flag, NOT folded into embed_error: the truncation note
+            # must be disclosed in every backend mode (no silent
+            # transformation), while embed_error stays reserved for a real
+            # embedding-call failure.
+            query_capped = bool(fts_result and fts_result[1])
 
         id_by_rowid: dict[int, Any] = {}
         if ranked_rowids:
@@ -588,6 +605,7 @@ def _query_index(
             "distance_by_rowid": distance_by_rowid,
             "output_truncated": output_truncated,
             "embed_error": embed_error,
+            "query_capped": query_capped,
         }
     finally:
         conn.close()
@@ -629,8 +647,14 @@ def query_catalog(query: str, limit: int = 5) -> dict[str, Any]:
         "output_truncated": result["output_truncated"],
         "search_mode": result["search_mode"],
     }
-    if result["search_mode"] == "lexical" and resolve_embed_backend(load_settings()) == "llamacpp":
-        response["message"] = _lexical_fallback_message(result["embed_error"])
+    if result["search_mode"] == "lexical":
+        if result["query_capped"]:
+            # Disclosed in every backend mode (no silent transformation).
+            response["message"] = (
+                f"Lexical search truncated the query to the first {_FTS_MAX_TOKENS} word tokens."
+            )
+        elif result["embed_error"] or resolve_embed_backend(load_settings()) == "llamacpp":
+            response["message"] = _lexical_fallback_message(result["embed_error"])
     return response
 
 
@@ -726,6 +750,12 @@ def query_docs(query: str, limit: int = 5) -> dict[str, Any]:
         "answer": answer,
         "search_mode": result["search_mode"],
     }
-    if result["search_mode"] == "lexical" and resolve_embed_backend(load_settings()) == "llamacpp":
-        response["message"] = _lexical_fallback_message(result["embed_error"])
+    if result["search_mode"] == "lexical":
+        if result["query_capped"]:
+            # Disclosed in every backend mode (no silent transformation).
+            response["message"] = (
+                f"Lexical search truncated the query to the first {_FTS_MAX_TOKENS} word tokens."
+            )
+        elif result["embed_error"] or resolve_embed_backend(load_settings()) == "llamacpp":
+            response["message"] = _lexical_fallback_message(result["embed_error"])
     return response

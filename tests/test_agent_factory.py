@@ -33,9 +33,17 @@ def test_settings_custom_ollama_url(tmp_path, monkeypatch):
     assert cfg2["ollama_base_url"] == "http://192.168.1.100:11434"
 
 
-def test_agent_factory_custom_ollama_url(monkeypatch):
+def test_agent_factory_custom_ollama_url(tmp_path, monkeypatch):
     """Test build_agents_from_cfg passes custom base_url to the provider."""
+    from grc_agent import db
     from grc_agent.agent_factory import build_agents_from_cfg, probe_backend
+
+    # Redirect the step store to a fresh tmp DB: the factory eagerly binds
+    # StepPersistence via init_db(), whose orphan sweeps DELETE rows — never
+    # against the developer's real .grc_agent/chat_sessions.db.
+    monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
+    db._initialized_paths.clear()
+    db._step_stores.clear()
 
     cfg = {
         "provider": "ollama_local",

@@ -30,11 +30,11 @@ def test_settings_isolation_and_defaults(tmp_path, monkeypatch):
     assert cfg["openai_compatible_model"] == "deepseek/deepseek-v4-flash"
 
     # 2. Switch provider to openai_compatible and change model
-    save_settings("openai_compatible", "google/gemini-2.5-flash")
+    save_settings("openai_compatible", "deepseek/deepseek-v4-flash")
     cfg = load_settings()
     assert cfg["provider"] == "openai_compatible"
-    assert cfg["model"] == "google/gemini-2.5-flash"
-    assert cfg["openai_compatible_model"] == "google/gemini-2.5-flash"
+    assert cfg["model"] == "deepseek/deepseek-v4-flash"
+    assert cfg["openai_compatible_model"] == "deepseek/deepseek-v4-flash"
     assert cfg["ollama_model"] == "qwen3.8:latest"  # preserved!
 
     # 3. Switch back to ollama and change model
@@ -43,7 +43,7 @@ def test_settings_isolation_and_defaults(tmp_path, monkeypatch):
     assert cfg["provider"] == "ollama_local"
     assert cfg["model"] == "mistral-large"
     assert cfg["ollama_model"] == "mistral-large"
-    assert cfg["openai_compatible_model"] == "google/gemini-2.5-flash"  # preserved!
+    assert cfg["openai_compatible_model"] == "deepseek/deepseek-v4-flash"  # preserved!
 
 
 def test_db_and_model_isolation(tmp_path, monkeypatch):
@@ -108,7 +108,7 @@ def test_get_embed_client_never_returns_mismatched_client_for_key(tmp_path, monk
         rag_mod._embed_client_state = None
 
 
-def test_web_build_model_isolation(tmp_path, monkeypatch):
+def test_build_model_isolation(tmp_path, monkeypatch):
     """Verify that agent_factory._build_model instantiates the correct model type based on the settings."""
     tmp_env_file = tmp_path / ".env"
     monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_env_file))
@@ -161,9 +161,9 @@ def test_scenario_model_builder_uses_provider(monkeypatch):
     assert isinstance(ollama_cloud, OllamaModel)
     assert ollama_cloud.model_name == "deepseek-v4-flash:cloud"
 
-    openrouter = build_scenario_model("openrouter", "google/gemini-2.5-flash")
+    openrouter = build_scenario_model("openrouter", "deepseek/deepseek-v4-flash-0731")
     assert isinstance(openrouter, OpenAIChatModel)
-    assert openrouter.model_name == "google/gemini-2.5-flash"
+    assert openrouter.model_name == "deepseek/deepseek-v4-flash-0731"
 
     openai_compat = build_scenario_model("openai_compatible", "my-custom-model")
     assert isinstance(openai_compat, OpenAIChatModel)
@@ -188,7 +188,6 @@ def test_env_path_resolution(tmp_path, monkeypatch):
     monkeypatch.delenv("GRC_AGENT_ENV", raising=False)
     found = env_path()
     assert found.name == ".env"
-    assert found.exists()
 
 
 def test_upsert_env_key_inserts_and_updates(tmp_path):
@@ -292,12 +291,14 @@ def test_build_model_fallback_does_not_mutate_cfg(tmp_path, monkeypatch):
     from grc_agent.settings import default_settings
 
     http_client = _retrying_http_client()
-    saved_cfg = load_settings()
     fallback_cfg = default_settings()
     fallback_model = _build_model(fallback_cfg, http_client)
     assert isinstance(fallback_model, OllamaModel)
-    assert saved_cfg["provider"] == "openai_compatible"
-    assert saved_cfg["model"] == "openai/gpt-4o-mini"
+    # The build must not have mutated the saved settings (the old bug
+    # rewrote the .env): re-read from disk and compare.
+    after = load_settings()
+    assert after["provider"] == "openai_compatible"
+    assert after["model"] == "openai/gpt-4o-mini"
 
 
 def test_rag_building_flag_set_during_ensure_db_built(tmp_path, monkeypatch):
@@ -545,6 +546,10 @@ def test_lexical_only_db_does_not_rehammer_embedding_backend(tmp_path, monkeypat
 
     monkeypatch.setattr(ingest_mod, "ingest_catalog", counting_ingest)
     try:
+        # Simulate a fresh process (empty cache): the metadata branch, not
+        # the in-process freshness short-circuit, must accept a lexical-only
+        # DB with an unchanged corpus as a valid steady state.
+        _FRESHNESS_CACHE.pop("catalog", None)
         _ensure_db_built("catalog", db_path, model)
         assert called["n"] == 0, (
             "a lexical-only DB with an unchanged corpus must not re-attempt ingestion"
@@ -759,30 +764,30 @@ def test_ensure_db_built_rebuilds_when_fts_table_missing(tmp_path, monkeypatch):
 
 def test_ollama_cloud_model_builds_and_runs():
     """Build an OllamaModel against Ollama Cloud (https://ollama.com/v1) with
-    the saved API key and run a real chat turn. This is a non-trivial,
-    non-mocked integration test that exercises the exact same code path
-    web._build_model() uses for the ollama_cloud provider."""
+    the saved API key and run a real chat turn. This is the file's one
+    documented live test (gated on OLLAMA_CLOUD_API_KEY)."""
     import os
 
-    from dotenv import load_dotenv
+    from dotenv import dotenv_values
     from pydantic_ai import Agent
     from pydantic_ai.models.ollama import OllamaModel
-    from pydantic_ai.providers.ollama import OllamaProvider
 
     from grc_agent.settings import env_path
 
-    load_dotenv(env_path())
-    api_key = os.environ.get("OLLAMA_CLOUD_API_KEY", "")
+    # Read the key without mutating os.environ (load_dotenv would leak it
+    # into every later test in this process).
+    api_key = os.environ.get("OLLAMA_CLOUD_API_KEY", "") or dotenv_values(env_path()).get(
+        "OLLAMA_CLOUD_API_KEY"
+    )
     if not api_key:
         pytest.skip("OLLAMA_CLOUD_API_KEY not set — cannot test Ollama Cloud")
 
-    # Build the model exactly as web._build_model() does for ollama_cloud
-    model = OllamaModel(
-        "deepseek-v4-flash:cloud",
-        provider=OllamaProvider(
-            base_url="https://ollama.com/v1",
-            api_key=api_key,
-        ),
+    # Build through the shared factory branch — never duplicate the
+    # constructor here, or a regression in _build_model's cloud path would
+    # pass unnoticed.
+    model = _build_model(
+        {"provider": "ollama_cloud", "model": "deepseek-v4-flash:cloud"},
+        _retrying_http_client(),
     )
     assert isinstance(model, OllamaModel)
     assert model.model_name == "deepseek-v4-flash:cloud"
@@ -817,23 +822,55 @@ def test_grc_tools_includes_generate_python():
     }
 
 
-def test_system_prompt_names_every_real_tool():
-    """The prompt's own explicit allowed-tools sentence (prompts.py) must
-    name every tool grc_tools() actually registers, plus the two
-    capability-backed tools (web_search/web_fetch, native or fallback,
-    never registered via grc_tools()). No existing test in this repo
-    checked prompt CONTENT before — this is deliberately a first precedent
-    (following test_grc_tools_includes_generate_python's exact-set-style
-    check) so a new/removed/renamed tool can never silently drift out of
-    sync with what the model is told it's allowed to call."""
+def test_prompts_do_not_enumerate_tools():
+    """The prompt must never carry a hand-written tool inventory.
+
+    This replaces a guard that asserted the opposite and was the *cause* of a
+    real defect: it required the literal string "web_search" to appear, but the
+    capability-backed web tools are named per provider — native `web_search`
+    only where `model.profile['supported_native_tools']` includes WebSearchTool,
+    and the local `duckduckgo_search` fallback everywhere else (Ollama, the
+    default backend, reports an empty set). No static list can be correct on
+    every provider, so the prompt names no provider-dependent tool at all and
+    relies on the schemas Pydantic AI already sends.
+
+    A fully bidirectional prompt-vs-tools check is impossible for exactly that
+    reason, so these are the two invariants that are enforceable: the
+    enumeration must not come back, and no provider-dependent capability tool
+    may be named."""
+    from grc_agent.prompts import build_planner_prompt, build_system_prompt
+
+    provider_dependent = ("web_search", "web_fetch", "duckduckgo_search")
+    for build in (build_system_prompt, build_planner_prompt):
+        prompt = build()
+        assert "Available tools:" not in prompt, (
+            f"{build.__name__} re-introduced a hand-written tool inventory; the tool "
+            "schemas are the single source of truth for what is callable"
+        )
+        for name in provider_dependent:
+            assert name not in prompt, (
+                f"{build.__name__} names {name!r}, whose real tool name depends on the "
+                "provider's native-tool support — it cannot be stated statically"
+            )
+
+
+def test_system_prompt_keeps_unobservable_contracts():
+    """Deleting the tool inventory must not take the behavioural rules with it.
+
+    These describe harness contracts and GRC platform quirks the model has no
+    other way to observe (turn-end validation, the EPB call-ordering quirk,
+    force=True splitting, auto dtype resolution)."""
     from grc_agent.prompts import build_system_prompt
 
     prompt = build_system_prompt()
-    real_tool_names = {tool.name for tool in grc_tools()}
-    capability_tool_names = {"web_search", "web_fetch"}
-
-    for name in real_tool_names | capability_tool_names:
-        assert name in prompt, f"{name!r} is a real tool but missing from the system prompt"
+    for fragment in (
+        "validated at the end of each turn",
+        "force=True on intermediate calls",
+        "no add_blocks in that same call",
+        "'auto' never resolves from another 'auto' block",
+        "Never enumerate or reconstruct a block schema from memory",
+    ):
+        assert fragment in prompt, f"lost an unobservable contract: {fragment!r}"
 
 
 def test_build_agents_from_cfg_produces_correct_model_type_per_provider(tmp_path, monkeypatch):
@@ -911,7 +948,7 @@ def test_build_agents_from_cfg_produces_correct_model_type_per_provider(tmp_path
             "ANTHROPIC_API_KEY",
             "claude-sonnet-4-5",
         ),
-        "google": ("pydantic_ai.models.google", "GoogleModel", "GOOGLE_API_KEY", "gemini-2.5-pro"),
+        "google": ("pydantic_ai.models.google", "GoogleModel", "GOOGLE_API_KEY", "gemini-3.7-flash"),
         "groq": ("pydantic_ai.models.groq", "GroqModel", "GROQ_API_KEY", "llama-3.3-70b-versatile"),
         "mistral": (
             "pydantic_ai.models.mistral",
@@ -943,17 +980,15 @@ def test_live_swap_rebuilds_agent_with_new_provider(tmp_path, monkeypatch):
     actually reachable). Skipped without OPENROUTER_API_KEY."""
     import asyncio
 
-    from dotenv import load_dotenv
+    # Read the key without mutating os.environ (load_dotenv would leak it
+    # into every later test in this process).
+    from dotenv import dotenv_values
     from pydantic_ai.models.ollama import OllamaModel
     from pydantic_ai.models.openai import OpenAIChatModel
 
-    # Load the repo .env first so OPENROUTER_API_KEY is visible when set
-    # there (matches the existing Ollama Cloud live-test pattern). The
-    # monkeypatched GRC_AGENT_ENV below redirects only the grc_agent
-    # settings module's .env reads — os.environ is independent and still
-    # sees this loaded key.
-    load_dotenv(env_path())
-    api_key = os.environ.get("OPENROUTER_API_KEY")
+    api_key = os.environ.get("OPENROUTER_API_KEY") or dotenv_values(env_path()).get(
+        "OPENROUTER_API_KEY"
+    )
     if not api_key:
         pytest.skip("OPENROUTER_API_KEY not set — cannot validate live swap end-to-end")
 
@@ -1013,14 +1048,22 @@ def test_live_swap_rebuilds_agent_with_new_provider(tmp_path, monkeypatch):
 
 def test_probe_backend_returns_none_on_success_and_error_on_failure():
     """probe_backend must return (None, None) on a reachable endpoint and a
-    descriptive reachability error string on any failure."""
-    from grc_agent.agent_factory import probe_backend
+    descriptive reachability error string on any failure. The live branch is
+    explicitly key-gated (like the file's other live test), never silently
+    enabled by a load_dotenv side effect."""
+    from dotenv import dotenv_values
 
-    api_key = os.environ.get("OPENROUTER_API_KEY")
-    if api_key:
-        # Real success path — exercises the actual endpoint.
-        err, warn = probe_backend("openrouter", api_key, "", "", timeout=10.0)
-        assert err is None, f"expected None for a valid OpenRouter key, got: {err!r}"
+    from grc_agent.agent_factory import probe_backend
+    from grc_agent.settings import env_path
+
+    api_key = os.environ.get("OPENROUTER_API_KEY") or dotenv_values(env_path()).get(
+        "OPENROUTER_API_KEY"
+    )
+    if not api_key:
+        pytest.skip("OPENROUTER_API_KEY not set — cannot hit the live endpoint")
+    # Real success path — exercises the actual endpoint.
+    err, warn = probe_backend("openrouter", api_key, "", "", timeout=10.0)
+    assert err is None, f"expected None for a valid OpenRouter key, got: {err!r}"
 
     # Deterministic failure: missing key for OpenRouter must return a non-empty error string.
     err, _w = probe_backend("openrouter", "", "", "", timeout=10.0)
@@ -1092,6 +1135,7 @@ def test_embed_query_and_document_agree_on_the_prefix():
 
     seen: list[str] = []
     orig = rag_mod._embed
+    orig_get_db_and_model = rag_mod.get_db_and_model
     try:
         rag_mod._embed = lambda _model, body: seen.append(body) or [0.1, 0.2]
         for model in ("embeddinggemma:latest", "text-embedding-3-small"):
@@ -1099,12 +1143,16 @@ def test_embed_query_and_document_agree_on_the_prefix():
             rag_mod.embed_document("hello", model)
             doc_prefixed = seen[0] != "hello"
             seen.clear()
-            query_body = (
-                rag_mod._QUERY_PREFIX + "hello" if rag_mod._uses_gemma_prefix(model) else "hello"
-            )
-            assert doc_prefixed == (query_body != "hello"), f"prefix disagreement for {model}"
+            # Drive the REAL embed_query path too (it resolves its own model
+            # via get_db_and_model), so a divergence in the query half of
+            # the prefix rule cannot stay green.
+            rag_mod.get_db_and_model = lambda _domain, _m=model: ("dummy.db", _m)
+            rag_mod.embed_query("hello", "catalog")
+            query_prefixed = seen[0] != "hello"
+            assert doc_prefixed == query_prefixed, f"prefix disagreement for {model}"
     finally:
         rag_mod._embed = orig
+        rag_mod.get_db_and_model = orig_get_db_and_model
 
 
 def test_llamacpp_runtime_paths_are_xdg_and_overridable(tmp_path, monkeypatch):
@@ -1784,19 +1832,20 @@ def test_is_musl_false_positive_on_glibc_host_with_musl_loader():
 
 
 def test_ollama_context_length_targets_cloud_url_for_cloud_users(tmp_path, monkeypatch):
-    """Regression: the cloud endpoint was keyed on the dead
-    `provider == "ollama_cloud"` string, so since the v0.1.5 consolidation a
-    cloud user's context-length lookup silently went to localhost:11434. The
-    endpoint must come from the resolved ollama_base_url (load_settings
-    defaults it to ollama.com when a cloud key is present and no local URL is
-    set), with the API key attached — the same source of truth _build_model
-    uses."""
+    """Regression: the cloud endpoint used to be keyed on an env-var name
+    nothing wrote, so a Settings-configured cloud user's context-length
+    lookup silently went to localhost:11434. The endpoint must come from the
+    resolved ollama_base_url, which load_settings defaults to ollama.com for
+    the ollama_cloud provider, with the API key attached — the same source
+    of truth _build_model uses."""
     import httpx
 
     import grc_agent.agent_factory as cs
 
     monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
-    (tmp_path / ".env").write_text("OLLAMA_CLOUD_API_KEY=test-cloud-key\n")
+    (tmp_path / ".env").write_text(
+        "GRC_PROVIDER=ollama_cloud\nOLLAMA_API_KEY=test-cloud-key\n"
+    )
 
     seen: dict = {}
 

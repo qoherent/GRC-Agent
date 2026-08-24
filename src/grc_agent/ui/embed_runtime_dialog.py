@@ -78,11 +78,14 @@ class EmbedRuntimeDialog(Gtk.Dialog):
             return
 
         if not plan["need_runtime"] and not plan["need_model"]:
+            # Nothing to install: relabeling the button "Reinstall" would
+            # promise an action provision() deliberately does not perform
+            # when everything is already present — disable it instead.
             self._status.set_text(
                 "The local embedding runtime is already installed.\n"
                 f"Location: {embed_runtime.data_dir()}"
             )
-            self._install_button.set_label("Reinstall")
+            self._install_button.set_sensitive(False)
             return
 
         if plan["need_runtime"] and not plan["runtime_available"]:

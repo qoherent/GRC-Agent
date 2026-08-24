@@ -75,18 +75,9 @@ ASSET_SUFFIX = {
     ("Darwin", "x86_64"): "macos-x64",
 }
 
-# Download size of each archive, for the confirmation prompt. These are the
-# compressed tarballs, which is what the progress callback counts, so the
-# figure offered and the figure shown agree. Tied to LLAMA_BUILD — update
-# together.
-ASSET_BYTES = {
-    ("Linux", "x86_64"): 16_507_165,
-    ("Linux", "aarch64"): 13_377_770,
-    ("Darwin", "arm64"): 11_015_270,
-    ("Darwin", "x86_64"): 11_290_712,
-}
-
-# Rough extracted size of the runtime, for the disk-space check.
+# Rough extracted size of the runtime, used by the disk-space check and as
+# the fallback figure for the consent prompt when the release API does not
+# publish a size (the wire's content-length drives the progress bar).
 RUNTIME_BYTES = 120_000_000
 
 # The QAT GGUF published by ggml-org. Some community quants of
@@ -282,7 +273,10 @@ def runtime_plan(key: tuple | None = None) -> dict:
         return out
 
     def upstream() -> dict:
-        out.update(kind="upstream", url=asset_url(key=key), size=ASSET_BYTES.get(key))
+        # Size is deliberately unknown up front: it comes live from the
+        # release API's content-length during download (progress bar), and
+        # download_plan() falls back to RUNTIME_BYTES for the consent prompt.
+        out.update(kind="upstream", url=asset_url(key=key), size=None)
         return out
 
     if key[0] != "Linux":
@@ -759,7 +753,9 @@ def _start_server(wait: float) -> str:
     if not log_file.exists():
         os.close(os.open(str(log_file), os.O_WRONLY | os.O_CREAT, 0o600))
     with open(log_file, "ab") as lf:
-        lf.write(f"\n=== start {time.strftime('%F %T')}: {' '.join(cmd)}\n".encode())
+        # Never log the API token: redact it from the recorded argv.
+        logged_cmd = [arg if arg != token else "***" for arg in cmd]
+        lf.write(f"\n=== start {time.strftime('%F %T')}: {' '.join(logged_cmd)}\n".encode())
         proc = subprocess.Popen(  # noqa: S603
             cmd,
             stdout=lf,
@@ -777,6 +773,14 @@ def _start_server(wait: float) -> str:
         if is_alive():
             return token
         time.sleep(0.3)
+    # Never orphan the child: it is detached (start_new_session) and would
+    # otherwise outlive the app holding the model resident with a dead
+    # socket, unreachable by stop_server().
+    proc.terminate()
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.kill()
     raise FetchError(f"llama-server did not become ready in {wait:.0f}s; see {log_file}")
 
 

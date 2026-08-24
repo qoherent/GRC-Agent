@@ -15,14 +15,9 @@ change.
 
 from __future__ import annotations
 
-import gi
-
-gi.require_version("Gtk", "3.0")
-gi.require_version("Gdk", "3.0")
-gi.require_version("Pango", "1.0")
 from gi.repository import Gdk, GLib, Gtk, Pango
 
-CODE_STYLE = "monokai"
+from .css import get_code_style
 
 
 def _parse_rule(rule: str) -> tuple[str | None, bool, bool]:
@@ -97,7 +92,7 @@ class _BufferStyler:
 class CodeBlock(Gtk.Box):
     """``[ header: language label | Copy ]`` over a highlighted, scrollable body."""
 
-    def __init__(self, lang: str, code: str, style_name: str = CODE_STYLE) -> None:
+    def __init__(self, lang: str, code: str) -> None:
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         self._code = code
         self.get_style_context().add_class("chat-code-block")
@@ -137,7 +132,7 @@ class CodeBlock(Gtk.Box):
         tv.set_right_margin(6)
         tv.set_top_margin(6)
         tv.set_bottom_margin(6)
-        self._highlight(tv.get_buffer(), lang, code, style_name)
+        self._highlight(tv.get_buffer(), lang, code)
 
         # Height pin — same uniform rule as the prose width pin: a row child
         # whose minimum < natural gets allocated its MINIMUM by the ListBox
@@ -178,7 +173,7 @@ class CodeBlock(Gtk.Box):
 
         GLib.timeout_add_seconds(2, _reset)
 
-    def _highlight(self, buffer: Gtk.TextBuffer, lang: str, code: str, style_name: str) -> None:
+    def _highlight(self, buffer: Gtk.TextBuffer, lang: str, code: str) -> None:
         try:
             from pygments import lex
             from pygments.lexers import get_lexer_by_name, guess_lexer
@@ -187,6 +182,7 @@ class CodeBlock(Gtk.Box):
             buffer.set_text(code)
             return
 
+        style_name = get_code_style(self)
         try:
             styles = get_style_by_name(style_name).styles
         except Exception:

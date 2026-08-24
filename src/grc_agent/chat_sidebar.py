@@ -12,8 +12,10 @@ Message history is stored as pydantic-ai's native ``ModelMessage`` objects.
 import asyncio
 import json
 import logging
+import os
 import time
 from collections.abc import Callable
+from dataclasses import dataclass, field
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -24,7 +26,6 @@ gi.require_version("Gtk", "3.0")
 gi.require_version("Gdk", "3.0")
 gi.require_version("Pango", "1.0")
 
-from uuid import uuid4
 
 from gi.repository import Gdk, GLib, GObject, Gtk, Pango
 from pydantic_ai import (
@@ -52,34 +53,54 @@ from pydantic_ai.messages import (
     TextPart,
     ThinkingPart,
     ToolCallPart,
+    ToolReturnPart,
     UserPromptPart,
 )
 from pydantic_graph import End
 
-from .agent_factory import resolve_model_context_length
+from .agent import GrcAgentResponse
+from .agent_factory import describe_model, resolve_model_context_length
+
+# Sourced from the model rather than retyped, so renaming a GrcAgentResponse
+# field breaks loudly at import instead of silently disabling the summary card.
+_SUMMARY_ACTIONS_FIELD = "actions_taken"
+_SUMMARY_EXPLANATION_FIELD = "explanation"
+assert {_SUMMARY_ACTIONS_FIELD, _SUMMARY_EXPLANATION_FIELD} <= set(GrcAgentResponse.model_fields), (
+    "GrcAgentResponse fields changed; _parse_final_summary must be updated to match"
+)
 from .db import (
+    archive_transcript,
     conversation_id_for_session,
     delete_all_sessions,
     delete_session,
     deserialize_messages,
-    get_step_store,
     load_plan_items,
     load_session,
     save_session,
+    user_prompt_text,
 )
 from .settings import (
     get_env_value,
+    get_theme_mode,
     load_settings,
     save_settings,
+    set_theme_mode,
     upsert_env_key,
 )
 from .ui.css import apply_css as _apply_css
+from .ui.css import apply_theme, is_dark_theme
 from .ui.markdown_view import MarkdownView
 from .ui.providers import (
     PROVIDER_API_KEY as _PROVIDER_API_KEY,
 )
 from .ui.providers import (
     PROVIDER_BADGE_LABEL as _PROVIDER_BADGE_LABEL,
+)
+from .ui.providers import (
+    PROVIDER_BASE_URL_SETTING as _PROVIDER_BASE_URL_SETTING,
+)
+from .ui.providers import (
+    PROVIDER_KEY_OPTIONAL as _PROVIDER_KEY_OPTIONAL,
 )
 from .ui.providers import (
     PROVIDER_LABELS as _PROVIDER_LABELS,
@@ -114,6 +135,56 @@ def _format_tool_display(text: str, max_chars: int = _MAX_TOOL_DISPLAY_CHARS) ->
     return f"{text[:half]}\n\n... [truncated {len(text) - max_chars} chars] ...\n\n{text[-half:]}"
 
 
+# Expander labels and plain-text transcript fragments. One definition each,
+# shared by the streaming and history render paths, which previously built the
+# same strings independently and had already drifted in spelling: the same gear
+# was written both as "\u2699" and as a literal "⚙", the same check as
+# "\u2713" and "✓", the same cross as "\u2717" and "✗".
+_GEAR = "\u2699"
+_CHECK = "\u2713"
+_CROSS = "\u2717"
+_WARN = "\u26a0"
+
+
+def _tool_label(name: str, *, ok: bool = True, retry: bool = False) -> str:
+    """The expander title for a settled tool call."""
+    if retry:
+        return f"{_WARN} {name} retry"
+    return f"{_GEAR} {name} {_CHECK if ok else _CROSS}"
+
+
+def _tool_label_running(name: str) -> str:
+    return f"{_GEAR} {name} ..."
+
+
+def _transcript_tool_call(name: str, args: str, result: str | None = None) -> str:
+    """The Copy-action transcript fragment for one tool call."""
+    head = f"<Tool Call: {name}>\nArgs: {args}\n"
+    return head if result is None else f"{head}Result: {result}\n"
+
+
+def _transcript_tool_result(result: str) -> str:
+    """The Copy-action fragment for a tool return that arrived separately from
+    its call (the streaming path sees the two as distinct events)."""
+    return f"<Tool Result: {result}>\n"
+
+
+def _transcript_summary(actions: list[str], explanation: str) -> str:
+    return f"<Summary>\n{actions}\n{explanation}\n</Summary>\n"
+
+
+def _tool_args_text(part: ToolCallPart | NativeToolCallPart) -> str:
+    """The tool call's arguments as the model actually sent them.
+
+    ``args_as_json_str()`` rather than ``str(part.args)``: the latter renders a
+    dict through ``repr``, so the panel showed Python literal syntax
+    (``{'k': 'v'}``) for a payload that was JSON on the wire (``{"k":"v"}``).
+    """
+    if not part.args:
+        return ""
+    return part.args_as_json_str()
+
+
 def _parse_final_summary(args: Any) -> tuple[list[str], str] | None:
     """Recover the model's final structured output from a `final_result` tool call.
 
@@ -122,6 +193,13 @@ def _parse_final_summary(args: Any) -> tuple[list[str], str] | None:
     are the GrcAgentResponse JSON (`actions_taken` + `explanation`). Returns
     (actions, explanation) when the args carry that shape, else None — the
     caller then renders the call as an ordinary tool expander instead.
+
+    Deliberately NOT `GrcAgentResponse.model_validate`: this also runs on
+    partially-streamed args, where `explanation` has not arrived yet, and both
+    strict validation and pydantic's `experimental_allow_partial` reject a
+    missing required field (verified) — so the summary card would collapse back
+    to a raw-JSON expander mid-stream. The keys are taken from the model's own
+    field names so a rename cannot silently desync the two.
     """
     if not args:
         return None
@@ -134,8 +212,8 @@ def _parse_final_summary(args: Any) -> tuple[list[str], str] | None:
         data = args
     else:
         return None
-    actions = data.get("actions_taken")
-    explanation = data.get("explanation")
+    actions = data.get(_SUMMARY_ACTIONS_FIELD)
+    explanation = data.get(_SUMMARY_EXPLANATION_FIELD)
     if not isinstance(actions, list) or not all(isinstance(a, str) for a in actions):
         return None
     if not isinstance(explanation, str):
@@ -182,7 +260,7 @@ def _extract_body_message(body) -> str:
     return str(body.get("message") or body.get("detail") or body)
 
 
-def _extract_cause_message(cause: Exception) -> str:
+def _extract_cause_message(cause: BaseException) -> str:
     """Best-effort human message from an exception chain cause.
 
     Prefers the provider's JSON error payload (httpx response or ``body``
@@ -346,36 +424,27 @@ class _ChunkAccumulator:
         return str(self) == other if isinstance(other, str) else super().__eq__(other)
 
 
+@dataclass(slots=True)
 class _StreamCtx:
     """Per-call mutable streaming state — held outside ``send_message``
-    so the node/event handler helpers can stay small and flat."""
+    so the node/event handler helpers can stay small and flat.
 
-    __slots__ = (
-        "box",
-        "text_lbl",
-        "text_acc",
-        "text_dirty",
-        "think_body",
-        "think_expander",
-        "think_acc",
-        "think_dirty",
-        "tools",
-        "full_raw_text",
-        "last_flush",
-    )
+    A pure state bag: the hand-written ``__slots__`` tuple plus an ``__init__``
+    that only assigned defaults are exactly what ``@dataclass(slots=True)``
+    generates, and the two could drift out of sync by hand.
+    """
 
-    def __init__(self, box: Gtk.Box) -> None:
-        self.box = box
-        self.text_lbl: Gtk.TextView | None = None
-        self.text_acc = _ChunkAccumulator()
-        self.text_dirty = False
-        self.think_body: Any = None
-        self.think_expander: Gtk.Expander | None = None
-        self.think_acc = _ChunkAccumulator()
-        self.think_dirty = False
-        self.tools: dict[str, Gtk.Expander] = {}
-        self.full_raw_text = _ChunkAccumulator()
-        self.last_flush = 0.0
+    box: Gtk.Box
+    text_lbl: Gtk.TextView | None = None
+    text_acc: _ChunkAccumulator = field(default_factory=_ChunkAccumulator)
+    text_dirty: bool = False
+    think_body: Any = None
+    think_expander: Gtk.Expander | None = None
+    think_acc: _ChunkAccumulator = field(default_factory=_ChunkAccumulator)
+    think_dirty: bool = False
+    tools: dict[str, Gtk.Expander] = field(default_factory=dict)
+    full_raw_text: _ChunkAccumulator = field(default_factory=_ChunkAccumulator)
+    last_flush: float = 0.0
 
 
 class _ChatTextView(Gtk.ScrolledWindow):
@@ -430,8 +499,6 @@ class _ChatTextView(Gtk.ScrolledWindow):
     def connect(self, detailed_signal: str, handler: Any, *args: Any) -> int:
         if detailed_signal == "changed":
             return self.tv.get_buffer().connect("changed", handler, *args)
-        if detailed_signal == "activate":
-            return 0
         return self.tv.connect(detailed_signal, handler, *args)
 
 
@@ -447,13 +514,13 @@ def _collect_token_usage(msgs) -> tuple[int, int, int, int, Decimal | None, bool
     has_usage = False
     cost_complete = True
     for msg in msgs:
-        if msg.__class__.__name__ == "ModelRequest":
-            if any(isinstance(part, UserPromptPart) for part in getattr(msg, "parts", [])):
+        if isinstance(msg, ModelRequest):
+            if any(isinstance(part, UserPromptPart) for part in msg.parts):
                 turn_cost = Decimal(0)
                 has_usage = False
                 cost_complete = True
             continue
-        if msg.__class__.__name__ != "ModelResponse" or not hasattr(msg, "usage") or not msg.usage:
+        if not isinstance(msg, ModelResponse) or not msg.usage:
             continue
         u = msg.usage
         inp = getattr(u, "input_tokens", 0) or 0
@@ -538,9 +605,9 @@ class ChatSidebar(Gtk.Box):
         super().__init__(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
         _apply_css()
         self.get_style_context().add_class("chat-sidebar")
-        self._agent: Agent | None = None
-        self._executor_agent: Agent | None = None
-        self._planner_agent: Agent | None = None
+        self._agent: Agent[Any, Any] | None = None
+        self._executor_agent: Agent[Any, Any] | None = None
+        self._planner_agent: Agent[Any, Any] | None = None
         self._agent_mode = "executor"
         self._changing_agent_mode = False
         # Live-swap callback: when the Settings dialog saves a new provider/
@@ -587,34 +654,34 @@ class ChatSidebar(Gtk.Box):
         self._clear_generation: int = 0
         self._chat_task: asyncio.Task | None = None
         self._compact_task: asyncio.Task | None = None
+        self._fix_task: asyncio.Task | None = None
         self._implement_plan_task: asyncio.Task | None = None
         self._implement_plan_row: Gtk.ListBoxRow | None = None
         self._implement_plan_button: Gtk.Button | None = None
+        self._project_directory: Path | None = None
+        self._proj_chooser: Gtk.FileChooserButton | None = None
         # Set by shutting_down() (called from desktop_app.py's _shutdown)
         # just before stop_chat(). _run_agent_turn's finally block checks
         # this to skip widget operations on widgets that are mid-destroy
         # when the window closes (L7).
         self._shutting_down: bool = False
+        # Declared here rather than only assigned mid-turn: three readers used
+        # `self._active_run` to survive the pre-first-turn
+        # window, which also hid the type from mypy.
+        self._active_run: Any = None
         # Per-domain last-seen RAG build status, so the poller only writes the
         # status bar on transitions (and while building) — never when idle.
         # Catalog and docs build independently and can run concurrently.
         self._last_index_state: dict[str, str] = {}
         self._last_index_msg: str | None = None
-        # Holds the currently-open non-blocking modal dialog so the gbulb loop
-        # keeps pumping while it's shown. A non-blocking toplevel shown via
-        # .show() would be garbage-collected once the constructing method
-        # returns (PyGObject holds no Python-side root ref), so we anchor it
-        # here and clear it in the response handler.
+        self._active_graph_name: str | None = None
+        self._active_graph_path: str | None = None
         self._open_dialog: Gtk.Dialog | None = None
 
         # Slim side toggle for GRC block library
         self._blocks_toggle = Gtk.Button()
         self._blocks_toggle.set_tooltip_text("Toggle block library")
         self._blocks_toggle.get_style_context().add_class("chat-side-toggle")
-        self._blocks_toggle.set_valign(Gtk.Align.FILL)
-        self._blocks_arrow = Gtk.Image.new_from_icon_name(
-            "pan-end-symbolic", Gtk.IconSize.SMALL_TOOLBAR
-        )
         self._blocks_toggle.set_valign(Gtk.Align.FILL)
         self._blocks_arrow = Gtk.Image.new_from_icon_name(
             "pan-end-symbolic", Gtk.IconSize.SMALL_TOOLBAR
@@ -628,6 +695,7 @@ class ChatSidebar(Gtk.Box):
         # Vertical content area
         content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         self._content = content
+        self._build_project_bar(content)
         self._build_toolbar(content)
         self._build_message_list(content)
         self._md = MarkdownView(self._listbox, self._get_cm)
@@ -636,10 +704,14 @@ class ChatSidebar(Gtk.Box):
             self._send_quick_prompt,
             self._on_recent_session_clicked,
             self._on_delete_recent_session,
+            self._on_clear_history_clicked,
         )
         self._build_input_area(content)
         self._build_status_bar(content)
         self.pack_start(content, True, True, 0)
+
+        # Apply saved theme mode
+        apply_theme(get_theme_mode())
 
         self.connect("key-press-event", self._on_key_press_event)
 
@@ -658,6 +730,81 @@ class ChatSidebar(Gtk.Box):
             self._open_settings()
             return True
         return False
+
+    def _build_project_bar(self, content: Gtk.Box) -> None:
+        bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        bar.set_border_width(4)
+        bar.get_style_context().add_class("chat-project-bar")
+
+        label = Gtk.Label(label="Project:")
+        label.get_style_context().add_class("chat-project-label")
+        bar.pack_start(label, False, False, 0)
+
+        self._proj_label = Gtk.Label(label="")
+        self._proj_label.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
+        self._proj_label.set_max_width_chars(32)
+        self._proj_label.set_xalign(0.0)
+        self._proj_label.get_style_context().add_class("chat-header-badge")
+        bar.pack_start(self._proj_label, True, True, 0)
+
+        self._browse_btn = Gtk.Button(label="Browse")
+        self._browse_btn.set_tooltip_text("Select project directory")
+        self._browse_btn.get_style_context().add_class("chat-compact-btn")
+        self._browse_btn.connect("clicked", self._on_browse_clicked)
+        bar.pack_start(self._browse_btn, False, False, 0)
+
+        saved_dir = get_env_value("GRC_PROJECT_DIR")
+        if saved_dir and Path(saved_dir).is_dir():
+            self._project_directory = Path(saved_dir).resolve()
+        else:
+            self._project_directory = Path.cwd().resolve()
+
+        self._proj_label.set_text(self._project_directory.name or str(self._project_directory))
+        self._proj_label.set_tooltip_text(str(self._project_directory))
+
+        content.pack_start(bar, False, False, 0)
+
+    def _on_browse_clicked(self, _btn: Gtk.Button) -> None:
+        top = self.get_toplevel()
+        parent_win = top if isinstance(top, Gtk.Window) else None
+        dialog = Gtk.FileChooserDialog(
+            title="Select Project Directory",
+            parent=parent_win,
+            action=Gtk.FileChooserAction.SELECT_FOLDER,
+        )
+        dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
+        dialog.add_button("Select", Gtk.ResponseType.OK)
+        dialog.set_default_response(Gtk.ResponseType.OK)
+        if self._project_directory and self._project_directory.is_dir():
+            dialog.set_current_folder(str(self._project_directory))
+
+        response = dialog.run()
+        if response == Gtk.ResponseType.OK:
+            selected = dialog.get_filename()
+            if selected:
+                self.set_project_directory(selected)
+        dialog.destroy()
+
+    def get_project_directory(self) -> Path | None:
+        """The currently selected project directory."""
+        return self._project_directory
+
+    def set_project_directory(self, path: Path | str | None) -> None:
+        """Programmatically set and persist the project directory."""
+        if path:
+            p = Path(path).resolve()
+            self._project_directory = p
+            if hasattr(self, "_proj_label") and self._proj_label:
+                self._proj_label.set_text(p.name or str(p))
+                self._proj_label.set_tooltip_text(str(p))
+            upsert_env_key("GRC_PROJECT_DIR", str(p))
+            self.set_status(f"Project: {p.name}")
+        else:
+            self._project_directory = None
+            if hasattr(self, "_proj_label") and self._proj_label:
+                self._proj_label.set_text("None")
+                self._proj_label.set_tooltip_text("No project directory set")
+            upsert_env_key("GRC_PROJECT_DIR", "")
 
     def _build_toolbar(self, content: Gtk.Box) -> None:
         bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
@@ -678,34 +825,26 @@ class ChatSidebar(Gtk.Box):
             return b
 
         self._new_session_btn = _icon_btn(
-            "document-new-symbolic", "New chat session", "new-session-clicked"
+            "document-new-symbolic", "New chat", "new-session-clicked"
         )
-        self._clear_hist_btn = _icon_btn(
-            "edit-clear-all-symbolic",
-            "Clear conversation history",
-            cb=self._on_clear_history_clicked,
-        )
-        # Active graph badge — expands to fill the toolbar's leftover space.
-        self._graph_label = Gtk.Label(label="Active Graph · none")
-        self._graph_label.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
-        self._graph_label.set_max_width_chars(26)
-        self._graph_label.get_style_context().add_class("chat-header-badge")
-        self.set_active_graph(None)
-        bar.pack_start(self._graph_label, True, True, 2)
 
         # Active provider badge — reflects the *running* agent's actual
-        # provider/model, not the saved .env (which can diverge after a
-        # Settings save until a live-swap or restart). Updated by
-        # set_active_provider on startup and after every live-swap.
+        # provider/model. Expands across the toolbar.
         self._provider_label = Gtk.Label(label="")
         self._provider_label.set_tooltip_text(
-            "The provider/model the running chat agent is using right now. "
-            "Settings changes apply immediately on Save."
+            "Active provider/model. Click Preferences (Ctrl+,) to change settings."
         )
         self._provider_label.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
-        self._provider_label.set_max_width_chars(34)
+        self._provider_label.set_max_width_chars(42)
         self._provider_label.get_style_context().add_class("chat-header-badge")
-        bar.pack_start(self._provider_label, True, True, 0)
+        bar.pack_start(self._provider_label, True, True, 2)
+
+        # Quick Theme Toggle
+        self._theme_btn = _icon_btn(
+            "weather-clear-night-symbolic",
+            "Toggle Dark (Black) / Light theme",
+            cb=self._on_theme_toggle_clicked,
+        )
 
         # Settings
         self._gear_btn = _icon_btn(
@@ -716,6 +855,21 @@ class ChatSidebar(Gtk.Box):
 
         bar.get_style_context().add_class("chat-toolbar")
         content.pack_start(bar, False, False, 0)
+
+    def _on_theme_toggle_clicked(self, _btn: Gtk.Button | None = None) -> None:
+        current = get_theme_mode()
+        new_mode = (
+            "light"
+            if (current == "dark" or (current == "system" and is_dark_theme()))
+            else "dark"
+        )
+        set_theme_mode(new_mode)
+        apply_theme(new_mode)
+        self.set_status(f"Theme: {'Dark (Black)' if new_mode == 'dark' else 'Light'}")
+        self._render_history()
+        toplevel = self.get_toplevel()
+        if isinstance(toplevel, Gtk.Window):
+            toplevel.queue_draw()
 
     def _build_message_list(self, content: Gtk.Box) -> None:
         self._listbox = Gtk.ListBox()
@@ -744,7 +898,7 @@ class ChatSidebar(Gtk.Box):
         box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
 
         self._entry = _ChatTextView()
-        self._entry.set_placeholder_text("Open a flowgraph in GRC to start chatting...")
+        self._entry.set_placeholder_text("Ask a question or request changes...")
         self._entry.set_hexpand(True)
         self._entry.connect("key-press-event", self._on_entry_key_press)
         self._entry.connect("changed", lambda *_: self._update_send_sensitivity())
@@ -779,20 +933,15 @@ class ChatSidebar(Gtk.Box):
         self._context_label.set_margin_bottom(2)
         context_row.pack_start(self._context_label, True, True, 0)
 
-        self._planner_mode_label = Gtk.Label(label="GRC-Agent Active")
-        self._planner_mode_label.set_ellipsize(Pango.EllipsizeMode.END)
-        self._planner_mode_label.set_max_width_chars(17)
-        self._planner_mode_label.get_style_context().add_class("chat-agent-mode-label")
-        context_row.pack_start(self._planner_mode_label, False, False, 0)
-
-        self._planner_toggle = Gtk.Switch()
+        self._planner_toggle = Gtk.ToggleButton(label="Agent")
         self._planner_toggle.set_valign(Gtk.Align.CENTER)
-        self._planner_toggle.set_tooltip_text(
-            "Switch between the GRC agent and the read-only planner. "
-            "Activating it in an existing conversation immediately requests a plan."
-        )
+        self._planner_toggle.get_style_context().add_class("chat-mode-btn")
+        self._planner_toggle.get_style_context().add_class("chat-mode-agent")
         self._planner_toggle.get_accessible().set_name("Planner mode")
-        self._planner_toggle.connect("notify::active", self._on_planner_toggled)
+        self._planner_toggle.connect("toggled", self._on_planner_toggled)
+        self._planner_toggle.get_text = self._planner_toggle.get_label
+        self._planner_mode_label = self._planner_toggle
+        self._update_agent_mode_label()
         context_row.pack_start(self._planner_toggle, False, False, 0)
 
         self._compact_btn = Gtk.Button(label="Compact")
@@ -813,7 +962,7 @@ class ChatSidebar(Gtk.Box):
         """Update the context usage label under the input box using Pydantic AI's native msg.usage."""
         msgs = (
             self._active_run.all_messages()
-            if getattr(self, "_active_run", None)
+            if self._active_run is not None
             else self._message_history
         )
         (
@@ -831,10 +980,10 @@ class ChatSidebar(Gtk.Box):
         # last-response semantic — it is the context size at the end of the
         # turn.
         last_output_tokens, last_reasoning_tokens = _run_usage_output_override(
-            getattr(self, "_active_run", None), last_output_tokens, last_reasoning_tokens
+            self._active_run, last_output_tokens, last_reasoning_tokens
         )
         last_turn_cost, has_usage = _run_usage_cost_override(
-            getattr(self, "_active_run", None), last_turn_cost, has_usage
+            self._active_run, last_turn_cost, has_usage
         )
 
         active_provider = getattr(self, "_active_provider", "") or ""
@@ -844,55 +993,54 @@ class ChatSidebar(Gtk.Box):
         pct: float | None = None
         if not msgs or last_input_tokens == 0:
             if max_context:
-                text = f"<span size='small'>Context: 0 / {format_tokens(max_context)} tokens</span>"
+                text = f"<span size='small'>0 / {format_tokens(max_context)} tok</span>"
             else:
-                text = "<span size='small'>Context: 0 tokens</span>"
+                text = "<span size='small'>0 tok</span>"
         else:
             if max_context:
                 pct = min(100.0, (last_input_tokens / max_context) * 100)
                 text = (
                     f"<span size='small'>"
-                    f"Context: {format_tokens(last_input_tokens)} / {format_tokens(max_context)} tokens ({pct:.0f}%)"
+                    f"{format_tokens(last_input_tokens)} / {format_tokens(max_context)} tok ({pct:.0f}%)"
                     f"</span>"
                 )
             else:
                 text = (
-                    f"<span size='small'>Context: {format_tokens(last_input_tokens)} tokens</span>"
+                    f"<span size='small'>{format_tokens(last_input_tokens)} tok</span>"
                 )
 
         if has_usage:
             cost_text = (
                 f"Cost: {_format_native_cost(last_turn_cost)}"
                 if last_turn_cost is not None
-                else "Cost: unavailable"
+                else "Cost: N/A"
             )
             text = text.replace("</span>", f" · {cost_text}</span>")
 
-        if hasattr(self, "_context_label"):
-            # Escalation ramp via CSS classes (ui/css.py): quiet at 0-74%,
-            # bold at 75-89%, theme accent at >=90%. No hardcoded colors.
-            ctx_classes = self._context_label.get_style_context()
-            ctx_classes.remove_class("warn")
-            ctx_classes.remove_class("alarm")
-            if pct is not None:
-                if pct >= 90:
-                    ctx_classes.add_class("alarm")
-                elif pct >= 75:
-                    ctx_classes.add_class("warn")
-            self._context_label.set_markup(text)
-            reasoning_str = (
-                f" ({last_reasoning_tokens:,} reasoning)" if last_reasoning_tokens else ""
-            )
-            self._context_label.set_tooltip_text(
-                f"Active model: {active_model or 'default'}\n"
-                f"Provider: {active_provider or 'unknown'}\n"
-                f"Last turn input context: {last_input_tokens:,} tokens\n"
-                f"Last turn output: {last_output_tokens:,} tokens{reasoning_str}\n"
-                f"Total session tokens: {total_session_tokens:,} tokens\n"
-                f"Native Pydantic AI last-turn cost: "
-                f"{_format_native_cost(last_turn_cost) if last_turn_cost is not None else 'unavailable for one or more provider/model responses'}\n"
-                f"Max model context: {f'{max_context:,}' if max_context else 'unknown'}"
-            )
+        # Escalation ramp via CSS classes (ui/css.py): quiet at 0-74%,
+        # bold at 75-89%, theme accent at >=90%. No hardcoded colors.
+        ctx_classes = self._context_label.get_style_context()
+        ctx_classes.remove_class("warn")
+        ctx_classes.remove_class("alarm")
+        if pct is not None:
+            if pct >= 90:
+                ctx_classes.add_class("alarm")
+            elif pct >= 75:
+                ctx_classes.add_class("warn")
+        self._context_label.set_markup(text)
+        reasoning_str = (
+            f" ({last_reasoning_tokens:,} reasoning)" if last_reasoning_tokens else ""
+        )
+        self._context_label.set_tooltip_text(
+            f"Active model: {active_model or 'default'}\n"
+            f"Provider: {active_provider or 'unknown'}\n"
+            f"Last turn input context: {last_input_tokens:,} tokens\n"
+            f"Last turn output: {last_output_tokens:,} tokens{reasoning_str}\n"
+            f"Total session tokens: {total_session_tokens:,} tokens\n"
+            f"Native Pydantic AI last-turn cost: "
+            f"{_format_native_cost(last_turn_cost) if last_turn_cost is not None else 'unavailable for one or more provider/model responses'}\n"
+            f"Max model context: {f'{max_context:,}' if max_context else 'unknown'}"
+        )
 
     def _build_status_bar(self, content: Gtk.Box) -> None:
         bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
@@ -969,15 +1117,14 @@ class ChatSidebar(Gtk.Box):
     def set_active_graph(self, name: str | None, path: str | None = None) -> None:
         self._active_graph_name = name
         self._active_graph_path = path
-        self._graph_label.set_text(f"Active Graph · {name}" if name else "Active Graph · none")
-        if name and path:
-            self._graph_label.set_tooltip_text(f"Active Flowgraph: {name}\nFull Path: {path}")
-        elif name:
-            self._graph_label.set_tooltip_text(
-                f"Active Flowgraph: {name}\nFull Path: (Unsaved / In-memory)"
-            )
-        else:
-            self._graph_label.set_tooltip_text("No flowgraph currently active or open in GRC")
+        if hasattr(self, "_graph_label") and self._graph_label is not None:
+            self._graph_label.set_text(f"{name}" if name else "none")
+            if name and path:
+                self._graph_label.set_tooltip_text(f"Graph: {name}\nPath: {path}")
+            elif name:
+                self._graph_label.set_tooltip_text(f"Graph: {name}\nPath: (Unsaved)")
+            else:
+                self._graph_label.set_tooltip_text("No flowgraph open")
 
     def _domain_label(self, domain: str | None) -> str:
         if domain == "catalog":
@@ -1055,7 +1202,7 @@ class ChatSidebar(Gtk.Box):
             transient_for=self.get_toplevel()
             if isinstance(self.get_toplevel(), Gtk.Window)
             else None,
-            flags=Gtk.DialogFlags.MODAL,
+            modal=True,
             message_type=Gtk.MessageType.QUESTION,
             buttons=Gtk.ButtonsType.YES_NO,
             text="Clear ALL Chat History",
@@ -1142,41 +1289,32 @@ class ChatSidebar(Gtk.Box):
 
     async def _run_compact_now(self) -> None:
         try:
-            from pydantic_ai_harness.compaction._manual import compact_now
-            from pydantic_ai_harness.step_persistence import (
-                ContinuableSnapshot,
-                RunRecord,
-            )
+            from pydantic_ai_harness.compaction import compact_now
 
             from .agent_factory import make_summarizing_strategy
 
+            # _on_compact_clicked guarantees an agent before spawning; derive
+            # the model here (inside the try, so no early return can skip the
+            # finally that clears busy).
+            agent = self._agent
+            model = agent.model if agent is not None else None
+
             # D3: snapshot the pre-compact history first so ConversationSearch
-            # can still recall what the summary drops. The run id mirrors
-            # StepPersistence's own derivation ('{agent_name}-{8-hex}').
+            # can still recall what the summary drops.
             sid = self._active_session_id
             if sid is not None:
-                store = get_step_store()
-                conv = conversation_id_for_session(sid)
-                agent_name = f"grc_{self._agent_mode}"
-                rid = f"{agent_name}-{uuid4().hex[:8]}"
-                await store.register_run(
-                    RunRecord(run_id=rid, conversation_id=conv, agent_name=agent_name)
-                )
-                await store.save_snapshot(
-                    ContinuableSnapshot(
-                        run_id=rid,
-                        step_index=0,
-                        messages=self._message_history,
-                        conversation_id=conv,
-                        agent_name=agent_name,
-                    )
+                await archive_transcript(
+                    self._message_history,
+                    conversation_id=conversation_id_for_session(sid),
+                    agent_name=self._archive_agent_name(),
+                    kind="manual_compaction_transcript",
                 )
 
             strategy = make_summarizing_strategy()
             compacted = await compact_now(
                 strategy,
                 self._message_history,
-                model=self._agent.model,  # D1: model=None inherits this
+                model=model,  # D1: model=None inherits this
             )
             strategy_keep = strategy.keep_messages
             had_work = len(self._message_history) > strategy_keep
@@ -1243,7 +1381,7 @@ class ChatSidebar(Gtk.Box):
 
     def grab_entry_focus(self) -> bool:
         """Grab keyboard focus for the chat text entry box if sensitive."""
-        if hasattr(self, "_entry") and self._entry.get_sensitive():
+        if self._entry.get_sensitive():
             self._entry.grab_focus()
             return True
         return False
@@ -1287,8 +1425,8 @@ class ChatSidebar(Gtk.Box):
 
     def set_agents(
         self,
-        executor: Agent,
-        planner: Agent,
+        executor: Agent[Any, Any],
+        planner: Agent[Any, Any],
         model_error: str | None = None,
     ) -> None:
         """Install both roles while preserving the user's selected mode."""
@@ -1302,13 +1440,9 @@ class ChatSidebar(Gtk.Box):
         # — OllamaProvider.name returns "ollama" for both local and cloud, so
         # only base_url can tell them apart). See _PROVIDER_BASE_URL.
         model = getattr(executor, "model", None)
-        model_name = ""
+        transport_provider, base_url, model_name = describe_model(model)
         resolved_provider = ""
-        base_url = ""
         if model is not None:
-            model_name = getattr(model, "_model_name", getattr(model, "model_name", "")) or ""
-            provider = getattr(model, "_provider", None) or getattr(model, "provider", None)
-            base_url = str(getattr(provider, "base_url", "") or "")
             resolved_provider = _resolve_provider_from_base_url(base_url)
             # A local Ollama on a custom port/LAN host has no ":11434" marker
             # in its URL — the transport's own provider name is the authority
@@ -1316,7 +1450,7 @@ class ChatSidebar(Gtk.Box):
             # the URL already split cloud from local above).
             if (
                 resolved_provider == "openai_compatible"
-                and str(getattr(provider, "name", "")) == "ollama"
+                and transport_provider == "ollama"
             ):
                 resolved_provider = "ollama_local"
         try:
@@ -1342,8 +1476,6 @@ class ChatSidebar(Gtk.Box):
         """Reset role selection without dispatching a planner turn."""
         self._agent_mode = "executor"
         self._agent = self._executor_agent
-        if not hasattr(self, "_planner_toggle"):
-            return
         self._changing_agent_mode = True
         try:
             self._planner_toggle.set_active(False)
@@ -1352,12 +1484,24 @@ class ChatSidebar(Gtk.Box):
         self._update_agent_mode_label()
 
     def _update_agent_mode_label(self) -> None:
-        if hasattr(self, "_planner_mode_label"):
-            self._planner_mode_label.set_text(
-                "Planner active" if self._agent_mode == "planner" else "GRC-Agent Active"
+        is_planner = self._agent_mode == "planner"
+        ctx = self._planner_toggle.get_style_context()
+        if is_planner:
+            self._planner_toggle.set_label("Planner")
+            self._planner_toggle.set_tooltip_text(
+                "Planner mode active (read-only plan generator). Click to switch to Agent mode."
             )
+            ctx.remove_class("chat-mode-agent")
+            ctx.add_class("chat-mode-planner")
+        else:
+            self._planner_toggle.set_label("Agent")
+            self._planner_toggle.set_tooltip_text(
+                "Agent mode active (edits flowgraph & files). Click to switch to Planner mode."
+            )
+            ctx.remove_class("chat-mode-planner")
+            ctx.add_class("chat-mode-agent")
 
-    def _on_planner_toggled(self, button: Gtk.Switch, _pspec: Any = None) -> None:
+    def _on_planner_toggled(self, button: Gtk.ToggleButton, _pspec: Any = None) -> None:
         if self._changing_agent_mode:
             return
         if self._busy:
@@ -1408,7 +1552,9 @@ class ChatSidebar(Gtk.Box):
             return
         short_model = model.rsplit("/", 1)[-1]
         badge_label = _PROVIDER_BADGE_LABEL.get(provider, provider)
-        self._provider_label.set_text(f"{badge_label} \u00b7 {short_model}")
+        self._provider_label.set_markup(
+            f"<span size='small'>{GLib.markup_escape_text(badge_label, -1)} \u00b7 {GLib.markup_escape_text(short_model, -1)}</span>"
+        )
 
         provider_title = _PROVIDER_LABELS.get(provider, provider.capitalize())
         # base_url is the running model's own provider URL; when it is empty
@@ -1433,9 +1579,7 @@ class ChatSidebar(Gtk.Box):
 
     def set_flowgraph_proxy(self, proxy: object) -> None:
         self._flowgraph_proxy = proxy
-        cm = getattr(proxy, "_canvas_manager", None)
-        path = cm.path if cm else None
-        self.sync_to_file(path)
+        self.sync_to_file()
 
     @property
     def current_page(self) -> Any:
@@ -1444,7 +1588,7 @@ class ChatSidebar(Gtk.Box):
         cm = getattr(self._flowgraph_proxy, "_canvas_manager", None)
         return cm.current_page if cm else None
 
-    def sync_to_file(self, path: str | None) -> None:  # noqa: ARG002
+    def sync_to_file(self) -> None:
         """Called when the active graph changes (tab switch / open / close).
 
         Graphs NEVER auto-load chats. The only entry point for loading a
@@ -1478,6 +1622,10 @@ class ChatSidebar(Gtk.Box):
         self._clear_generation += 1
         if self._chat_task and not self._chat_task.done():
             self._chat_task.cancel()
+        if self._compact_task and not self._compact_task.done():
+            self._compact_task.cancel()
+        if self._fix_task and not self._fix_task.done():
+            self._fix_task.cancel()
         if self._implement_plan_task and not self._implement_plan_task.done():
             self._implement_plan_task.cancel()
         self._implement_plan_task = None
@@ -1517,21 +1665,11 @@ class ChatSidebar(Gtk.Box):
             return
 
         for msg in self._message_history:
-            cls_name = msg.__class__.__name__
-            if cls_name == "ModelRequest":
+            if isinstance(msg, ModelRequest):
                 for part in msg.parts:
-                    if part.__class__.__name__ == "UserPromptPart":
-                        content = part.content
-                        if not isinstance(content, str):
-                            parts = []
-                            for item in content:
-                                if hasattr(item, "text"):
-                                    parts.append(item.text)
-                                elif isinstance(item, str):
-                                    parts.append(item)
-                            content = "".join(parts)
-                        self._append_user_message(content)
-            elif cls_name == "ModelResponse":
+                    if isinstance(part, UserPromptPart):
+                        self._append_user_message(user_prompt_text(part))
+            elif isinstance(msg, ModelResponse):
                 box = self._start_agent_message()
                 self._render_last_message_rich(box, msg)
         self._scroll_to_bottom(force=True)
@@ -1670,7 +1808,10 @@ class ChatSidebar(Gtk.Box):
             return
         if new_id is not None and gen != self._clear_generation:
             try:
-                delete_session(new_id)
+                # Off-thread like the save two lines above: this is the undo for
+                # that same write, and it was the one SQLite call in this async
+                # function still running on the GLib loop.
+                await asyncio.to_thread(delete_session, new_id)
             except Exception:
                 _log.exception("Failed to remove session resurrected by in-flight save")
 
@@ -1684,31 +1825,11 @@ class ChatSidebar(Gtk.Box):
         if session_id is None:
             return False
         try:
-            from pydantic_ai_harness.step_persistence import (
-                ContinuableSnapshot,
-                RunRecord,
-            )
-
-            store = get_step_store()
-            conversation_id = conversation_id_for_session(session_id)
-            agent_name = f"grc_{agent_mode}"
-            run_id = f"{agent_name}-truncated-{uuid4().hex[:8]}"
-            await store.register_run(
-                RunRecord(
-                    run_id=run_id,
-                    conversation_id=conversation_id,
-                    agent_name=agent_name,
-                    metadata={"kind": "truncated_thinking_transcript"},
-                )
-            )
-            await store.save_snapshot(
-                ContinuableSnapshot(
-                    run_id=run_id,
-                    step_index=0,
-                    messages=messages,
-                    conversation_id=conversation_id,
-                    agent_name=agent_name,
-                )
+            await archive_transcript(
+                messages,
+                conversation_id=conversation_id_for_session(session_id),
+                agent_name=f"grc_{agent_mode}",
+                kind="truncated_thinking_transcript",
             )
             return True
         except Exception:
@@ -1720,6 +1841,8 @@ class ChatSidebar(Gtk.Box):
             self._chat_task.cancel()
         if self._compact_task and not self._compact_task.done():
             self._compact_task.cancel()
+        if self._fix_task and not self._fix_task.done():
+            self._fix_task.cancel()
         if self._implement_plan_task and not self._implement_plan_task.done():
             self._implement_plan_task.cancel()
             self._implement_plan_task = None
@@ -1751,7 +1874,7 @@ class ChatSidebar(Gtk.Box):
                     tcid = event.part.tool_call_id or ""
                     exp = ctx.tools.get(tcid)
                     if exp is not None:
-                        self._set_tool_status(exp, "running")
+                        self._set_tool_status(exp)
                 elif isinstance(event, FunctionToolResultEvent):
                     tcid = event.tool_call_id or ""
                     exp = ctx.tools.get(tcid)
@@ -1760,11 +1883,11 @@ class ChatSidebar(Gtk.Box):
                             res_str = event.part.model_response()
                             name = getattr(exp, "_grc_tool_name", "?")
                             self._set_tool_body(exp, res_str)
-                            exp.set_label(f"⚠ {name} retry")
+                            exp.set_label(_tool_label(name, retry=True))
                         else:
                             res_str = str(event.part.content)
                             self._set_tool_result(exp, res_str)
-                        ctx.full_raw_text += f"<Tool Result: {res_str}>\n"
+                        ctx.full_raw_text += _transcript_tool_result(res_str)
                         self._update_copy_text(ctx.box, ctx.full_raw_text)
 
     def _on_part_start(self, ctx: _StreamCtx, event: PartStartEvent) -> None:
@@ -1793,17 +1916,17 @@ class ChatSidebar(Gtk.Box):
                 widget = self._make_final_summary_widget(*summary)
                 ctx.box.pack_start(widget, False, False, 0)
                 widget.show_all()
-                ctx.full_raw_text += f"<Summary>\n{summary[0]}\n{summary[1]}\n</Summary>\n"
+                ctx.full_raw_text += _transcript_summary(*summary)
                 self._update_copy_text(ctx.box, ctx.full_raw_text)
                 return
             exp = self._make_tool_expander(part.tool_name or "?")
-            args_str = str(part.args) if part.args else ""
+            args_str = _tool_args_text(part)
             if args_str:
                 self._set_tool_body(exp, args_str)
             ctx.box.pack_start(exp, False, False, 0)
             exp.show_all()
             ctx.tools[tcid] = exp
-            ctx.full_raw_text += f"<Tool Call: {part.tool_name}>\nArgs: {args_str}\n"
+            ctx.full_raw_text += _transcript_tool_call(part.tool_name or "?", args_str)
             self._update_copy_text(ctx.box, ctx.full_raw_text)
         elif isinstance(part, NativeToolCallPart):
             # Native tool calls (e.g. provider-native web_search/web_fetch) never
@@ -1814,13 +1937,13 @@ class ChatSidebar(Gtk.Box):
             self._close_thinking(ctx)
             tcid = part.tool_call_id or ""
             exp = self._make_tool_expander(part.tool_name or "?")
-            args_str = str(part.args) if part.args else ""
+            args_str = _tool_args_text(part)
             if args_str:
                 self._set_tool_body(exp, args_str)
             ctx.box.pack_start(exp, False, False, 0)
             exp.show_all()
             ctx.tools[tcid] = exp
-            ctx.full_raw_text += f"<Tool Call: {part.tool_name}>\nArgs: {args_str}\n"
+            ctx.full_raw_text += _transcript_tool_call(part.tool_name or "?", args_str)
             self._update_copy_text(ctx.box, ctx.full_raw_text)
         elif isinstance(part, NativeToolReturnPart):
             tcid = part.tool_call_id or ""
@@ -1828,7 +1951,7 @@ class ChatSidebar(Gtk.Box):
             if exp is not None:
                 res_str = str(part.content)
                 self._set_tool_result(exp, res_str)
-                ctx.full_raw_text += f"<Tool Result: {res_str}>\n"
+                ctx.full_raw_text += _transcript_tool_result(res_str)
                 self._update_copy_text(ctx.box, ctx.full_raw_text)
         elif isinstance(part, ThinkingPart):
             self._close_text(ctx)
@@ -1924,6 +2047,8 @@ class ChatSidebar(Gtk.Box):
 
     def _flush_text(self, ctx: _StreamCtx) -> None:
         """Append only new visible text; markdown is rendered after the part closes."""
+        if ctx.text_lbl is None:
+            return
         buffer = ctx.text_lbl.get_buffer()
         delta = ctx.text_acc.drain_new()
         if delta:
@@ -1979,9 +2104,6 @@ class ChatSidebar(Gtk.Box):
         # HPaned divider aside mid-stream.
         if self._md is not None:
             self._md.pin_to_column(tv)
-        tv.get_text = lambda: tv.get_buffer().get_text(  # type: ignore[attr-defined]
-            tv.get_buffer().get_start_iter(), tv.get_buffer().get_end_iter(), True
-        )
         return tv
 
     def _make_thinking_textview(self, text: str = "") -> Gtk.TextView:
@@ -1995,10 +2117,7 @@ class ChatSidebar(Gtk.Box):
         # thinking line must not shove the HPaned divider either.
         if self._md is not None:
             self._md.pin_to_column(tv, extra=24)
-        tv.set_text = lambda t: tv.get_buffer().set_text(t)  # type: ignore[attr-defined]
-        tv.get_text = lambda: tv.get_buffer().get_text(  # type: ignore[attr-defined]
-            tv.get_buffer().get_start_iter(), tv.get_buffer().get_end_iter(), True
-        )
+        tv.set_text = lambda t: tv.get_buffer().set_text(t)
         if text:
             tv.set_text(text)
         return tv
@@ -2138,8 +2257,72 @@ class ChatSidebar(Gtk.Box):
         )
 
     def _render_markdown_to_box(self, box: Gtk.Box, text: str, clear: bool = True) -> None:
-        """Render markdown into ``box``. Delegates to the MarkdownView."""
-        self._md.render(box, text, clear)
+        """Render markdown into ``box``. Delegates to the MarkdownView, which
+        does not exist until __init__ has built the message list."""
+        if self._md is not None:
+            self._md.render(box, text, clear)
+
+    async def _recover_history_after_failure(
+        self,
+        active_run: Any,
+        *,
+        session_id: int | None,
+        agent_mode: str,
+        fallback_text: str,
+    ) -> bool:
+        """Salvage a failed turn's messages into `_message_history`.
+
+        Returns True when a truncated-thinking tail was archived and dropped, so
+        the caller can explain that specific failure. The cancel and exception
+        paths of `_run_agent_turn` each carried a verbatim copy of this sequence;
+        with no run to salvage from, or if the salvage itself fails, the user's
+        prompt is re-remembered so it is not lost from the history.
+        """
+        if active_run is None:
+            self._remember_user_message(fallback_text)
+            return False
+        try:
+            failed_messages = _clean_message_history_for_new_turn(active_run.all_messages())
+            cleaned_messages, had_truncated_thinking = _without_truncated_thinking_tail(
+                failed_messages
+            )
+            archived = False
+            if had_truncated_thinking and await self._archive_truncated_thinking(
+                failed_messages, session_id, agent_mode
+            ):
+                failed_messages = cleaned_messages
+                archived = True
+            self._message_history = failed_messages
+            return archived
+        except Exception:
+            self._remember_user_message(fallback_text)
+            return False
+
+    def _archive_agent_name(self) -> str:
+        """StepPersistence's agent name for the active role — the same value
+        `agent_factory` passes as `agent_name=`, derived in one place."""
+        return f"grc_{self._agent_mode}"
+
+    def _function_returns_by_call_id(self) -> dict[str, ToolReturnPart | RetryPromptPart]:
+        """Index every function-tool outcome in the history by its call id.
+
+        Built once per render. The previous version re-scanned the whole history
+        from scratch inside the per-part loop, making a full re-render
+        O(messages x parts) for every tool call it drew. Mirrors the
+        `native_returns` pre-scan the render already did for native tools.
+
+        First-wins: pydantic-ai issues one outcome per `tool_call_id` (a retry
+        gets a fresh id), so a second entry for the same id would be corruption,
+        not a newer result.
+        """
+        by_id: dict[str, ToolReturnPart | RetryPromptPart] = {}
+        for msg in self._message_history:
+            if not isinstance(msg, ModelRequest):
+                continue
+            for part in msg.parts:
+                if isinstance(part, ToolReturnPart | RetryPromptPart) and part.tool_call_id:
+                    by_id.setdefault(part.tool_call_id, part)
+        return by_id
 
     def _render_last_message_rich(self, box: Gtk.Box, msg: ModelMessage) -> None:  # noqa: C901
         for child in box.get_children():
@@ -2161,87 +2344,56 @@ class ChatSidebar(Gtk.Box):
         native_returns = {
             p.tool_call_id: p for p in msg.parts if isinstance(p, NativeToolReturnPart)
         }
+        function_returns = self._function_returns_by_call_id()
         for part in msg.parts:
-            part_cls = part.__class__.__name__
             if isinstance(part, NativeToolReturnPart):
                 continue
-            if part_cls == "TextPart":
+            if isinstance(part, TextPart):
                 self._render_markdown_to_box(box, part.content, clear=False)
                 full_text += part.content
-            elif part_cls == "ThinkingPart":
+            elif isinstance(part, ThinkingPart):
                 exp, _tv = self._make_thinking_widget(part.content, label="Thought")
                 box.pack_start(exp, True, True, 0)
                 exp.show_all()
                 full_text += f"<Thinking>\n{part.content}\n</Thinking>\n"
-            elif part_cls == "ToolCallPart":
+            elif isinstance(part, ToolCallPart | NativeToolCallPart):
                 tool_name = part.tool_name or "?"
-                summary = _parse_final_summary(part.args)
-                if tool_name == "final_result" and summary is not None:
-                    # Same summary-card treatment as the streaming path — a
-                    # re-render (e.g. after a settings live-swap) must not
-                    # degrade the final structured output back to raw JSON.
-                    widget = self._make_final_summary_widget(*summary)
-                    box.pack_start(widget, False, False, 0)
-                    widget.show_all()
-                    full_text += f"<Summary>\n{summary[0]}\n{summary[1]}\n</Summary>\n"
-                    continue
+                if isinstance(part, ToolCallPart):
+                    summary = _parse_final_summary(part.args)
+                    if tool_name == "final_result" and summary is not None:
+                        # Same summary-card treatment as the streaming path — a
+                        # re-render (e.g. after a settings live-swap) must not
+                        # degrade the final structured output back to raw JSON.
+                        widget = self._make_final_summary_widget(*summary)
+                        box.pack_start(widget, False, False, 0)
+                        widget.show_all()
+                        full_text += _transcript_summary(*summary)
+                        continue
+                    ret_part: ToolReturnPart | RetryPromptPart | NativeToolReturnPart | None = (
+                        function_returns.get(part.tool_call_id or "")
+                    )
+                else:
+                    ret_part = native_returns.get(part.tool_call_id)
+
                 exp = self._make_tool_expander(tool_name)
-                args_str = str(part.args) if part.args else ""
+                args_str = _tool_args_text(part)
                 self._set_tool_body(exp, args_str)
 
-                tcid = part.tool_call_id
-                ret_content, is_success, is_retry = "", True, False
-                if tcid:
-                    for m in self._message_history:
-                        if m.__class__.__name__ == "ModelRequest":
-                            for p in m.parts:
-                                if (
-                                    p.__class__.__name__ == "ToolReturnPart"
-                                    and p.tool_call_id == tcid
-                                ):
-                                    ret_content = str(p.content)
-                                    is_success = p.outcome != "failed"
-                                    break
-                                if isinstance(p, RetryPromptPart) and p.tool_call_id == tcid:
-                                    ret_content = p.model_response()
-                                    is_retry = True
-                                    break
+                if isinstance(ret_part, RetryPromptPart):
+                    ret_content, ok, retry = ret_part.model_response(), True, True
+                elif ret_part is not None:
+                    ret_content = str(ret_part.content)
+                    ok, retry = ret_part.outcome != "failed", False
+                else:
+                    ret_content, ok, retry = "", True, False
 
                 if ret_content:
                     self._set_tool_body(exp, ret_content)
-                    if is_retry:
-                        exp.set_label(f"⚠ {tool_name} retry")
-                    elif is_success:
-                        exp.set_label(f"\u2699 {tool_name} \u2713")
-                    else:
-                        exp.set_label(f"\u2699 {tool_name} \u2717")
-                    full_text += (
-                        f"<Tool Call: {tool_name}>\nArgs: {args_str}\nResult: {ret_content}\n"
-                    )
+                    exp.set_label(_tool_label(tool_name, ok=ok, retry=retry))
+                    full_text += _transcript_tool_call(tool_name, args_str, ret_content)
                 else:
-                    exp.set_label(f"\u2699 {tool_name} ✓")
-                    full_text += f"<Tool Call: {tool_name}>\nArgs: {args_str}\n"
-
-                box.pack_start(exp, False, False, 0)
-                exp.show_all()
-            elif isinstance(part, NativeToolCallPart):
-                tool_name = part.tool_name or "?"
-                exp = self._make_tool_expander(tool_name)
-                args_str = str(part.args) if part.args else ""
-                self._set_tool_body(exp, args_str)
-
-                ret_part = native_returns.get(part.tool_call_id)
-                if ret_part is not None:
-                    ret_content = str(ret_part.content)
-                    is_success = ret_part.outcome != "failed"
-                    self._set_tool_body(exp, ret_content)
-                    exp.set_label(f"⚙ {tool_name} {'✓' if is_success else '✗'}")
-                    full_text += (
-                        f"<Tool Call: {tool_name}>\nArgs: {args_str}\nResult: {ret_content}\n"
-                    )
-                else:
-                    exp.set_label(f"⚙ {tool_name} ✓")
-                    full_text += f"<Tool Call: {tool_name}>\nArgs: {args_str}\n"
+                    exp.set_label(_tool_label(tool_name))
+                    full_text += _transcript_tool_call(tool_name, args_str)
 
                 box.pack_start(exp, False, False, 0)
                 exp.show_all()
@@ -2410,7 +2562,7 @@ class ChatSidebar(Gtk.Box):
         return box
 
     def _make_tool_expander(self, tool_name: str) -> Gtk.Expander:
-        exp = Gtk.Expander(label=f"\u2699 {tool_name} ...")
+        exp = Gtk.Expander(label=_tool_label_running(tool_name))
         exp.set_expanded(False)
         exp.get_style_context().add_class("chat-tool-expander")
         exp.set_hexpand(True)
@@ -2437,15 +2589,14 @@ class ChatSidebar(Gtk.Box):
         if body is not None:
             body.set_text(_format_tool_display(text))
 
-    def _set_tool_status(self, exp: Gtk.Expander, status: str) -> None:
+    def _set_tool_status(self, exp: Gtk.Expander) -> None:
         name = getattr(exp, "_grc_tool_name", "?")
-        if status == "running":
-            exp.set_label(f"\u2699 {name} ...")
+        exp.set_label(_tool_label_running(name))
 
     def _set_tool_result(self, exp: Gtk.Expander, result: str) -> None:
         self._set_tool_body(exp, result)
         name = getattr(exp, "_grc_tool_name", "?")
-        exp.set_label(f"\u2699 {name} \u2713")
+        exp.set_label(_tool_label(name))
 
     def _append_error(self, message: str, style: str = "error") -> None:
         """Append an inline status label to the chat log.
@@ -2480,7 +2631,7 @@ class ChatSidebar(Gtk.Box):
             f"Flowgraph run failed (return code {return_code}). "
             "Use the get_run_log tool to read the console output and diagnose the error."
         )
-        asyncio.ensure_future(self._send_fix_when_free(prompt, origin_page))
+        self._fix_task = asyncio.ensure_future(self._send_fix_when_free(prompt, origin_page))
 
     async def _send_fix_when_free(self, text: str, origin_page: Any) -> None:
         """Wait out any in-flight agent turn, then send `text` as the next
@@ -2552,26 +2703,6 @@ class ChatSidebar(Gtk.Box):
         self._auto_scroll = True
         self._append_user_message(text)
 
-        if self._active_session_id is None:
-            path = self._get_effective_path()
-            if path:
-                try:
-                    # Save with the user prompt included inline — NOT by
-                    # mutating _message_history. agent.iter(text, ...) below
-                    # appends `text` to the canonical history itself; if we
-                    # pre-loaded it into _message_history here, the success
-                    # path's run.result.all_messages() would contain the
-                    # prompt TWICE (once from our pre-load, once from
-                    # pydantic-ai's own append) and _render_history() would
-                    # display it twice. Keeping _message_history clean until
-                    # the run completes avoids that duplication (M2 fix).
-                    history_with_prompt = self._message_history + [
-                        ModelRequest(parts=[UserPromptPart(content=text)])
-                    ]
-                    self._active_session_id = save_session(None, path, history_with_prompt)
-                except Exception as e:
-                    _log.error("Failed to create new session in database: %s", e)
-
         self._set_busy(True)
         self._chat_task = asyncio.ensure_future(self._run_agent_turn(text))
         self._chat_task.add_done_callback(self._on_chat_task_done)
@@ -2581,22 +2712,47 @@ class ChatSidebar(Gtk.Box):
         """Record the user's just-sent prompt into the canonical history on a
         failed turn, so it is persisted and survives the next render instead of
         being wiped along with the error bubble."""
-        self._message_history = self._message_history + [
-            ModelRequest(parts=[UserPromptPart(content=text)])
-        ]
+        self._message_history = [*self._message_history, ModelRequest.user_text_prompt(text)]
 
     async def _run_agent_turn(self, text: str) -> None:  # noqa: C901
         rich_rendered = False
         origin_page = self.current_page
         origin_gen = self._clear_generation
         origin_agent_mode = self._agent_mode
-        origin_session_id = self._active_session_id
         ctx: _StreamCtx | None = None
         active_run: Any = None
         try:
             if self._agent is None:
                 self._append_error("No agent configured.")
                 return
+
+            # Create the session row off the unified loop (the same
+            # asyncio.to_thread rule _save_history follows — never a blocking
+            # SQLite INSERT on the GLib loop) BEFORE capturing the origin
+            # session id, so conversation grouping, the plan handoff, and the
+            # archive paths all see it. Payload: the user prompt included
+            # inline — NOT by mutating _message_history. agent.iter(text, ...)
+            # appends `text` to the canonical history itself; if we pre-loaded
+            # it into _message_history here, the success path's
+            # run.result.all_messages() would contain the prompt TWICE (once
+            # from our pre-load, once from pydantic-ai's own append) and
+            # _render_history() would display it twice. Keeping
+            # _message_history clean until the run completes avoids that
+            # duplication (M2 fix).
+            if self._active_session_id is None:
+                path = self._get_effective_path()
+                if path:
+                    try:
+                        history_with_prompt = [
+                            *self._message_history,
+                            ModelRequest.user_text_prompt(text),
+                        ]
+                        self._active_session_id = await asyncio.to_thread(
+                            save_session, None, path, history_with_prompt
+                        )
+                    except Exception as e:
+                        _log.error("Failed to create new session in database: %s", e)
+            origin_session_id = self._active_session_id
 
             try:
                 cfg = load_settings()
@@ -2605,8 +2761,7 @@ class ChatSidebar(Gtk.Box):
                 configured_provider = self._active_provider
 
             key_var = _PROVIDER_API_KEY.get(configured_provider)
-            if key_var and configured_provider not in ("ollama_local", "openai_compatible"):
-                import os
+            if key_var and configured_provider not in _PROVIDER_KEY_OPTIONAL:
                 key_val = get_env_value(key_var) or os.environ.get(key_var)
                 if not key_val:
                     provider_title = _PROVIDER_LABELS.get(
@@ -2695,53 +2850,25 @@ class ChatSidebar(Gtk.Box):
                 rich_rendered = True
         except asyncio.CancelledError:
             if self.current_page is origin_page and self._clear_generation == origin_gen:
-                if active_run is not None:
-                    try:
-                        failed_messages = _clean_message_history_for_new_turn(
-                            active_run.all_messages()
-                        )
-                        cleaned_messages, had_truncated_thinking = (
-                            _without_truncated_thinking_tail(failed_messages)
-                        )
-                        if had_truncated_thinking and await self._archive_truncated_thinking(
-                            failed_messages,
-                            origin_session_id,
-                            origin_agent_mode,
-                        ):
-                            failed_messages = cleaned_messages
-                        self._message_history = failed_messages
-                    except Exception:
-                        self._remember_user_message(text)
-                else:
-                    self._remember_user_message(text)
+                await self._recover_history_after_failure(
+                    active_run,
+                    session_id=origin_session_id,
+                    agent_mode=origin_agent_mode,
+                    fallback_text=text,
+                )
                 asyncio.ensure_future(self._save_history())
                 self._append_error("[aborted]", style="aborted")
                 rich_rendered = True
             raise
         except Exception as e:
             _log.exception("agent run failed")
-            truncated_thinking_archived = False
             if self.current_page is origin_page:
-                if active_run is not None:
-                    try:
-                        failed_messages = _clean_message_history_for_new_turn(
-                            active_run.all_messages()
-                        )
-                        cleaned_messages, had_truncated_thinking = (
-                            _without_truncated_thinking_tail(failed_messages)
-                        )
-                        if had_truncated_thinking and await self._archive_truncated_thinking(
-                            failed_messages,
-                            origin_session_id,
-                            origin_agent_mode,
-                        ):
-                            failed_messages = cleaned_messages
-                            truncated_thinking_archived = True
-                        self._message_history = failed_messages
-                    except Exception:
-                        self._remember_user_message(text)
-                else:
-                    self._remember_user_message(text)
+                truncated_thinking_archived = await self._recover_history_after_failure(
+                    active_run,
+                    session_id=origin_session_id,
+                    agent_mode=origin_agent_mode,
+                    fallback_text=text,
+                )
                 await self._save_history()
                 if truncated_thinking_archived:
                     self._append_error(
@@ -2800,7 +2927,8 @@ class ChatSidebar(Gtk.Box):
         can_type = self._flowgraph_proxy is not None
         self._gear_btn.set_sensitive(not busy)
         self._new_session_btn.set_sensitive(not busy)
-        self._clear_hist_btn.set_sensitive(not busy)
+        if hasattr(self, "_theme_btn"):
+            self._theme_btn.set_sensitive(not busy)
         self._compact_btn.set_sensitive(not busy and bool(self._message_history))
         self._planner_toggle.set_sensitive(not busy)
         if self._implement_plan_button is not None:
@@ -2898,30 +3026,21 @@ class ChatSidebar(Gtk.Box):
         key_val: str,
         base_url: str,
         embed_backend: str,
+        theme: str | None = None,
     ) -> None:
         """Write the new config to `.env`. Base-URL routing: editable-URL
         providers (ollama_local, openai_compatible) persist their URL var;
         fixed-endpoint providers (ollama_cloud, openrouter, openai) have a
         canonical URL that is never persisted; ChatGPT/Codex has neither a
         base URL nor an API key."""
-        if provider == "openai_codex":
-            save_settings(provider, model, embed_backend=embed_backend)
-        elif provider == "openai_compatible":
-            save_settings(
-                provider,
-                model,
-                openai_compatible_base_url=base_url,
-                embed_backend=embed_backend,
-            )
-        elif provider == "ollama_local":
-            save_settings(
-                provider,
-                model,
-                ollama_base_url=base_url,
-                embed_backend=embed_backend,
-            )
-        else:
-            save_settings(provider, model, embed_backend=embed_backend)
+        url_kwarg = _PROVIDER_BASE_URL_SETTING.get(provider)
+        save_settings(
+            provider,
+            model,
+            embed_backend=embed_backend,
+            theme=theme,
+            **({url_kwarg: base_url} if url_kwarg else {}),
+        )
         if key_var:
             upsert_env_key(key_var, key_val)
 
@@ -2933,6 +3052,7 @@ class ChatSidebar(Gtk.Box):
         key_val: str,
         base_url: str = "http://localhost:11434",
         embed_backend: str = "lexical",
+        theme: str = "system",
     ) -> None:
         """Post-Save flow: preflight → persist → live-swap.
 
@@ -2970,7 +3090,11 @@ class ChatSidebar(Gtk.Box):
         # 2. Persist to .env synchronously — tests assert on load_settings()
         #    immediately after emitting the response signal.
         try:
-            self._persist_settings(provider, model, key_var, key_val, base_url, embed_backend)
+            self._persist_settings(
+                provider, model, key_var, key_val, base_url, embed_backend, theme=theme
+            )
+            apply_theme(theme)
+            self._render_history()
         except Exception as e:
             _log.exception("Failed to save settings")
             self.set_status(f"Settings not saved ({e}).", error=True)
@@ -3045,7 +3169,7 @@ class ChatSidebar(Gtk.Box):
         on `self` so PyGObject doesn't GC it mid-`.run()`."""
         confirm = Gtk.MessageDialog(
             transient_for=toplevel,
-            flags=Gtk.DialogFlags.MODAL,
+            modal=True,
             message_type=Gtk.MessageType.WARNING,
             buttons=Gtk.ButtonsType.YES_NO,
             text=title,

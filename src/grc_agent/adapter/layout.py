@@ -5,10 +5,11 @@ from grandalf.graphs import Graph as GrandalfGraph
 from grandalf.graphs import Vertex as GrandalfVertex
 from grandalf.layouts import SugiyamaLayout, VertexViewer
 
-# Conservative estimate of a block's on-canvas footprint, used only to place
-# newly-added blocks without overlap — see change_graph's add_blocks phase
-# for why this can't be the block's real rendered size (that's GUI-only and
-# unavailable to this headless code path).
+# Conservative estimate of a block's on-canvas footprint — the single size
+# assumption behind the whole full-canvas grid: every placement cell
+# (BLOCK_FOOTPRINT_* + BLOCK_SPACING = GRID_*) is derived from it. See
+# change_graph's add_blocks phase for why this can't be the block's real
+# rendered size (that's GUI-only and unavailable to this headless code path).
 #
 # A per-block estimate derived from counting each param's native `hide`
 # attribute (`hide not in ('all', 'part')` is exactly the rule GRC's own
@@ -52,18 +53,6 @@ _DEFAULT_HEADER_COLS = 6
 _HEADER_ROLES = frozenset({"variable", "options", "import", "snippet"})
 
 
-def _rects_overlap(ax: float, ay: float, bx: float, by: float) -> bool:
-    """AABB collision check with spacing gap. Coordinates are top-left
-    corners; both blocks share the same conservative footprint estimate."""
-    gap = BLOCK_SPACING
-    return (
-        ax < bx + BLOCK_FOOTPRINT_W + gap
-        and ax + BLOCK_FOOTPRINT_W + gap > bx
-        and ay < by + BLOCK_FOOTPRINT_H + gap
-        and ay + BLOCK_FOOTPRINT_H + gap > by
-    )
-
-
 def _compute_ranks(  # noqa: C901
     flow_graph: Any, new_block_names: set[str], add_connections: list[str] | None
 ) -> dict[str, int]:
@@ -71,12 +60,11 @@ def _compute_ranks(  # noqa: C901
     plus every new block about to be added, via grandalf's Sugiyama-style
     layer assignment (proper longest-path ranking with cycle breaking) over
     the full topology — existing connections plus the new ones from this
-    same batch. Used only to anchor NEW blocks relative to their real
-    distance from a neighbor in the existing graph; an existing block's own
-    coordinate is never touched, and its computed rank here is read purely
-    as context, never used to move it. Grandalf splits disconnected
-    subgraphs into independent components (e.g. a variable block with no
-    wire connections), each ranked from its own rank-0 root(s)."""
+    same batch. compute_full_layout repositions EVERY block from these
+    ranks, so they are the single source of the flow band's column
+    assignment. Grandalf splits disconnected subgraphs into independent
+    components (e.g. a variable block with no wire connections), each
+    ranked from its own rank-0 root(s)."""
     from grc_agent.adapter.graph import parse_conn
 
     vertices: dict[str, Any] = {}
@@ -127,11 +115,10 @@ def _pack_header_band(header_blocks: list[Any], cols: int) -> dict[str, tuple[fl
 
     Row spacing uses the same GRID_H as the flow band, not a smaller
     dedicated header-row constant — a smaller constant was tried and
-    rejected: `_rects_overlap` (the one collision oracle every placement
-    path and every overlap test in this codebase shares) always checks
-    against the conservative BLOCK_FOOTPRINT_H, regardless of a block's
-    actual role, so two header rows spaced any closer than GRID_H register
-    as a false overlap against that shared oracle. Matching GRID_H keeps
+    rejected: the overlap tests in tests/test_layout.py always check against
+    the conservative BLOCK_FOOTPRINT_H, regardless of a block's actual
+    role, so two header rows spaced any closer than GRID_H register as a
+    false overlap against that shared assumption. Matching GRID_H keeps
     exactly one collision assumption for the whole canvas, consistent with
     BLOCK_FOOTPRINT_H's own comment above ("a single generously-sized
     constant is the more honest fix")."""

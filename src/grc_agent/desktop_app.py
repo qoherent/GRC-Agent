@@ -137,13 +137,9 @@ def _on_window_key_press(
     return False
 
 
-def _show_status(sidebar: ChatSidebar, msg: str, *, error: bool = False) -> None:
-    sidebar.set_status(msg, error=error)
-
-
 def _on_new_session(sidebar: ChatSidebar) -> None:
     sidebar.clear_messages()
-    _show_status(sidebar, "")
+    sidebar.set_status("")
 
 
 def _sync_sidebar(canvas: NativeCanvasManager, sidebar: ChatSidebar) -> None:
@@ -166,7 +162,7 @@ def _sync_sidebar(canvas: NativeCanvasManager, sidebar: ChatSidebar) -> None:
         sidebar.grab_entry_focus()
     else:
         sidebar.set_input_enabled(False)
-    sidebar.sync_to_file(p)
+    sidebar.sync_to_file()
 
 
 def _show_fatal_error(title: str, message: str) -> None:
@@ -262,13 +258,13 @@ def build_app() -> tuple[Gtk.Window, NativeCanvasManager, ChatSidebar, NativeFlo
     proxy = NativeFlowgraphProxy(canvas, exec_monitor=exec_monitor)
     sidebar.set_flowgraph_proxy(proxy)
 
-    # Filesystem tools sandbox root: the active flowgraph's folder, resolved
-    # lazily per tool call (tab switches and saves are followed). Installed
-    # after the agent build because the canvas manager exists only here — the
-    # tools are gated on a saved flowgraph until then.
+    # Filesystem tools sandbox root: explicit project directory set in the
+    # sidebar (defaulting to the initial working folder / saved preference).
+    # Installed after the agent build because sidebar exists here.
     fs_tools.set_active_graph_providers(
         grc_path_fn=lambda: canvas.path,
         flow_graph_fn=lambda: canvas.current_flow_graph,
+        project_dir_fn=lambda: sidebar.get_project_directory(),
     )
 
     _sync_sidebar(canvas, sidebar)
@@ -357,7 +353,7 @@ async def _startup_preflight(sidebar: ChatSidebar) -> None:
 
 
 def main() -> None:
-    window, canvas, sidebar, proxy = build_app()
+    window, _, sidebar, _ = build_app()
 
     loop = event_loop.main_event_loop()
 
@@ -382,7 +378,15 @@ def main() -> None:
 
     window.connect("destroy", lambda *_: _shutdown())
     for sig in (signal.SIGTERM, signal.SIGINT):
-        GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, sig, lambda: (_shutdown(), False)[1])
+
+        def _on_term_signal() -> bool:
+            # GLib wants a bool back (False removes the source). This used to be
+            # `lambda: (_shutdown(), False)[1]` — a tuple index to sequence a
+            # void call before the return value.
+            _shutdown()
+            return False
+
+        GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, sig, _on_term_signal)
 
     window.show_all()
     # Schedule the startup backend reachability check AFTER the window is

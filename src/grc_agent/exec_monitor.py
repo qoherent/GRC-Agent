@@ -50,6 +50,10 @@ class ExecutionErrorMonitor:
         self._on_error = on_error
         self._chunks: deque[str] = deque()
         self._chunk_bytes = 0
+        # Whether the cap below actually dropped output from the run being
+        # captured, and the same fact frozen at Done time for the retained log.
+        self._evicted = False
+        self._last_run_evicted = False
         self._tracking = False
         # Set to True when a ":error:" runtime error is seen in the output
         # during tracking — even if the process exits cleanly (code 0).
@@ -68,18 +72,20 @@ class ExecutionErrorMonitor:
         """Called when change_graph modifies the flowgraph state."""
         self._graph_modified_since_last_run = True
 
-    @property
-    def has_last_run(self) -> bool:
-        """True if at least one run has completed (success or failure)."""
-        return self._last_run_log is not None
-
     def get_last_run_log(self) -> dict | None:
         """Return the last completed run's log as a dict, or None if no run
         has completed yet.
 
-        Shape: ``{"return_code": int, "log_text": str, "ran_successfully": bool}``.
+        Shape: ``{"return_code": int, "log_text": str, "ran_successfully": bool}``,
+        plus ``log_truncated: True`` when the ``_MAX_LOG_BYTES`` cap dropped the
+        run's oldest output, and ``note`` when the graph changed since the run.
         ``ran_successfully`` is False when either the return code is non-zero
         OR a ``:error:`` runtime error was detected in the output.
+
+        ``log_truncated`` exists because the reduction has to be visible to the
+        model: the cap silently drops the *front* of the log, and a diagnostic
+        read as complete when it is not is exactly the kind of silent
+        transformation the tool contract forbids.
         """
         if self._last_run_log is None or self._last_run_code is None:
             return None
@@ -88,12 +94,17 @@ class ExecutionErrorMonitor:
             "log_text": self._last_run_log,
             "ran_successfully": self._last_run_code == 0 and not self._last_run_had_runtime_error,
         }
+        if self._last_run_evicted:
+            res["log_truncated"] = True
+            res["truncation_note"] = (
+                f"This run produced more than {_MAX_LOG_BYTES} bytes of output; the oldest "
+                "output was dropped and the log starts mid-run."
+            )
         if self._graph_modified_since_last_run:
             res["note"] = (
-                "IMPORTANT: The flowgraph has been modified in memory since this run completed. "
-                "This log reflects the PREVIOUS run BEFORE your recent changes. "
-                "Do NOT assume the previous error still exists or that the file on disk is stale. "
-                "Ask the user to click Execute/Play in GRC to test your recent changes."
+                "The flowgraph has been modified in memory since this run completed, so this "
+                "log describes the state before those changes. Ask the user to run the "
+                "flowgraph again to test the current state."
             )
         return res
 
@@ -119,11 +130,12 @@ class ExecutionErrorMonitor:
             _log.info(
                 "exec_monitor: run finished with code=%d, chunks=%d bytes",
                 code,
-                len("".join(self._chunks)),
+                self._chunk_bytes,
             )
             # Retain the log for get_run_log BEFORE resetting the buffer.
             self._last_run_log = "".join(self._chunks)
             self._last_run_code = code
+            self._last_run_evicted = self._evicted
             # Check for runtime errors in the full buffer — verbose exec
             # arrives character-by-character via read(1), so per-message
             # marker checks can't match multi-char patterns.
@@ -142,17 +154,22 @@ class ExecutionErrorMonitor:
             _log.info("exec_monitor: generate error detected")
             self._last_run_log = "".join(self._chunks)
             self._last_run_code = 1
+            self._last_run_evicted = self._evicted
             self._fail(1)
 
     def _append(self, text: str) -> None:
         self._chunks.append(text)
-        self._chunk_bytes += len(text)
+        # Count encoded bytes, not characters, so the 512KB cap is a byte cap
+        # even for multibyte UTF-8 output.
+        self._chunk_bytes += len(text.encode())
         while self._chunk_bytes > _MAX_LOG_BYTES and len(self._chunks) > 1:
-            self._chunk_bytes -= len(self._chunks.popleft())
+            self._chunk_bytes -= len(self._chunks.popleft().encode())
+            self._evicted = True
 
     def _reset(self) -> None:
         self._chunks.clear()
         self._chunk_bytes = 0
+        self._evicted = False
         self._has_runtime_error = False
 
     def _fail(self, code: int) -> None:

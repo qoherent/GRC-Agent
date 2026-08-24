@@ -186,8 +186,9 @@ def test_agent_inspects_graph_via_chat():
     agent, fg, _tmp, tmp_dir = _build_cloud_agent(_DIAL_TONE)
     try:
         res = agent.run_sync("List the blocks in this flowgraph.", deps=fg)
-        assert res.output is not None
-        assert len(res.all_messages()) > 1
+        # The output-type union makes `output is not None` vacuous; the real
+        # assertion is that the agent actually called the tool.
+        assert _find_tool_calls(res, "inspect_graph"), "agent never called inspect_graph"
     finally:
         shutil.rmtree(tmp_dir)
 
@@ -210,12 +211,13 @@ def test_agent_modifies_graph_via_chat():
 # --- query_knowledge / RAG (SQLite FTS5 lexical fallback) ---
 #
 # These exercise the real RAG backing store (grc_agent.adapter.rag), not just
-# the agent loop: query_catalog()/query_docs() embed the query via a real
-# local Ollama server (embed_query -> _embed_endpoint(), hardcoded to
-# http://localhost:11434/v1 regardless of chat provider — Ollama Cloud's API
-# has no /v1/embeddings) and fall back to a real SQLite FTS5/BM25 keyword
-# search only when that real embedding call genuinely fails or no vector
-# index exists yet. Every test below parses the tool's actual JSON return
+# the agent loop: query_catalog()/query_docs() embed the query via the
+# embedding backend selected by settings.resolve_embed_backend()
+# (GRC_EMBED_BACKEND=lexical|llamacpp — chosen independently of the chat
+# provider) and fall back to a real SQLite FTS5/BM25 keyword search only when
+# that real embedding call genuinely fails or no vector index exists yet
+# (the failure path is forced below via GRC_EMBED_BACKEND=llamacpp with an
+# empty runtime dir). Every test below parses the tool's actual JSON return
 # from the real RunResult message history (a ToolReturnPart), not the
 # agent's final text answer, so `search_mode` is checked against what the
 # model actually saw, not inferred from prose.

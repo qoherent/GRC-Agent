@@ -10,10 +10,22 @@ from grc_agent.adapter import (
     GRID_W,
     _compute_ranks,
     _order_flow_band,
-    _rects_overlap,
     change_graph,
     load_flow_graph,
 )
+
+
+def _rects_overlap(ax: float, ay: float, bx: float, by: float) -> bool:
+    """AABB collision check with spacing gap (local copy of the deleted
+    layout._rects_overlap — the tests were its only caller, and the
+    production layout assigns unique grid cells instead of searching).
+    Grid math is identical: GRID_* = BLOCK_FOOTPRINT_* + BLOCK_SPACING."""
+    return (
+        ax < bx + GRID_W
+        and ax + GRID_W > bx
+        and ay < by + GRID_H
+        and ay + GRID_H > by
+    )
 
 
 def test_compute_ranks_reflects_topology(temp_dial_tone):
@@ -52,7 +64,8 @@ def test_change_graph_new_variable_alphabetically_packed_among_existing_variable
     # Existing variables sort: ampl, freq_350, freq_440, noise, samp_rate.
     # avg_level sorts between ampl and freq_350 -> header order becomes:
     # options, ampl, avg_level, freq_350, freq_440, noise, samp_rate (7
-    # blocks, 6 cols/row -> one row, since flow band needs only 4 columns).
+    # blocks, 6 cols/row -> 2 rows: the six variables pack into row 0 and
+    # options stays pinned at (0, 12.0); the flow band needs only 4 columns).
     fg = load_flow_graph(str(temp_dial_tone))
     res = change_graph(
         fg,
@@ -328,10 +341,11 @@ def test_change_graph_add_blocks_no_visual_overlap_for_busy_block(temp_empty):
     # Regression test for a live-reported bug: a param-heavy block (Signal
     # Source shows 6 visible rows: samp_rate/waveform/freq/amp/offset/phase)
     # rendered taller than the OLD BLOCK_FOOTPRINT_H=100 estimate, so a sink
-    # placed exactly 100 below it visibly overlapped despite passing the
-    # point-based check. Asserts the actual vertical gap, not just "no
-    # exact-point collision" — a regression that only shrinks the constant
-    # back down would pass a same-point check but fail this.
+    # placed exactly 100 below it visibly overlapped despite passing a
+    # same-point collision check. Two invariants guard that: the footprint
+    # constant stays above the empirically-observed tall-block height, and
+    # the newly-placed pair satisfies the same AABB guarantee as the batch
+    # tests below.
     fg = load_flow_graph(str(temp_empty))
     res = change_graph(
         fg,
@@ -363,6 +377,11 @@ def test_change_graph_add_blocks_no_visual_overlap_for_busy_block(temp_empty):
     # comfortably below the current 220 constant.
     assert BLOCK_FOOTPRINT_H >= 150
 
+    # The placed pair itself must satisfy the AABB guarantee too.
+    src = tuple(fg.get_block("busy_source").states["coordinate"])
+    sink = tuple(fg.get_block("busy_sink").states["coordinate"])
+    assert not _rects_overlap(*src, *sink)
+
 
 def test_change_graph_add_blocks_batch_no_overlap_large(temp_empty):
     # Regression test: adding a large batch of blocks used to stack them all in
@@ -389,7 +408,7 @@ def test_change_graph_add_blocks_batch_no_overlap_large(temp_empty):
     coords = [tuple(fg.get_block(f"wrap_{i}").states["coordinate"]) for i in range(count)]
 
     # All coordinates must be unique — blocks may not land on the same spot.
-    assert len(set(coords)) == count, "Spiral placement produced duplicate coordinates"
+    assert len(set(coords)) == count, "grid placement produced duplicate coordinates"
 
     # No two blocks may overlap (the AABB collision guarantee).
     for i, a in enumerate(coords):

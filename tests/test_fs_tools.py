@@ -553,3 +553,35 @@ def test_capability_registers_all_eight_tools():
         "create_directory",
         "file_info",
     }
+
+
+def test_explicit_project_directory_overrides_active_graph_parent(toolset, tmp_path, monkeypatch):
+    proj_dir = tmp_path / "explicit_project"
+    proj_dir.mkdir()
+    (proj_dir / "custom.py").write_text("print('hello')", encoding="utf-8")
+
+    other_dir = tmp_path / "other"
+    other_dir.mkdir()
+    grc = other_dir / "other.grc"
+    shutil.copy(FIXTURES / "dial_tone.grc", grc)
+
+    monkeypatch.setattr(fs_tools, "_active_grc_path_fn", lambda: grc)
+    monkeypatch.setattr(fs_tools, "_project_dir_fn", lambda: proj_dir)
+
+    out = read(toolset, "custom.py")
+    assert "print('hello')" in out
+
+
+def test_explicit_project_directory_without_open_graph(toolset, tmp_path, monkeypatch):
+    proj_dir = tmp_path / "standalone_project"
+    proj_dir.mkdir()
+    grc = proj_dir / "saved.grc"
+    shutil.copy(FIXTURES / "dial_tone.grc", grc)
+
+    monkeypatch.setattr(fs_tools, "_active_grc_path_fn", lambda: None)
+    monkeypatch.setattr(fs_tools, "_active_flow_graph_fn", lambda: None)
+    monkeypatch.setattr(fs_tools, "_project_dir_fn", lambda: proj_dir)
+
+    out = read(toolset, "saved.grc")
+    assert "structural view via the inspect_graph engine" in out
+    assert "source: file on disk" in out

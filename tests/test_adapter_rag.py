@@ -116,6 +116,26 @@ def test_fts_query_string_dedupes_and_caps_tokens():
     assert result[1] is True  # was_capped
 
 
+def test_query_knowledge_func_raises_model_retry_on_failure(monkeypatch):
+    """Same uniform rule as inspect_graph/change_graph: a failed lookup raises
+    ModelRetry carrying the engine's own message, instead of handing the model
+    an ok=false blob inside a successful tool return."""
+    import pytest
+    from pydantic_ai.exceptions import ModelRetry
+
+    from grc_agent.agent import query_knowledge_func
+
+    def failing(_query, _limit=5):
+        return {"ok": False, "results": [], "message": "query must be non-empty"}
+
+    monkeypatch.setattr("grc_agent.agent.query_catalog", failing)
+    monkeypatch.setattr("grc_agent.agent.query_docs", failing)
+
+    for domain in ("catalog", "docs"):
+        with pytest.raises(ModelRetry, match="query must be non-empty"):
+            asyncio.run(query_knowledge_func(None, "", domain))
+
+
 def test_query_knowledge_func_passes_through_k(monkeypatch):
     """The model can control how many results come back via k (default 5,
     clamped 1-20) — no live LLM/backend needed, just verifying the plumbing."""

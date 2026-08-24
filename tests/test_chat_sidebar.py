@@ -129,40 +129,41 @@ def test_sidebar_session_no_autoload_on_graph_open(tmp_path, monkeypatch):
     monkeypatch.setattr(ChatSidebar, "current_page", property(lambda _self: current_page_val))
 
     # Switching to flow1.grc — no session loads, chat is blank
-    sidebar.sync_to_file(str(f1))
+    sidebar.sync_to_file()
     assert sidebar._active_session_id is None
     assert sidebar._message_history == []
 
     # Switching to flow2.grc — same: no autoload
     current_page_val = DummyPage(str(f2))
-    sidebar.sync_to_file(str(f2))
+    sidebar.sync_to_file()
     assert sidebar._active_session_id is None
     assert sidebar._message_history == []
 
     # Switching back to flow1.grc — still blank, no per-page binding
     current_page_val = DummyPage(str(f1))
-    sidebar.sync_to_file(str(f1))
+    sidebar.sync_to_file()
     assert sidebar._active_session_id is None
     assert sidebar._message_history == []
 
 
-def test_active_graph_label_format():
+def test_active_graph_tracking():
     from grc_agent.chat_sidebar import ChatSidebar
 
     sidebar = ChatSidebar()
 
     # Initial state
-    assert sidebar._graph_label.get_text() == "Active Graph · none"
-    assert "No flowgraph currently active" in sidebar._graph_label.get_tooltip_text()
+    assert sidebar._active_graph_name is None
+    assert sidebar._active_graph_path is None
 
     # Set active graph with path
     sidebar.set_active_graph("my_cool_flowgraph", "/path/to/my_cool_flowgraph.grc")
-    assert sidebar._graph_label.get_text() == "Active Graph · my_cool_flowgraph"
-    assert "/path/to/my_cool_flowgraph.grc" in sidebar._graph_label.get_tooltip_text()
+    assert sidebar._active_graph_name == "my_cool_flowgraph"
+    assert sidebar._active_graph_path == "/path/to/my_cool_flowgraph.grc"
 
     # Clear active graph
     sidebar.set_active_graph(None)
-    assert sidebar._graph_label.get_text() == "Active Graph · none"
+    assert sidebar._active_graph_name is None
+    assert sidebar._active_graph_path is None
 
 
 def test_ui_micro_interactions_and_shortcuts():
@@ -518,13 +519,10 @@ def test_settings_dialog_extended_fields(tmp_path, monkeypatch):
     assert dlg is not None
 
     entries: list[Gtk.Entry] = []
-    checks: list[Gtk.CheckButton] = []
 
     def walk(w):
         if isinstance(w, Gtk.Entry):
             entries.append(w)
-        if isinstance(w, Gtk.CheckButton):
-            checks.append(w)
         if isinstance(w, Gtk.Container):
             for c in w.get_children():
                 walk(c)
@@ -632,23 +630,23 @@ def test_streaming_text_flush_is_throttled(monkeypatch):
     ctx.text_acc = _ChunkAccumulator("chunk1")
     ctx.text_dirty = True
     sidebar._flush_streaming(ctx)
-    assert ctx.text_lbl.get_text() == ""  # throttled, not painted
+    assert ctx.text_lbl.get_buffer().get_text(ctx.text_lbl.get_buffer().get_start_iter(), ctx.text_lbl.get_buffer().get_end_iter(), True) == ""  # throttled, not painted
 
     # Advance past the interval -> flush fires.
     t[0] = 0.05
     sidebar._flush_streaming(ctx)
-    assert ctx.text_lbl.get_text() == "chunk1"
+    assert ctx.text_lbl.get_buffer().get_text(ctx.text_lbl.get_buffer().get_start_iter(), ctx.text_lbl.get_buffer().get_end_iter(), True) == "chunk1"
     assert ctx.text_dirty is False
 
     # A second chunk in the same text part is append-only and throttled again.
     ctx.text_acc += "chunk2"
     ctx.text_dirty = True
     sidebar._flush_streaming(ctx)  # t=0.05, last_flush=0.05 -> skip
-    assert ctx.text_lbl.get_text() == "chunk1"
+    assert ctx.text_lbl.get_buffer().get_text(ctx.text_lbl.get_buffer().get_start_iter(), ctx.text_lbl.get_buffer().get_end_iter(), True) == "chunk1"
 
     # force=True bypasses the interval (used on part start/close/stream end).
     sidebar._flush_streaming(ctx, force=True)
-    assert ctx.text_lbl.get_text() == "chunk1chunk2"
+    assert ctx.text_lbl.get_buffer().get_text(ctx.text_lbl.get_buffer().get_start_iter(), ctx.text_lbl.get_buffer().get_end_iter(), True) == "chunk1chunk2"
 
 
 def test_streaming_thinking_flush_throttled(monkeypatch):
@@ -670,21 +668,21 @@ def test_streaming_thinking_flush_throttled(monkeypatch):
     ctx.think_acc = _ChunkAccumulator("thought1")
     ctx.think_dirty = True
     sidebar._flush_streaming(ctx)  # t=0, last_flush=0.0 -> throttled
-    assert ctx.think_body.get_text() == ""
+    assert ctx.think_body.get_buffer().get_text(ctx.think_body.get_buffer().get_start_iter(), ctx.think_body.get_buffer().get_end_iter(), True) == ""
 
     t[0] = 0.30
     sidebar._flush_streaming(ctx)
-    assert ctx.think_body.get_text() == "thought1"
+    assert ctx.think_body.get_buffer().get_text(ctx.think_body.get_buffer().get_start_iter(), ctx.think_body.get_buffer().get_end_iter(), True) == "thought1"
 
     ctx.think_acc += "thought2"  # real streaming appends deltas, never replaces
     ctx.think_dirty = True
     sidebar._flush_streaming(ctx)  # immediately after -> throttled
-    assert ctx.think_body.get_text() == "thought1"
+    assert ctx.think_body.get_buffer().get_text(ctx.think_body.get_buffer().get_start_iter(), ctx.think_body.get_buffer().get_end_iter(), True) == "thought1"
     sidebar._flush_streaming(ctx, force=True)
     # Buffers accumulate (delta-append, never full replace) — replacing the
     # whole buffer per flush would reset the thinking scroller's scroll
     # position mid-stream.
-    assert ctx.think_body.get_text() == "thought1thought2"
+    assert ctx.think_body.get_buffer().get_text(ctx.think_body.get_buffer().get_start_iter(), ctx.think_body.get_buffer().get_end_iter(), True) == "thought1thought2"
 
 
 def test_thinking_expander_label_changes_on_close():
@@ -845,13 +843,16 @@ def test_poll_indexing_building_ready_failed_idle(monkeypatch):
         adapter_mod._rag_building.clear()
 
 
-def test_run_agent_turn_error_preserves_user_message():
+def test_run_agent_turn_error_preserves_user_message(tmp_path, monkeypatch):
     """UI-1 regression: an error mid-turn must NOT wipe the user's just-sent
     message (nor rebuild the widget, which would discard any partial reply)."""
     from unittest.mock import AsyncMock, MagicMock
 
     from grc_agent.chat_sidebar import ChatSidebar
 
+    # Deterministic settings (a keyed provider in the real .env would
+    # early-return before the error path this test exercises).
+    monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
     sidebar = ChatSidebar()
     sidebar._render_history = MagicMock()
     sidebar._append_error = MagicMock()
@@ -982,8 +983,7 @@ def test_send_message_guards_and_creates_session(tmp_path, monkeypatch):
     """M14 regression: send_message's blank-text/busy no-op guards and its
     session-creation branch had zero direct coverage — every other test that
     touches send_message replaces it with a MagicMock. This calls the real
-    method (only _run_agent_turn itself is stubbed, so no live agent/model is
-    needed)."""
+    method (only the agent itself is stubbed, so no live model is needed)."""
     from unittest.mock import AsyncMock, MagicMock
 
     from grc_agent.chat_sidebar import ChatSidebar
@@ -993,7 +993,6 @@ def test_send_message_guards_and_creates_session(tmp_path, monkeypatch):
     grc.write_text("# grc")
 
     sidebar = ChatSidebar()
-    sidebar._run_agent_turn = AsyncMock()
 
     # (a) Blank/whitespace-only text is a no-op: no task started.
     assert sidebar.send_message("   ") is False
@@ -1006,12 +1005,22 @@ def test_send_message_guards_and_creates_session(tmp_path, monkeypatch):
     sidebar._busy = False
 
     # (c) A real call on a sidebar with a flowgraph_proxy set creates a new DB
-    # session row on first send.
+    # session row on first send — inside the turn (off the unified loop), not
+    # synchronously in send_message. A fast-failing agent stands in for the
+    # live model.
     proxy = MagicMock()
     cm = MagicMock()
     cm.path = str(grc)
     proxy._canvas_manager = cm
     sidebar._flowgraph_proxy = proxy
+
+    agent = MagicMock()
+    agent.iter.side_effect = RuntimeError("boom")
+    sidebar._agent = agent
+    sidebar._save_history = AsyncMock()
+    sidebar._render_history = MagicMock()
+    sidebar._scroll_to_bottom = MagicMock()
+    sidebar._update_context_label = MagicMock()
 
     assert sidebar._active_session_id is None
 
@@ -1022,7 +1031,6 @@ def test_send_message_guards_and_creates_session(tmp_path, monkeypatch):
 
     asyncio.run(_run())
 
-    sidebar._run_agent_turn.assert_called_once_with("hello agent")
     assert sidebar._active_session_id is not None
 
     from grc_agent.db import get_recent_sessions
@@ -1051,13 +1059,13 @@ def test_planner_toggle_is_manual_and_reuses_current_session():
     sidebar._planner_toggle.set_active(True)
     assert sidebar._agent_mode == "planner"
     assert sidebar._agent is planner
-    assert sidebar._planner_mode_label.get_text() == "Planner active"
+    assert sidebar._planner_mode_label.get_text() == "Planner"
     assert sidebar._planner_toggle.get_parent() is sidebar._context_label.get_parent()
     assert sidebar._compact_btn.get_parent() is sidebar._context_label.get_parent()
     sidebar.send_message.assert_not_called()
 
     sidebar._planner_toggle.set_active(False)
-    assert sidebar._planner_mode_label.get_text() == "GRC-Agent Active"
+    assert sidebar._planner_mode_label.get_text() == "Agent"
     sidebar._message_history = [
         ModelRequest(parts=[UserPromptPart(content="Build a receiver")])
     ]
@@ -1087,7 +1095,7 @@ def test_planner_toggle_cannot_switch_while_busy():
 
     assert sidebar._agent_mode == "executor"
     assert sidebar._agent is executor
-    assert sidebar._planner_mode_label.get_text() == "GRC-Agent Active"
+    assert sidebar._planner_mode_label.get_text() == "Agent"
 
 
 def test_planner_write_shows_implement_action_and_click_runs_executor(tmp_path, monkeypatch):
@@ -1150,7 +1158,7 @@ def test_planner_write_shows_implement_action_and_click_runs_executor(tmp_path, 
     assert sidebar._agent_mode == "executor"
     assert sidebar._agent is executor
     assert sidebar._planner_toggle.get_active() is False
-    assert sidebar._planner_mode_label.get_text() == "GRC-Agent Active"
+    assert sidebar._planner_mode_label.get_text() == "Agent"
     assert sidebar._implement_plan_row is None
     assert any(
         part.__class__.__name__ == "UserPromptPart"
@@ -1679,7 +1687,7 @@ def test_send_fix_when_free_aborts_when_user_switched_tabs():
     sidebar.send_message.assert_not_called()
 
 
-def test_context_label_updates_with_pydantic_ai_usage():
+def test_context_label_updates_with_pydantic_ai_usage(tmp_path, monkeypatch):
     """Context label must extract token usage natively from Pydantic AI ModelResponse.usage."""
     from decimal import Decimal
 
@@ -1711,14 +1719,16 @@ def test_context_label_updates_with_pydantic_ai_usage():
 
     _context_length_cache.clear()
     _context_negative_cache.clear()
-    original = _af._ollama_context_length
-    _af._ollama_context_length = lambda _model: 1024 * 1024
-    try:
-        assert resolve_model_context_length("ollama", "deepseek-v4-flash:cloud") == 1_048_576
-    finally:
-        _af._ollama_context_length = original
-        _context_length_cache.clear()
-        _context_negative_cache.clear()
+    # Hermetic: patch the probe dispatch seam (the dict captured at import
+    # time — rebinding _af._ollama_context_length is inert and lets the real
+    # HTTP probe hit the developer's local daemon) and redirect settings to a
+    # tmp .env so load_settings() can't read the real repo .env.
+    monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
+    monkeypatch.setitem(_af._CTX_PROBES, "ollama", lambda _model: 1024 * 1024)
+    monkeypatch.setitem(_af._CTX_PROBES, "ollama_cloud", lambda _model: 1024 * 1024)
+    assert resolve_model_context_length("ollama", "deepseek-v4-flash:cloud") == 1_048_576
+    _context_length_cache.clear()
+    _context_negative_cache.clear()
 
     sidebar = ChatSidebar()
     sidebar.set_active_provider("ollama_cloud", "deepseek-v4-flash:cloud")
@@ -1741,7 +1751,7 @@ def test_context_label_updates_with_pydantic_ai_usage():
 
     sidebar._update_context_label()
     text = sidebar._context_label.get_label()
-    assert "3.3k / 1M tokens" in text
+    assert "3.3k / 1M tok" in text
     assert "0%" in text
     assert "Cost: $0.0012345" in text
     assert "Native Pydantic AI last-turn cost: $0.0012345" in (
@@ -1756,7 +1766,7 @@ def test_context_label_updates_with_pydantic_ai_usage():
         )
     )
     sidebar._update_context_label()
-    assert "Cost: unavailable" in sidebar._context_label.get_label()
+    assert "Cost: N/A" in sidebar._context_label.get_label()
 
     # A new user prompt starts a new native RunUsage total; prior-turn cost
     # must not be added to it or lost-history compaction would skew the label.
@@ -1973,10 +1983,7 @@ def test_badge_hover_calls_canvas_highlight():
     proxy._canvas_manager = cm
     sidebar._flowgraph_proxy = proxy
 
-    from grc_agent.ui.block_badge import BlockBadge, badge_enter, badge_leave
-
-    pill = BlockBadge("analog_sig_source_x_0", lambda: cm)
-    assert pill is not None
+    from grc_agent.ui.block_badge import badge_enter, badge_leave
 
     badge_enter(cm, "analog_sig_source_x_0")
     cm.set_highlight_block.assert_called_once_with("analog_sig_source_x_0")
@@ -2061,6 +2068,7 @@ def test_table_renders_block_badges():
     from gi.repository import Gtk
 
     from grc_agent.chat_sidebar import ChatSidebar
+    from grc_agent.ui.block_badge import BlockBadge
     from grc_agent.ui.table_block import TableBlock
 
     sidebar = ChatSidebar()
@@ -2087,7 +2095,7 @@ def test_table_renders_block_badges():
     pills = []
 
     def walk(w):
-        if getattr(w, "grc_is_badge", False):
+        if isinstance(w, BlockBadge):
             pills.append(w)
         if isinstance(w, Gtk.Container):
             for ch in w.get_children():
@@ -2411,12 +2419,16 @@ def test_code_block_height_pin_shows_full_content():
     win.destroy()
 
 
-def test_highlight_cleared_on_history_rebuild():
+def test_highlight_cleared_on_history_rebuild(tmp_path, monkeypatch):
     """A full message-list rebuild (_render_history) must clear the canvas
     highlight — GTK3 doesn't synthesize leave-notify-event on a destroyed
     widget, so a badge pill removed mid-hover could otherwise leave a stale
     highlight stuck on canvas."""
     from unittest.mock import MagicMock
+
+    # Redirect the DB: an empty history renders the welcome screen, whose
+    # recent-sessions list runs init_db() against the real chat DB otherwise.
+    monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
 
     from grc_agent.chat_sidebar import ChatSidebar
 
@@ -2462,7 +2474,6 @@ def test_compact_now_button_compacts_history_and_snapshots_first(tmp_path, monke
     re-renders, and returns to the not-busy state. Uses the real
     make_summarizing_strategy + harness compact_now with a TestModel agent
     (the summary call is a real nested run against the inherited model)."""
-    import asyncio as _asyncio
     from unittest.mock import AsyncMock, MagicMock
 
     from pydantic_ai import Agent
@@ -2504,7 +2515,7 @@ def test_compact_now_button_compacts_history_and_snapshots_first(tmp_path, monke
     sidebar._render_history = MagicMock()
     sidebar._update_context_label = MagicMock()
 
-    _asyncio.run(sidebar._run_compact_now())
+    asyncio.run(sidebar._run_compact_now())
 
     # The history was actually compacted: starts with the summary part.
     from pydantic_ai.messages import SystemPromptPart
@@ -2521,13 +2532,11 @@ def test_compact_now_button_compacts_history_and_snapshots_first(tmp_path, monke
     # D3: the pre-compact snapshot row exists under the conversation id — the
     # ORIGINAL (unsummarized) history is what was snapshotted, so
     # ConversationSearch can still recall what the summary drops.
-    import asyncio as _a
-
     conv = conversation_id_for_session(sid)
     store = get_step_store()
-    runs = _a.run(store.list_runs(conversation_id=conv))
+    runs = asyncio.run(store.list_runs(conversation_id=conv))
     assert runs, "pre-compact snapshot run never registered"
-    snaps = _a.run(store.list_snapshots(run_id=runs[-1].run_id))
+    snaps = asyncio.run(store.list_snapshots(run_id=runs[-1].run_id))
     assert snaps, "pre-compact snapshot unreadable via the store seam"
     snap_msgs = snaps[-1].messages
     assert len(snap_msgs) == len(history), "snapshot must hold the FULL pre-compact history"
@@ -2615,3 +2624,110 @@ def test_compact_button_requires_explicit_confirmation(tmp_path, monkeypatch):
 
     asyncio.run(_confirm())
     sidebar._run_compact_now.assert_awaited_once()
+
+
+def test_project_directory_selector(tmp_path, monkeypatch):
+    from grc_agent.chat_sidebar import ChatSidebar
+    from grc_agent.settings import get_project_dir
+
+    env_file = tmp_path / ".env"
+    monkeypatch.setenv("GRC_AGENT_ENV", str(env_file))
+
+    proj_dir = tmp_path / "my_project"
+    proj_dir.mkdir()
+
+    sidebar = ChatSidebar()
+    sidebar.set_project_directory(proj_dir)
+    assert sidebar.get_project_directory() == proj_dir
+    assert get_project_dir() == proj_dir
+
+
+def test_welcome_view_clear_all_sessions_button(tmp_path, monkeypatch):
+    from unittest.mock import MagicMock
+
+    from gi.repository import Gtk
+    from pydantic_ai.messages import ModelRequest, UserPromptPart
+
+    from grc_agent.db import init_db, save_session
+    from grc_agent.ui.welcome_view import WelcomeView
+
+    db_file = tmp_path / "chat_sessions.db"
+    monkeypatch.setenv("GRC_AGENT_DB", str(db_file))
+    init_db()
+    grc_file = tmp_path / "test.grc"
+    grc_file.write_text("options:\n  parameters:\n    id: test\n")
+    save_session(
+        None,
+        str(grc_file),
+        [ModelRequest(parts=[UserPromptPart(content="Test message")])],
+    )
+
+    listbox = Gtk.ListBox()
+    clear_mock = MagicMock()
+    welcome = WelcomeView(
+        listbox,
+        on_quick_prompt=MagicMock(),
+        on_open_session=MagicMock(),
+        on_delete_session=MagicMock(),
+        on_clear_all_sessions=clear_mock,
+    )
+    welcome.render(current_page=None, active_session_id=None)
+
+    # Find the Delete all sessions button in listbox children
+    buttons = []
+    def _find_buttons(widget):
+        if isinstance(widget, Gtk.Button) and widget.get_label() == "Delete all sessions":
+            buttons.append(widget)
+        if isinstance(widget, Gtk.Container):
+            for child in widget.get_children():
+                _find_buttons(child)
+
+    for row in listbox.get_children():
+        _find_buttons(row)
+
+    assert len(buttons) == 1
+    buttons[0].clicked()
+    clear_mock.assert_called_once()
+
+
+def test_theme_toggle_and_persistence(tmp_path, monkeypatch):
+    from gi.repository import Gtk
+
+    from grc_agent.chat_sidebar import ChatSidebar
+    from grc_agent.settings import get_theme_mode, load_settings, set_theme_mode
+    from grc_agent.ui.code_block import CodeBlock
+    from grc_agent.ui.css import apply_theme, get_code_style, is_dark_theme
+
+    env_file = tmp_path / ".env"
+    monkeypatch.setenv("GRC_AGENT_ENV", str(env_file))
+
+    # Test settings persistence
+    assert get_theme_mode() == "system"
+    set_theme_mode("dark")
+    assert get_theme_mode() == "dark"
+    assert load_settings()["theme"] == "dark"
+
+    # Test apply_theme
+    apply_theme("dark")
+    settings = Gtk.Settings.get_default()
+    if settings:
+        assert settings.get_property("gtk-application-prefer-dark-theme") is True
+        assert is_dark_theme() is True
+        assert get_code_style() == "monokai"
+
+    apply_theme("light")
+    if settings:
+        assert settings.get_property("gtk-application-prefer-dark-theme") is False
+        assert get_code_style() == "friendly"
+
+    # Test sidebar theme button click
+    sidebar = ChatSidebar()
+    assert hasattr(sidebar, "_theme_btn")
+    sidebar._on_theme_toggle_clicked()
+    assert get_theme_mode() in ("dark", "light")
+
+    # Test CodeBlock renders without crashing in either theme
+    cb = CodeBlock("python", "import sys\nprint('hello')")
+    assert cb is not None
+
+

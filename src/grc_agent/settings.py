@@ -8,9 +8,11 @@ benchmarking.
 Env vars (resolved by env_path(): GRC_AGENT_ENV override -> repo-root `.env`
 -> ~/.config/grc_agent/.env for an installed package):
 
-  GRC_PROVIDER              active chat provider: ollama_local |
+  GRC_PROVIDER              active chat provider: one of the twelve concrete
+                            ids in _VALID_PROVIDERS (ollama_local |
                             ollama_cloud | openrouter | openai |
-                            openai_compatible | openai_codex
+                            openai_compatible | anthropic | google | groq |
+                            mistral | cohere | xai | openai_codex)
   GRC_EMBED_BACKEND         embeddings backend: lexical | llamacpp
                             (default: lexical)
   OLLAMA_CHAT_MODEL         Ollama chat model (local and cloud share it)
@@ -57,6 +59,9 @@ _VALID_PROVIDERS = (
 # serving EmbeddingGemma over a private UNIX socket).
 _VALID_EMBED_BACKENDS = ("lexical", "llamacpp")
 _DEFAULT_EMBED_BACKEND = "lexical"
+
+_VALID_THEMES = ("system", "dark", "light")
+_DEFAULT_THEME = "system"
 
 # Per-provider chat-model env var name + settings dict key.
 _PROVIDER_ENV_VAR = {
@@ -167,8 +172,10 @@ def default_settings() -> dict:
     res = {
         "provider": _DEFAULT_PROVIDER,
         "embed_backend": _DEFAULT_EMBED_BACKEND,
+        "theme": _DEFAULT_THEME,
         "ollama_base_url": _DEFAULT_OLLAMA_BASE_URL,
         "openai_compatible_base_url": _DEFAULT_OPENAI_COMPATIBLE_BASE_URL,
+        "project_dir": "",
         **_DEFAULT_MODELS,
     }
     res["model"] = res[_PROVIDER_MODEL_KEY[res["provider"]]]
@@ -178,47 +185,17 @@ def default_settings() -> dict:
 def load_settings() -> dict:
     """Read the saved preferences from the `.env` file (the source of truth),
     applying defaults for any vars not present. Returns a dict with keys:
-    provider, model, ollama_model, openai_compatible_model,
-    ollama_base_url, openai_compatible_base_url, embed_backend."""
+    provider, model, per-provider model keys, ollama_base_url,
+    openai_compatible_base_url, embed_backend, project_dir, theme."""
     vals = _cached_dotenv()
 
-    # Legacy-value normalization (pre concrete-provider split): map the old
-    # ambiguous ids to their concrete successor using the base URL they were
-    # pointing at, so an existing .env keeps working after the split.
-    raw_provider = vals.get("GRC_PROVIDER", _DEFAULT_PROVIDER)
-    compat_url = vals.get("OPENAI_COMPATIBLE_BASE_URL", "") or ""
-    ollama_url_saved = vals.get("OLLAMA_BASE_URL", "") or ""
-    if raw_provider == "ollama":
-        raw_provider = "ollama_cloud" if "ollama.com" in ollama_url_saved else "ollama_local"
-    elif raw_provider == "ollama_cloud":
-        raw_provider = "ollama_cloud"
-    elif (
-        raw_provider == "openrouter"
-        or raw_provider == "openai_compatible"
-        and "openrouter.ai" in compat_url
-    ):
-        raw_provider = "openrouter"
-    elif raw_provider == "openai_compatible" and "api.openai.com" in compat_url:
-        raw_provider = "openai"
-    provider = raw_provider if raw_provider in _VALID_PROVIDERS else _DEFAULT_PROVIDER
+    provider = vals.get("GRC_PROVIDER", _DEFAULT_PROVIDER)
+    if provider not in _VALID_PROVIDERS:
+        provider = _DEFAULT_PROVIDER
 
-    ollama_model = (
-        vals.get("OLLAMA_CHAT_MODEL")
-        or vals.get("OLLAMA_CLOUD_MODEL")
-        or _DEFAULT_MODELS["ollama_model"]
-    )
-    # OPENAI_COMPATIBLE_MODEL is the legacy fallback for openrouter/openai:
-    # a pre-split .env pointed one of those services at it.
-    openrouter_model = (
-        vals.get("OPENROUTER_MODEL")
-        or vals.get("OPENAI_COMPATIBLE_MODEL")
-        or _DEFAULT_MODELS["openrouter_model"]
-    )
-    openai_model = (
-        vals.get("OPENAI_MODEL")
-        or vals.get("OPENAI_COMPATIBLE_MODEL")
-        or _DEFAULT_MODELS["openai_model"]
-    )
+    ollama_model = vals.get("OLLAMA_CHAT_MODEL") or _DEFAULT_MODELS["ollama_model"]
+    openrouter_model = vals.get("OPENROUTER_MODEL") or _DEFAULT_MODELS["openrouter_model"]
+    openai_model = vals.get("OPENAI_MODEL") or _DEFAULT_MODELS["openai_model"]
     openai_compatible_model = (
         vals.get("OPENAI_COMPATIBLE_MODEL") or _DEFAULT_MODELS["openai_compatible_model"]
     )
@@ -232,23 +209,28 @@ def load_settings() -> dict:
 
     ollama_url = vals.get("OLLAMA_BASE_URL")
     if not ollama_url:
-        ollama_url = (
-            "https://ollama.com/v1"
-            if vals.get("OLLAMA_CLOUD_API_KEY")
-            else "http://localhost:11434"
-        )
+        # The cloud endpoint is canonical for the ollama_cloud provider; the
+        # local daemon URL applies to ollama_local (and as a fallback).
+        ollama_url = "https://ollama.com/v1" if provider == "ollama_cloud" else _DEFAULT_OLLAMA_BASE_URL
 
     openai_url = vals.get("OPENAI_COMPATIBLE_BASE_URL")
     if not openai_url:
         openai_url = _DEFAULT_OPENAI_COMPATIBLE_BASE_URL
 
-    embed_backend = vals.get("GRC_EMBED_BACKEND", _DEFAULT_EMBED_BACKEND)
-    if embed_backend not in _VALID_EMBED_BACKENDS:
-        embed_backend = _DEFAULT_EMBED_BACKEND
+    embed_backend = resolve_embed_backend(
+        {"embed_backend": vals.get("GRC_EMBED_BACKEND", _DEFAULT_EMBED_BACKEND)}
+    )
+
+    project_dir = vals.get("GRC_PROJECT_DIR", "")
+
+    theme = vals.get("GRC_THEME_MODE", _DEFAULT_THEME)
+    if theme not in _VALID_THEMES:
+        theme = _DEFAULT_THEME
 
     res = {
         "provider": provider,
         "embed_backend": embed_backend,
+        "theme": theme,
         "ollama_model": ollama_model,
         "openrouter_model": openrouter_model,
         "openai_model": openai_model,
@@ -262,6 +244,7 @@ def load_settings() -> dict:
         "openai_codex_model": openai_codex_model,
         "ollama_base_url": ollama_url,
         "openai_compatible_base_url": openai_url,
+        "project_dir": project_dir,
     }
     res["model"] = res[_PROVIDER_MODEL_KEY[provider]]
     return res
@@ -280,13 +263,16 @@ def save_settings(
     ollama_base_url: str | None = None,
     openai_compatible_base_url: str | None = None,
     embed_backend: str | None = None,
+    theme: str | None = None,
 ) -> None:
-    """Persist the active provider, chat model name, base URLs, and embedding
-    backend into the `.env` file."""
+    """Persist the active provider, chat model name, base URLs, embedding
+    backend, and theme into the `.env` file."""
     if provider not in _VALID_PROVIDERS:
         raise ValueError(f"Unknown provider: {provider!r}")
     if embed_backend is not None and embed_backend not in _VALID_EMBED_BACKENDS:
         raise ValueError(f"Unknown embedding backend: {embed_backend!r}")
+    if theme is not None and theme not in _VALID_THEMES:
+        raise ValueError(f"Unknown theme mode: {theme!r}")
     if not model.strip():
         raise ValueError("model must be non-empty")
     upsert_env_key("GRC_PROVIDER", provider)
@@ -299,6 +285,37 @@ def save_settings(
         upsert_env_key("OPENAI_COMPATIBLE_BASE_URL", url)
     if embed_backend is not None:
         upsert_env_key("GRC_EMBED_BACKEND", embed_backend)
+    if theme is not None:
+        upsert_env_key("GRC_THEME_MODE", theme)
+
+
+def get_theme_mode() -> str:
+    """Get the persisted theme mode ('dark', 'light', or 'system')."""
+    val = get_env_value("GRC_THEME_MODE")
+    return val if val in _VALID_THEMES else _DEFAULT_THEME
+
+
+def set_theme_mode(mode: str) -> None:
+    """Persist the chosen theme mode into the `.env` file."""
+    if mode in _VALID_THEMES:
+        upsert_env_key("GRC_THEME_MODE", mode)
+
+
+def get_project_dir() -> Path | None:
+    """Get the persisted project directory if configured and valid on disk."""
+    val = get_env_value("GRC_PROJECT_DIR")
+    if not val:
+        return None
+    p = Path(val).resolve()
+    return p if p.is_dir() else None
+
+
+def set_project_dir(path: Path | str | None) -> None:
+    """Persist the chosen project directory into the `.env` file."""
+    if path is not None and str(path).strip():
+        upsert_env_key("GRC_PROJECT_DIR", str(Path(path).resolve()))
+    else:
+        upsert_env_key("GRC_PROJECT_DIR", "")
 
 
 def get_env_value(key: str) -> str | None:

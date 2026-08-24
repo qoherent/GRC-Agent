@@ -1,12 +1,13 @@
+from __future__ import annotations
+
 import logging
 import os
 import time
 from dataclasses import dataclass
-from typing import Any
-from uuid import uuid4
+from typing import TYPE_CHECKING, Any
 
 import httpx
-from pydantic_ai import Agent, ModelSettings, RunContext
+from pydantic_ai import Agent, ModelRequestContext, ModelSettings, RunContext
 from pydantic_ai.capabilities import AbstractCapability, PrepareTools
 from pydantic_ai.models.ollama import OllamaModel
 from pydantic_ai.models.openai import OpenAIChatModel
@@ -15,15 +16,18 @@ from pydantic_ai.providers.ollama import OllamaProvider
 from pydantic_ai.providers.openai import OpenAIProvider
 from pydantic_ai.providers.openrouter import OpenRouterProvider
 from pydantic_ai.retries import AsyncTenacityTransport, RetryConfig
+from pydantic_ai.tools import ToolDefinition
 from pydantic_ai_harness import ToolOutputLimits
 from pydantic_ai_harness.compaction import (
     ClampOversizedMessages,
     ClearToolResults,
+    CompactionStrategy,
     SlidingWindowCompaction,
     SummarizingCompaction,
     TieredCompaction,
 )
 from pydantic_ai_harness.conversation_search import ConversationSearch, SnapshotHistorySource
+from pydantic_ai_harness.filesystem import READ_ONLY_TOOL_NAMES
 from pydantic_ai_harness.planning import (
     InMemoryPlanStore,
     Planning,
@@ -31,7 +35,7 @@ from pydantic_ai_harness.planning import (
     SqlitePlanStore,
     render_plan,
 )
-from pydantic_ai_harness.step_persistence import ContinuableSnapshot, RunRecord, StepPersistence
+from pydantic_ai_harness.step_persistence import StepPersistence
 from pydantic_ai_harness.system_reminders import SystemReminders
 from pydantic_ai_harness.tool_output_limits import Band, LocalFileStore, Spill, Truncate
 from tenacity import retry_if_exception_type, stop_after_attempt, wait_exponential
@@ -45,7 +49,7 @@ from grc_agent.agent import (
     web_fetch_cap,
     web_search_cap,
 )
-from grc_agent.db import get_db_path, get_step_store, init_db
+from grc_agent.db import archive_transcript, get_db_path, get_step_store, init_db
 from grc_agent.fs_tools import GrcFileSystem
 from grc_agent.prompts import build_planner_prompt, build_system_prompt
 from grc_agent.settings import default_settings, get_env_value, load_settings
@@ -61,29 +65,36 @@ _MODEL_WINDOW_OVERRIDES = {
 }
 
 
+if TYPE_CHECKING:  # native_canvas imports gi/GTK; keep it out of the runtime path
+    from grc_agent.native_canvas import NativeFlowgraphProxy
+
 _log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
 class AgentBundle:
-    """The two explicit roles available in the desktop chat."""
+    """The two explicit roles available in the desktop chat.
 
-    executor: Agent
-    planner: Agent
+    Both agents are built over `NativeFlowgraphProxy` deps; the annotations say
+    so rather than leaving `Agent` bare, which made every construction site an
+    unchecked `Agent[object, str]` mismatch.
+    """
+
+    executor: Agent[NativeFlowgraphProxy, Any]
+    planner: Agent[NativeFlowgraphProxy, Any]
     model_build_error: str | None = None
 
 
+# Fail-closed allowlist: a role that must never mutate cannot be expressed as a
+# denylist, since any newly-added mutation tool would be admitted by default. The
+# filesystem half comes from the harness's own READ_ONLY_TOOL_NAMES rather than a
+# hand-copied list, so it cannot drift when the harness adds a read-only fs tool.
 _PLANNER_FUNCTION_TOOLS = frozenset(
     {
         "inspect_graph",
         "query_knowledge",
         "generate_python",
         "get_run_log",
-        "read_file",
-        "list_directory",
-        "search_files",
-        "find_files",
-        "file_info",
         "read_tool_result",
         "search_conversation_history",
         "duckduckgo_search",
@@ -91,10 +102,13 @@ _PLANNER_FUNCTION_TOOLS = frozenset(
         "write_plan",
         "read_plan",
     }
+    | READ_ONLY_TOOL_NAMES
 )
 
 
-async def _prepare_planner_tools(_ctx: RunContext[Any], tool_defs: list[Any]) -> list[Any]:
+async def _prepare_planner_tools(
+    _ctx: RunContext[Any], tool_defs: list[ToolDefinition]
+) -> list[ToolDefinition]:
     """Expose only read operations plus atomic plan read/write to the planner."""
     return [tool for tool in tool_defs if tool.name in _PLANNER_FUNCTION_TOOLS]
 
@@ -109,8 +123,6 @@ async def _execution_plan_reminder(ctx: RunContext[Any]) -> str | None:
         "The user prepared this plan in Planner mode. Treat it as read-only. Execute it only "
         "when the current user request explicitly asks for implementation; otherwise use it as "
         "reference. Before edits, re-inspect live state and ask before materially changing scope.\n\n"
-        "Never enumerate or reconstruct a block schema from memory. Call inspect_graph or "
-        "query_knowledge for the exact schema, then act only on the returned fields.\n\n"
         f"{render_plan(items)}\n"
         "</execution-plan>"
     )
@@ -259,7 +271,7 @@ def _build_model(cfg: dict, http_client: httpx.AsyncClient):
 
         model_cls = getattr(importlib.import_module(mod_name), cls_name)
         provider_cls = getattr(importlib.import_module(prov_mod), prov_cls)
-        kwargs = {"api_key": key}
+        kwargs: dict[str, Any] = {"api_key": key}
         if http_client_ok:
             kwargs["http_client"] = http_client
         return model_cls(cfg["model"], provider=provider_cls(**kwargs))
@@ -276,7 +288,6 @@ def _build_model(cfg: dict, http_client: httpx.AsyncClient):
         key = (
             get_env_value("OPENAI_COMPATIBLE_API_KEY")
             or os.environ.get("OPENAI_COMPATIBLE_API_KEY")
-            or cfg.get("openai_compatible_api_key")
             or None
         )
         return OpenAIChatModel(
@@ -299,7 +310,6 @@ def _build_model(cfg: dict, http_client: httpx.AsyncClient):
         or get_env_value("OLLAMA_CLOUD_API_KEY")
         or os.environ.get("OLLAMA_API_KEY")
         or os.environ.get("OLLAMA_CLOUD_API_KEY")
-        or cfg.get("ollama_api_key")
     )
     if provider == "ollama_cloud" and not key:
         raise ValueError(
@@ -309,6 +319,27 @@ def _build_model(cfg: dict, http_client: httpx.AsyncClient):
     return OllamaModel(
         cfg["model"],
         provider=OllamaProvider(base_url=base_url, api_key=key, http_client=http_client),
+    )
+
+
+def describe_model(model: Any) -> tuple[str, str, str]:
+    """``(provider_name, base_url, model_name)`` for a live pydantic-ai model.
+
+    All three are public on `Model` in pydantic-ai 2.31 — `provider`,
+    `base_url` (which delegates to the provider) and `model_name`. Two call
+    sites used to reach through `_model_name`/`_provider` private fallbacks
+    with their own copy of the same getattr chain, and disagreed on the missing
+    value ("" here, "<unknown>" there). Returns "" for anything absent; the
+    test models (`TestModel`/`FunctionModel`) have no provider and answer
+    `None` rather than raising, so callers get "" for those too.
+    """
+    if model is None:
+        return "", "", ""
+    provider = getattr(model, "provider", None)
+    return (
+        str(getattr(provider, "name", "") or ""),
+        str(getattr(model, "base_url", "") or ""),
+        str(getattr(model, "model_name", "") or ""),
     )
 
 
@@ -326,21 +357,17 @@ class ModelRequestLogger(AbstractCapability[Any]):
     `name`/`base_url` properties.
     """
 
-    async def before_model_request(  # type: ignore[override]
+    async def before_model_request(
         self,
         ctx: RunContext[Any],  # noqa: ARG002
-        request_context: Any,
-    ) -> Any:
-        model = request_context.model
-        provider_name = "<unknown>"
-        base_url = "<unknown>"
-        model_name = getattr(model, "_model_name", getattr(model, "model_name", "<unknown>"))
-        provider = getattr(model, "_provider", None) or getattr(model, "provider", None)
-        if provider is not None:
-            provider_name = getattr(provider, "name", provider_name)
-            base_url = getattr(provider, "base_url", base_url)
+        request_context: ModelRequestContext,
+    ) -> ModelRequestContext:
+        provider_name, base_url, model_name = describe_model(request_context.model)
         _log.info(
-            "model request -> provider=%s base_url=%s model=%s", provider_name, base_url, model_name
+            "model request -> provider=%s base_url=%s model=%s",
+            provider_name or "<unknown>",
+            base_url or "<unknown>",
+            model_name or "<unknown>",
         )
         return request_context
 
@@ -381,12 +408,10 @@ def _ollama_context_length(model: str) -> int | None:
     parsing num_ctx from the parameters blob. Returns None if unresolvable.
 
     The endpoint is the resolved `ollama_base_url` from load_settings() —
-    the same source of truth `_build_model` uses — so a cloud user (no local
-    URL configured, OLLAMA_CLOUD_API_KEY present) hits ollama.com with the
-    key, and a local user hits their own daemon. Never keyed on a provider
-    name: `load_settings()` normalizes "ollama_cloud" away, and the old
-    name-keyed branch left cloud users silently querying localhost since
-    the backends were consolidated.
+    the canonical URL for each provider (ollama.com for ollama_cloud, the
+    configured daemon URL for ollama_local), so a cloud user hits ollama.com
+    with the key and a local user hits their own daemon. Never keyed on an
+    env-var name: the resolved provider decides the URL.
     """
     import httpx
 
@@ -583,25 +608,12 @@ class TranscriptPreservingTieredCompaction(TieredCompaction):
         if processed.messages == before or ctx.conversation_id is None:
             return processed
 
-        store = get_step_store()
-        agent_name = getattr(self, "archive_agent_name", "grc_chat")
-        run_id = f"{agent_name}-compaction-{uuid4().hex[:8]}"
-        await store.register_run(
-            RunRecord(
-                run_id=run_id,
-                conversation_id=ctx.conversation_id,
-                agent_name=agent_name,
-                metadata={"kind": "pre_compaction_transcript"},
-            )
-        )
-        await store.save_snapshot(
-            ContinuableSnapshot(
-                run_id=run_id,
-                step_index=ctx.run_step,
-                messages=transcript,
-                conversation_id=ctx.conversation_id,
-                agent_name=agent_name,
-            )
+        await archive_transcript(
+            transcript,
+            conversation_id=ctx.conversation_id,
+            agent_name=self.archive_agent_name,
+            kind="pre_compaction_transcript",
+            step_index=ctx.run_step,
         )
         return processed
 
@@ -639,8 +651,8 @@ def _build_compaction_capability(
 
     Evicts bulky older tool return contents (e.g. inspect_graph 10k JSONs, generate_python previews)
     when the history exceeds a fraction of the model's context window, keeping the last 3 tool
-    return pairs and dialogue history intact; small tool results (under 2000 tokens) are never
-    evicted.
+    return pairs and dialogue history intact. `min_clear_tokens` is a TOTAL-reclaim gate: when the
+    clearable set's combined size is below it, nothing is cleared at all.
 
     The target is one uniform fraction (85%) of the model's REAL context
     window, probed from the backend itself (Ollama /api/show, OpenRouter/
@@ -668,7 +680,7 @@ def _build_compaction_capability(
     # Threshold mirrors the window pins: half the assumed window, so one
     # part can never alone overflow it.
     clamp_tokens = 16_000 if is_local else 64_000
-    tiers = [
+    tiers: list[CompactionStrategy[Any]] = [
         ClampOversizedMessages(max_part_tokens=clamp_tokens),
         # TieredCompaction drives the tiers itself (each tier's own trigger is
         # bypassed), so the knobs that matter here are keep_pairs and
@@ -778,7 +790,8 @@ def build_agents_from_cfg(cfg: dict) -> AgentBundle:
         from grc_agent.providers.openai_codex.model import CODEX_MODEL_SETTINGS
 
         # Codex rejects store:true outright ("Store must be set to false").
-        model_settings = ModelSettings(**CODEX_MODEL_SETTINGS)
+        # Copied, not shared, so a per-agent mutation can't leak into the constant.
+        model_settings: ModelSettings = dict(CODEX_MODEL_SETTINGS)  # type: ignore[assignment]
     else:
         # Ollama and plain OpenAI-compatible endpoints: no thinking request
         # knobs at all — the provider's native default stands. Verified live:
@@ -848,6 +861,17 @@ def build_agents_from_cfg(cfg: dict) -> AgentBundle:
             Planning(
                 store_resolver=_plan_store_resolver,
                 tools=["write_plan", "read_plan"],
+                # Explicit, because the auto-assembled default is wrong for this
+                # narrowed tool set: Planning.get_instructions gates its granular
+                # sentence on `registered & {'read_plan', 'add_task',
+                # 'update_task_status', 'update_task_statuses'}`, so registering
+                # `read_plan` alone trips it and the planner is told to call three
+                # tools it does not have. `guidance` is used verbatim.
+                guidance=(
+                    "You have two planning tools. Call `read_plan` to see the current plan, and "
+                    "`write_plan` to replace it atomically with the complete plan — pass every step "
+                    "each time, marking at most one step `in_progress`."
+                ),
             ),
             _build_compaction_capability(cfg, agent_name="grc_planner"),
             web_search_cap,
@@ -944,7 +968,7 @@ def _preflight_target(provider: str, api_key: str, base_url: str) -> tuple[str, 
         )
         headers = (
             {"Authorization": f"Bearer {api_key}"}
-            if (api_key and api_key != "not-required")
+            if api_key
             else {}
         )
         return models_url, headers

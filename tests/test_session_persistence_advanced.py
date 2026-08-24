@@ -5,7 +5,7 @@ These go beyond the basic test_session_persistence.py suite:
 - Concurrency: N worker threads writing/reading the step store simultaneously
 - Concurrency: multi-thread init_db race
 - Data integrity: Unicode, emojis, null bytes, large blobs, multi-turn accumulation
-- Schema migration: v1/v2 → v4 (turn_traces dropped, StepPersistence tables owned by the store)
+- No legacy migration chain: the store's own tables are created lazily (the hand-rolled turn_traces table never exists)
 - ChatSidebar end-to-end: real widget tree under xvfb with a real (test) agent
 - Race condition: concurrent save_session + delete_session
 
@@ -13,7 +13,6 @@ Needs xvfb-run for the ChatSidebar integration tests.
 """
 
 import asyncio
-import sqlite3
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -41,7 +40,6 @@ def _isolated_env(tmp_path, monkeypatch):
     from grc_agent import db
 
     db._initialized_paths.clear()
-    db._cleanup_done.clear()
     db._step_stores.clear()
     yield
 
@@ -213,7 +211,7 @@ def test_concurrent_save_session_and_read_no_locking(tmp_path):
 def test_concurrent_init_db_from_multiple_threads():
     """Multiple threads calling init_db() simultaneously must not raise.
     The _init_lock + double-checked locking guarantees only one actually
-    runs the migrations."""
+    runs the schema/table-existence setup."""
     from grc_agent.db import init_db
 
     errors = []
@@ -427,93 +425,6 @@ def test_first_message_preserves_multiline_and_whitespace(tmp_path):
 
 
 # ==========================================
-# Schema migration: v1 → v2
-# ==========================================
-
-
-def test_v1_db_migrates_to_latest_without_turn_traces(tmp_path, monkeypatch):
-    """A DB already at schema_version=1 (sessions with first_message) migrates
-    through the chain to the latest version; the hand-rolled turn_traces table
-    never survives, and existing session data is untouched."""
-    monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
-    from grc_agent.db import LATEST_SCHEMA_VERSION, get_db_path
-
-    db_path = get_db_path()
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-
-    from pydantic_ai import ModelMessagesTypeAdapter
-    from pydantic_ai.messages import ModelRequest, UserPromptPart
-
-    msgs = [ModelRequest(parts=[UserPromptPart(content="v1 prompt")])]
-    blob = ModelMessagesTypeAdapter.dump_json(msgs).decode("utf-8")
-
-    # Build a v1 DB manually: sessions WITH first_message, _meta at version 1, NO turn_traces
-    with sqlite3.connect(str(db_path)) as raw:
-        raw.execute("CREATE TABLE _meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
-        raw.execute("INSERT INTO _meta (key, value) VALUES ('schema_version', '1')")
-        raw.execute(
-            "CREATE TABLE sessions ("
-            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
-            "grc_file_path TEXT NOT NULL, "
-            "messages TEXT NOT NULL, "
-            "first_message TEXT NOT NULL DEFAULT '', "
-            "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, "
-            "updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"
-        )
-        raw.execute(
-            "INSERT INTO sessions (grc_file_path, messages, first_message) VALUES (?, ?, ?)",
-            (str(tmp_path / "v1.grc"), blob, "v1 prompt"),
-        )
-        raw.commit()
-
-    # Run init_db — must migrate v1 through the chain to the latest version
-    from grc_agent import db as db_mod
-
-    db_mod._initialized_paths.clear()
-    db_mod.init_db()
-
-    with sqlite3.connect(str(db_path)) as raw:
-        version = raw.execute("SELECT value FROM _meta WHERE key = 'schema_version'").fetchone()
-        assert int(version[0]) == LATEST_SCHEMA_VERSION
-
-        tables = [
-            r[0]
-            for r in raw.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
-        ]
-        assert "turn_traces" not in tables, "v4 must drop the hand-rolled trace table"
-
-        # Existing session data is untouched
-        row = raw.execute("SELECT first_message, messages FROM sessions").fetchone()
-        assert row[0] == "v1 prompt"
-
-
-def test_migration_skipped_when_already_at_latest():
-    """If _meta already records LATEST_SCHEMA_VERSION, no migration runs.
-    Verified by checking that a deliberately-corrupt 'pending migration'
-    marker is NOT touched."""
-    from grc_agent import db as db_mod
-    from grc_agent.db import LATEST_SCHEMA_VERSION, get_db_path
-
-    db_mod.init_db()  # full init at latest
-    db_path = get_db_path()
-
-    # Inject a marker that a migration would overwrite
-    with sqlite3.connect(str(db_path)) as raw:
-        raw.execute(
-            "INSERT OR REPLACE INTO _meta (key, value) VALUES ('migration_marker', 'untouched')"
-        )
-        raw.commit()
-
-    db_mod._initialized_paths.clear()
-    db_mod.init_db()  # re-init — must skip since version is latest
-
-    with sqlite3.connect(str(db_path)) as raw:
-        marker = raw.execute("SELECT value FROM _meta WHERE key = 'migration_marker'").fetchone()
-        assert marker is not None and marker[0] == "untouched"
-        version = raw.execute("SELECT value FROM _meta WHERE key = 'schema_version'").fetchone()
-        assert int(version[0]) == LATEST_SCHEMA_VERSION
-
-
 # ==========================================
 # ChatSidebar end-to-end with real (test) agent
 # ==========================================
@@ -632,7 +543,7 @@ def test_manual_compaction_preserves_full_history_and_reasoning_in_same_db(
     async def _fake_compact(_strategy, messages, *, model):  # noqa: ARG001
         return messages[-2:]
 
-    monkeypatch.setattr("pydantic_ai_harness.compaction._manual.compact_now", _fake_compact)
+    monkeypatch.setattr("pydantic_ai_harness.compaction.compact_now", _fake_compact)
     asyncio.run(sidebar._run_compact_now())
 
     session = load_session(sid)
@@ -775,7 +686,10 @@ def test_chatsidebar_turn_without_session_records_ungrouped_run():
     sidebar._active_model = "m"
     sidebar._active_base_url = "b"
     sidebar._active_session_id = None  # no session bound
-    sidebar._flowgraph_proxy = MagicMock()
+    # No flowgraph proxy at all: _get_effective_path() returns None (an
+    # unsaved tab still yields a synthetic 'untitled:' path and therefore a
+    # session row), so no session is created and the run stays ungrouped.
+    sidebar._flowgraph_proxy = None
     sidebar._save_history = AsyncMock()
     sidebar._render_history = MagicMock()
     sidebar._scroll_to_bottom = MagicMock()
@@ -800,55 +714,3 @@ def ModelResponse_with_text(text):
     from pydantic_ai.messages import ModelResponse, TextPart
 
     return ModelResponse(parts=[TextPart(content=text)])
-
-
-def test_v2_db_with_turn_traces_migrates_to_latest_and_drops_it(tmp_path, monkeypatch):
-    """A DB already at schema_version=2 (turn_traces present, populated) migrates
-    to the latest version by dropping the table — the rows it held are not
-    ported (no bridge, no dual-write), and session data is untouched."""
-    monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
-    from grc_agent.db import LATEST_SCHEMA_VERSION, get_db_path
-
-    db_path = get_db_path()
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-
-    # Build a v2 DB manually: sessions + populated turn_traces.
-    with sqlite3.connect(str(db_path)) as raw:
-        raw.execute("CREATE TABLE _meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
-        raw.execute("INSERT INTO _meta (key, value) VALUES ('schema_version', '2')")
-        raw.execute(
-            "CREATE TABLE sessions ("
-            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
-            "grc_file_path TEXT NOT NULL, "
-            "messages TEXT NOT NULL, "
-            "first_message TEXT NOT NULL DEFAULT '', "
-            "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, "
-            "updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"
-        )
-        raw.execute(
-            "INSERT INTO sessions (grc_file_path, messages, first_message) VALUES (?, ?, ?)",
-            (str(tmp_path / "v2.grc"), "[]", "v2 prompt"),
-        )
-        raw.execute(
-            "CREATE TABLE turn_traces ("
-            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
-            "session_id INTEGER NOT NULL, started_at REAL NOT NULL, "
-            "events TEXT NOT NULL DEFAULT '[]')"
-        )
-        raw.execute(
-            "INSERT INTO turn_traces (session_id, started_at, events) VALUES (1, 1000.0, '[]')"
-        )
-        raw.commit()
-
-    from grc_agent import db as db_mod
-
-    db_mod._initialized_paths.clear()
-    db_mod.init_db()
-
-    with sqlite3.connect(str(db_path)) as raw:
-        version = raw.execute("SELECT value FROM _meta WHERE key = 'schema_version'").fetchone()
-        assert int(version[0]) == LATEST_SCHEMA_VERSION
-        tables = {r[0] for r in raw.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-        assert "turn_traces" not in tables
-        row = raw.execute("SELECT first_message FROM sessions").fetchone()
-        assert row[0] == "v2 prompt"

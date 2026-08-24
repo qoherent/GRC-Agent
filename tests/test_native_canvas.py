@@ -119,11 +119,13 @@ def test_sync_manual_edit_does_not_block_when_lock_held(tmp_path, monkeypatch):
     try:
         done = threading.Event()
 
+        errors: list[BaseException] = []
+
         def run() -> None:
             try:
                 cm.sync_manual_edit()
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as exc:  # noqa: BLE001
+                errors.append(exc)
             finally:
                 done.set()
 
@@ -135,6 +137,7 @@ def test_sync_manual_edit_does_not_block_when_lock_held(tmp_path, monkeypatch):
         held.close()
 
     assert finished, "sync_manual_edit blocked waiting for a held lock"
+    assert not errors, f"sync_manual_edit raised instead of skipping: {errors!r}"
 
 
 def test_check_for_unsynced_edit_logs_and_rearms(monkeypatch, caplog):
@@ -519,6 +522,4 @@ def test_scroll_to_relaid_out_graph():
     cm._scroll_to_relaid_out_graph(fg, old_names={"only_1"})
     sw = cm._get_scrolled_window()
     sw.get_hadjustment.assert_not_called()
-    sw.get_vadjustment.assert_not_called()
-
     sw.get_vadjustment.assert_not_called()

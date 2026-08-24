@@ -79,7 +79,7 @@ class MarkdownView:
         if self._badge_regex_cache and self._badge_regex_cache[0] == key:
             return self._badge_regex_cache[1]
         pattern = build_badge_regex(names)
-        self._badge_regex_cache = (key, pattern) if pattern else None
+        self._badge_regex_cache = (key, pattern)
         return pattern
 
     def _make_block_badge_widget(self, name: str) -> Gtk.EventBox:
@@ -102,8 +102,6 @@ class MarkdownView:
             last = m.end()
         if text[last:]:
             box.pack_start(self._inline_label(text[last:], bold), False, False, 0)
-        if not box.get_children():
-            box.pack_start(self._inline_label("", bold), False, False, 0)
         return box
 
     @staticmethod
@@ -230,7 +228,9 @@ class MarkdownView:
             return
 
         if tag in ("p", "div"):
-            for child in element.children:
+            for i, child in enumerate(element.children):
+                if i:
+                    self._insert_plain_tagged(buffer, "\n", active_tags)
                 self._element_to_buffer(child, buffer, tv, active_tags)
         elif tag in ("strong", "b"):
             for child in element.children:
@@ -261,8 +261,12 @@ class MarkdownView:
             for child in element.children:
                 self._element_to_buffer(child, buffer, tv, active_tags)
         elif tag in ("table", "thead", "tbody", "tr", "td", "th", "pre"):
-            # Never reached — render() intercepts <table>/<pre> at the top level.
-            return
+            # Nested table/code inside a list item etc. — render() only
+            # intercepts top-level <table>/<pre>. Flatten the children inline
+            # (never silently drop them); the text survives, just without
+            # table/code-block chrome.
+            for child in element.children:
+                self._element_to_buffer(child, buffer, tv, active_tags)
         else:
             for child in element.children:
                 self._element_to_buffer(child, buffer, tv, active_tags)
@@ -428,7 +432,7 @@ class MarkdownView:
                         )
                 elif tag == "pre":
                     _flush_prose()
-                    code_text = element.get_text().replace("\u00a0", " ").replace("\xa0", " ")
+                    code_text = element.get_text().replace("\u00a0", " ")
                     lang = ""
                     code_child = element.find("code")
                     if code_child and code_child.has_attr("class"):

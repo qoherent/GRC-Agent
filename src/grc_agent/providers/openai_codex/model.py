@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import httpx
 from openai import APIStatusError, AsyncOpenAI
-from pydantic_ai.models.openai import OpenAIResponsesModel
+from pydantic_ai.models.openai import OpenAIResponsesModel, OpenAIResponsesModelSettings
 from pydantic_ai.providers.openai import OpenAIProvider
 
 from . import credentials
@@ -26,12 +26,9 @@ from .credentials import CodexError
 
 BASE_URL = "https://chatgpt.com/backend-api/codex"
 ORIGINATOR = "grc-agent"
-# Verified against a live ChatGPT account's /codex/models: `gpt-5.1-codex`
-# is rejected with "not supported when using Codex with a ChatGPT account".
-# Only what that endpoint lists is usable. This default is a starting point,
-# not a claim about any particular account: Settings -> Load lists what the
-# signed-in account actually offers, which is the reliable way to pick one.
-DEFAULT_MODEL = "gpt-5.6-luna"
+# The default model id comes from settings._DEFAULT_MODELS ("openai_codex_model")
+# — the single source of truth; there is deliberately no second default here.
+# Model ids must come from the backend (Settings -> Load), not from memory.
 
 # Sent as ?client_version= on the models endpoint, which requires it and
 # filters the catalog against each model's `minimal_client_version`. Verified
@@ -51,7 +48,10 @@ CLIENT_VERSION = "9999.0.0"
 # for a summary the reasoning is computed and then discarded — the sidebar's
 # per-turn trace stays empty. Requesting one turns it into ThinkingParts
 # (confirmed live: Codex emits `response.reasoning_summary_text.delta`).
-CODEX_MODEL_SETTINGS = {
+# Typed as OpenAIResponsesModelSettings, not a bare dict: all four keys are
+# Responses-specific and absent from base ModelSettings, so an untyped literal
+# meant a typo'd key would have been silently ignored by the provider.
+CODEX_MODEL_SETTINGS: OpenAIResponsesModelSettings = {
     "openai_store": False,
     "openai_text_verbosity": "low",
     "openai_reasoning_summary": "auto",
@@ -161,7 +161,7 @@ class CodexResponsesModel(OpenAIResponsesModel):
         return _Wrapped()
 
 
-def build_model(model_name: str = DEFAULT_MODEL) -> CodexResponsesModel:
+def build_model(model_name: str) -> CodexResponsesModel:
     """Construct the model. Does not touch the network or read credentials —
     `_CodexAuth` resolves those per request, so an unauthenticated config
     still builds and fails with a clear message only when actually used."""

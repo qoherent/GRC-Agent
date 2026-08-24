@@ -46,8 +46,11 @@ The application merges the GNU Radio Companion desktop canvas with the AI sideba
 
 The agent interacts with the user's project through fifteen tools — six
 flowgraph-domain tools, eight sandboxed filesystem tools, and the harness's
-planning tools (`write_plan`/`read_plan`/task management). Web search and
-fetch capabilities complete the surface.
+`read_tool_result` (lossless spill/truncate read-back for oversized tool
+returns). The separate planner role holds `write_plan`/`read_plan` only; the
+executor deliberately has no planning tools (the durable plan arrives via a
+read-only system reminder). Web search and fetch capabilities complete the
+surface.
 
 ### 1. Context-Efficient Graph Inspection (`inspect_graph`)
 
@@ -97,7 +100,7 @@ Exports an existing Embedded Python Block (`epy_block`) instance's source into G
 
 ### 7. Sandboxed Filesystem Tools (`read_file` · `write_file` · `edit_file` · `list_directory` · `search_files` · `find_files` · `create_directory` · `file_info`)
 
-A `FileSystemToolset` subclass (`fs_tools.py`, pydantic-ai-harness 0.23) whose sandbox root is the **active `.grc` file's directory**, re-resolved per tool call — tab switches and saves are followed automatically; an unsaved flowgraph gates every tool with a "save first" error instead of a CWD fallback. `.grc` files never reach the model as raw XML: `read_file` routes them through the structural `inspect_graph` engine (the active file inspects the live in-memory `FlowGraph`; others load headlessly). Flowgraph writes are structurally impossible — one uniform name rule (case-insensitive `.grc`, covering `.GRC` and `.grc~`) drives both read routing and the write gate, and the write suffix allowlist (`.py .cmake .txt .md .m .json` YAML/C-C++/`.xml .conf .rst .i` — OOT-module-ready) is re-checked against the symlink-resolved target. Writes are atomic (temp → fsync → rename) with `expected_hash` conflict detection. Secrets and repo metadata (`.env`, `.env.*`, `.envrc`, `.grc_agent/`, `.git/`) are denied at root and nested; reads cap at 1000 lines, listings at 200 entries.
+A `FileSystemToolset` subclass (`fs_tools.py`, pydantic-ai-harness 0.23) whose sandbox root is the **configured project directory** (selected in the sidebar and persisted in `GRC_PROJECT_DIR`, with active flowgraph directory fallback). `.grc` files never reach the model as raw XML: `read_file` routes them through the structural `inspect_graph` engine (the active file inspects the live in-memory `FlowGraph`; others load headlessly). Flowgraph writes are structurally impossible — one uniform name rule (case-insensitive `.grc`, covering `.GRC` and `.grc~`) drives both read routing and the write gate, and the write suffix allowlist (`.py .cmake .txt .md .m .json` YAML/C-C++/`.xml .conf .rst .i` — OOT-module-ready) is re-checked against the symlink-resolved target. Writes are atomic (temp → fsync → rename) with `expected_hash` conflict detection. Secrets and repo metadata (`.env`, `.env.*`, `.envrc`, `.grc_agent/`, `.git/`) are denied at root and nested; reads cap at 1000 lines, listings at 200 entries.
 
 ### 8. Indirect Prompt-Injection Defense
 

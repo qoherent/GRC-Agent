@@ -4,7 +4,7 @@ No LLM, no GUI — fast and hermetic (each test redirects GRC_AGENT_ENV to a
 fresh tmp path so db.py's per-path init guard re-inits cleanly).
 
 Session persistence (messages blob via the library's ModelMessagesTypeAdapter,
-first_message preview column, WAL, schema versioning) is unchanged. The former
+first_message preview column, WAL) is unchanged. The former
 hand-rolled `turn_traces` layer is replaced by pydantic-ai-harness
 `StepPersistence` (runs/events/snapshots/tool_effects on the same DB file,
 grouped per chat session via `conversation_id = 'session-{id}'`).
@@ -26,7 +26,6 @@ def _isolated_env(tmp_path, monkeypatch):
     from grc_agent import db
 
     db._initialized_paths.clear()
-    db._cleanup_done.clear()
     db._step_stores.clear()
     yield
 
@@ -41,7 +40,7 @@ def _open_raw_connection():
 
 
 # ==========================================
-# Phase 1: db.py reliability + schema versioning + first_message
+# Phase 1: db.py reliability + first_message
 # ==========================================
 
 
@@ -69,25 +68,47 @@ def test_journal_mode_persists_at_file_level():
     assert mode == "wal"
 
 
-def test_schema_version_meta_present_and_latest():
-    from grc_agent.db import LATEST_SCHEMA_VERSION, init_db
+def test_schema_tables_present_after_init():
+    from grc_agent.db import init_db
 
     init_db()
     with _open_raw_connection() as raw:
-        row = raw.execute("SELECT value FROM _meta WHERE key = 'schema_version'").fetchone()
-    assert row is not None, "_meta must record the schema version"
-    assert int(row[0]) == LATEST_SCHEMA_VERSION
+        tables = {r[0] for r in raw.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+        indexes = {r[0] for r in raw.execute("SELECT name FROM sqlite_master WHERE type='index'").fetchall()}
+    assert "sessions" in tables
+    assert "idx_sessions_recent" in indexes
+
+
+def test_sessions_recency_index_answers_the_order_by():
+    """The session list is sorted on every render and pruned on every save.
+    Without idx_sessions_recent both plan as a full scan plus a temp B-tree —
+    assert the index actually answers the sort instead."""
+    from grc_agent.db import init_db
+
+    init_db()
+    with _open_raw_connection() as raw:
+        for sql in (
+            "SELECT id, grc_file_path, first_message, created_at, updated_at "
+            "FROM sessions ORDER BY updated_at DESC, id DESC LIMIT 20",
+            "SELECT id FROM sessions WHERE id NOT IN ("
+            "SELECT id FROM sessions ORDER BY updated_at DESC, id DESC LIMIT 200)",
+        ):
+            plan = " ".join(str(r[-1]) for r in raw.execute("EXPLAIN QUERY PLAN " + sql))
+            assert "TEMP B-TREE" not in plan, f"unindexed sort: {plan}"
+            assert "idx_sessions_recent" in plan, f"index unused: {plan}"
 
 
 def test_init_db_is_idempotent():
     from grc_agent.db import init_db
 
     init_db()
-    init_db()  # second call must not raise or duplicate migrations
+    init_db()  # second call must not raise
     init_db()
     with _open_raw_connection() as raw:
-        row = raw.execute("SELECT value FROM _meta WHERE key = 'schema_version'").fetchone()
-    assert int(row[0]) >= 2
+        tables = {r[0] for r in raw.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+        indexes = {r[0] for r in raw.execute("SELECT name FROM sqlite_master WHERE type='index'").fetchall()}
+    assert "sessions" in tables
+    assert "idx_sessions_recent" in indexes
 
 
 def test_first_message_populated_at_save_and_read_directly(tmp_path):
@@ -273,7 +294,7 @@ def test_step_persistence_records_runs_events_and_snapshot():
 def test_step_tables_created_on_shared_db_file():
     """The store co-locates runs/events/snapshots/tool_effects on
     chat_sessions.db (tables are created lazily on the first store write),
-    and the v4 migration leaves no turn_traces table."""
+    and the schema never creates the hand-rolled turn_traces table."""
     from grc_agent.db import get_step_store
 
     store = get_step_store()
@@ -281,7 +302,7 @@ def test_step_tables_created_on_shared_db_file():
     with _open_raw_connection() as raw:
         tables = {r[0] for r in raw.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     assert {"runs", "events", "snapshots", "tool_effects"} <= tables
-    assert "turn_traces" not in tables, "v4 must drop the hand-rolled trace table"
+    assert "turn_traces" not in tables, "the hand-rolled trace table must never exist"
 
 
 def test_delete_session_cascades_step_rows():
@@ -363,158 +384,3 @@ def test_orphan_sweep_removes_unmothered_session_rows():
     assert "session-999" not in convs, "orphaned session-N rows must be swept"
     assert None in convs, "ungrouped runs must never be touched by the sweep"
 
-
-# ==========================================
-# Phase 3: migrations
-# ==========================================
-
-
-def test_v0_to_v1_migration_backfills_first_message(tmp_path, monkeypatch):
-    """A pre-existing v0 sessions table (no first_message column, no _meta)
-    must be migrated to v1 by backfilling first_message from each row's
-    messages blob, then bumped to LATEST_SCHEMA_VERSION."""
-    monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
-    # Build a v0-style DB manually: sessions table without first_message, no _meta
-    from grc_agent.db import get_db_path
-
-    db_path = get_db_path()
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-
-    from pydantic_ai import ModelMessagesTypeAdapter
-    from pydantic_ai.messages import ModelRequest, UserPromptPart
-
-    msgs = [ModelRequest(parts=[UserPromptPart(content="legacy first prompt")])]
-    blob = ModelMessagesTypeAdapter.dump_json(msgs).decode("utf-8")
-
-    with sqlite3.connect(str(db_path)) as raw:
-        raw.execute(
-            "CREATE TABLE sessions ("
-            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
-            "grc_file_path TEXT NOT NULL, "
-            "messages TEXT NOT NULL, "
-            "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, "
-            "updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"
-        )
-        raw.execute(
-            "INSERT INTO sessions (grc_file_path, messages) VALUES (?, ?)",
-            (str(tmp_path / "old.grc"), blob),
-        )
-        raw.commit()
-
-    # Now run init_db() — it must migrate v0 -> v1 (add first_message,
-    # backfill) and onward through the chain to the latest version.
-    from grc_agent import db as db_mod
-
-    db_mod._initialized_paths.clear()
-    db_mod.init_db()
-
-    with sqlite3.connect(str(db_path)) as raw:
-        cols = [r[1] for r in raw.execute("PRAGMA table_info(sessions)").fetchall()]
-        assert "first_message" in cols, "ALTER TABLE must add first_message"
-        row = raw.execute("SELECT first_message FROM sessions").fetchone()
-        assert row[0] == "legacy first prompt", "backfill must extract the first user prompt"
-        version = raw.execute("SELECT value FROM _meta WHERE key = 'schema_version'").fetchone()
-        assert version is not None and int(version[0]) == db_mod.LATEST_SCHEMA_VERSION
-        # The hand-rolled trace table must NOT exist at the latest version.
-        tables = [
-            r[0]
-            for r in raw.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
-        ]
-        assert "turn_traces" not in tables
-
-
-def test_v3_db_with_turn_traces_migrates_to_v4_and_drops_it(tmp_path, monkeypatch):
-    """A schema-v3 database (turn_traces present) migrates to v4 by dropping
-    the table — no bridge, no dual-write."""
-    monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
-    from grc_agent.db import get_db_path
-
-    db_path = get_db_path()
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-
-    with sqlite3.connect(str(db_path)) as raw:
-        raw.execute("CREATE TABLE _meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
-        raw.execute("INSERT INTO _meta (key, value) VALUES ('schema_version', '3')")
-        raw.execute(
-            "CREATE TABLE sessions ("
-            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
-            "grc_file_path TEXT NOT NULL, "
-            "messages TEXT NOT NULL, "
-            "first_message TEXT NOT NULL DEFAULT '', "
-            "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, "
-            "updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"
-        )
-        raw.execute("CREATE TABLE turn_traces (id INTEGER PRIMARY KEY)")
-        raw.commit()
-
-    from grc_agent import db as db_mod
-
-    db_mod._initialized_paths.clear()
-    db_mod.init_db()
-
-    with sqlite3.connect(str(db_path)) as raw:
-        tables = {r[0] for r in raw.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-        assert "turn_traces" not in tables
-        version = raw.execute("SELECT value FROM _meta WHERE key = 'schema_version'").fetchone()
-        assert int(version[0]) == db_mod.LATEST_SCHEMA_VERSION
-
-
-def test_v0_to_v1_migration_survives_crash_after_alter(tmp_path, monkeypatch):
-    """Regression (review issue #1, blocking): Python's sqlite3 auto-commits
-    DDL (ALTER TABLE) but NOT DML (UPDATE). If the process is killed after
-    the ALTER but before the backfill UPDATEs commit, the column is present
-    on restart but unbackfilled. The idempotent backfill (outside the elif
-    branch) must catch this on re-init."""
-    monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
-    from grc_agent.db import get_db_path
-
-    db_path = get_db_path()
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-
-    from pydantic_ai import ModelMessagesTypeAdapter
-    from pydantic_ai.messages import ModelRequest, UserPromptPart
-
-    msgs = [ModelRequest(parts=[UserPromptPart(content="prompt that must survive crash")])]
-    blob = ModelMessagesTypeAdapter.dump_json(msgs).decode("utf-8")
-
-    # Simulate a crashed v0→v1 migration: the ALTER TABLE auto-committed
-    # (column is present) but the backfill UPDATEs were rolled back (values
-    # are still the column default ''). The _meta table is NOT bumped.
-    with sqlite3.connect(str(db_path)) as raw:
-        raw.execute(
-            "CREATE TABLE sessions ("
-            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
-            "grc_file_path TEXT NOT NULL, "
-            "messages TEXT NOT NULL, "
-            "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, "
-            "updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"
-        )
-        raw.execute(
-            "INSERT INTO sessions (grc_file_path, messages) VALUES (?, ?)",
-            (str(tmp_path / "crashed.grc"), blob),
-        )
-        raw.commit()
-        # Simulate the ALTER TABLE auto-commit (DDL commits implicitly)
-        raw.execute("ALTER TABLE sessions ADD COLUMN first_message TEXT NOT NULL DEFAULT ''")
-        # Do NOT commit any backfill UPDATE — simulate the crash.
-        # first_message stays '' (the column default).
-
-    # Verify the crash state: column exists, value is empty
-    with sqlite3.connect(str(db_path)) as raw:
-        cols = [r[1] for r in raw.execute("PRAGMA table_info(sessions)").fetchall()]
-        assert "first_message" in cols
-        val = raw.execute("SELECT first_message FROM sessions").fetchone()[0]
-        assert val == "", "pre-condition: backfill was lost in the crash"
-
-    # Now re-init — the idempotent backfill must recover the lost data
-    from grc_agent import db as db_mod
-
-    db_mod._initialized_paths.clear()
-    db_mod.init_db()
-
-    with sqlite3.connect(str(db_path)) as raw:
-        val = raw.execute("SELECT first_message FROM sessions").fetchone()[0]
-        assert val == "prompt that must survive crash", (
-            "idempotent backfill must recover the first_message even after "
-            "a crash between ALTER (auto-committed) and backfill (rolled back)"
-        )

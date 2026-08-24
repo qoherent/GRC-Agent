@@ -36,7 +36,7 @@ async def list_models(cfg: dict, api_key: str = "", base_url: str = "") -> list[
     asked — the caller shows that instead of an empty dropdown, so "no models"
     is never confused with "could not reach the backend".
     """
-    provider = cfg.get("provider", "ollama")
+    provider = cfg["provider"]
     if provider == "openai_codex":
         from grc_agent.providers.openai_codex.model import list_models as codex_models
 

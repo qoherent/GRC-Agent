@@ -36,6 +36,11 @@ textview.chat-thinking-textview text {
 
 /* ---- panel separators ----------------------------------------------- */
 .chat-sidebar { border-left: 1px solid @SOFT@; }
+.chat-project-bar { border-bottom: 1px solid @SOFT@; }
+.chat-project-label {
+    color: alpha(@theme_fg_color, 0.78);
+    font-size: 0.85em;
+}
 .chat-toolbar { border-bottom: 1px solid @SOFT@; }
 .chat-status-bar { border-top: 1px solid @SOFT@; }
 .chat-side-toggle { border-right: 1px solid @SOFT@; }
@@ -45,7 +50,36 @@ textview.chat-thinking-textview text {
 .chat-header-badge {
     border: 1px solid @SOFT@;
     border-radius: 4px;
-    padding: 3px 7px;
+    padding: 2px 6px;
+    font-size: 0.78em;
+}
+
+.chat-mode-btn {
+    border-radius: 12px;
+    padding: 2px 10px;
+    font-size: 0.80em;
+    font-weight: bold;
+    min-height: 22px;
+}
+.chat-mode-agent {
+    border: 1px solid #3584e4;
+    background: rgba(53, 132, 228, 0.18);
+    color: #3584e4;
+}
+.chat-mode-agent:hover {
+    background: rgba(53, 132, 228, 0.32);
+    border-color: #1c71d8;
+    color: #1c71d8;
+}
+.chat-mode-planner {
+    border: 1px solid #e66100;
+    background: rgba(230, 97, 0, 0.18);
+    color: #e66100;
+}
+.chat-mode-planner:hover {
+    background: rgba(230, 97, 0, 0.32);
+    border-color: #c64600;
+    color: #c64600;
 }
 
 /* ---- content containers (clear boundaries) -------------------------- */
@@ -190,6 +224,7 @@ textview.chat-thinking-textview text {
 _CSS = _CSS_TEMPLATE.replace("@STRONG@", _STRONG).replace("@SOFT@", _SOFT).encode()
 
 _applied = False
+_original_system_theme: str | None = None
 
 
 def apply_css() -> None:
@@ -206,3 +241,80 @@ def apply_css() -> None:
         screen, provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
     )
     _applied = True
+
+
+def _get_theme_pair() -> tuple[str, str]:
+    """Find installed system GTK3 dark and light theme pair."""
+    from pathlib import Path
+
+    try:
+        installed = {
+            p.name
+            for p in Path("/usr/share/themes").iterdir()
+            if p.is_dir() and (p / "gtk-3.0").exists()
+        }
+    except Exception:
+        installed = set()
+
+    if "Yaru-dark" in installed and "Yaru" in installed:
+        return "Yaru-dark", "Yaru"
+    if "Adwaita-dark" in installed and "Adwaita" in installed:
+        return "Adwaita-dark", "Adwaita"
+    return "Adwaita-dark", "Adwaita"
+
+
+def apply_theme(mode: str) -> None:
+    """Apply the application theme mode ('dark', 'light', or 'system').
+
+    Requests the native GTK dark/light variant from the host theme or sets
+    the system GTK theme, allowing full visual harmony with GNU Radio
+    Companion and the desktop environment.
+    """
+    global _original_system_theme
+    settings = Gtk.Settings.get_default()
+    if settings is None:
+        return
+
+    if _original_system_theme is None:
+        _original_system_theme = settings.get_property("gtk-theme-name") or "Adwaita"
+
+    dark_theme, light_theme = _get_theme_pair()
+
+    if mode == "dark":
+        settings.set_property("gtk-theme-name", dark_theme)
+        settings.set_property("gtk-application-prefer-dark-theme", True)
+    elif mode == "light":
+        settings.set_property("gtk-theme-name", light_theme)
+        settings.set_property("gtk-application-prefer-dark-theme", False)
+    else:  # "system"
+        if _original_system_theme:
+            settings.set_property("gtk-theme-name", _original_system_theme)
+        settings.reset_property("gtk-application-prefer-dark-theme")
+
+
+def is_dark_theme(widget: Gtk.Widget | None = None) -> bool:
+    """Determine whether the active theme is dark."""
+    settings = Gtk.Settings.get_default()
+    if settings is not None:
+        if settings.get_property("gtk-application-prefer-dark-theme"):
+            return True
+        theme_name = (settings.get_property("gtk-theme-name") or "").lower()
+        if "dark" in theme_name or "black" in theme_name:
+            return True
+
+    try:
+        ctx = widget.get_style_context() if widget else Gtk.StyleContext()
+        val, color = ctx.lookup_color("theme_bg_color")
+        if val and color:
+            lum = 0.2126 * color.red + 0.7152 * color.green + 0.0722 * color.blue
+            return lum < 0.5
+    except Exception:
+        pass
+
+    return False
+
+
+def get_code_style(widget: Gtk.Widget | None = None) -> str:
+    """Return Pygments syntax theme name for the current theme mode."""
+    return "monokai" if is_dark_theme(widget) else "friendly"
+

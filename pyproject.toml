@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "grc-agent"
-version = "0.3.0"
+version = "0.3.1"
 description = "Autonomous AI agent for GNU Radio Companion — reasons over, edits, and validates .grc flowgraphs, built on PydanticAI."
 readme = {file = "README.md", content-type = "text/markdown"}
 license = {text = "AGPL-3.0-only"}
@@ -59,6 +59,8 @@ dependencies = [
     "mistralai>=1.0",
     "cohere>=5.0",
     "xai-sdk>=0.1",
+    # Syntax highlighting in rendered code blocks (code_block.py).
+    "pygments>=2.17",
 ]
 
 [project.optional-dependencies]
@@ -70,7 +72,6 @@ dev = [
     # marker is unknown and pytest >= 9 fails the test outright rather than
     # silently not running it.
     "pytest-asyncio>=1.0",
-    "playwright>=1.48",
 ]
 
 [project.scripts]

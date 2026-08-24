@@ -59,7 +59,7 @@ flowchart LR
 
 ### Your project files
 
-- **Read anything in the flowgraph's folder** — Python, C/C++, txt, markdown,
+- **Read anything in your project folder** — Python, C/C++, txt, markdown,
   MATLAB, JSON, YAML, XML, … And `.grc` files are never dumped as raw XML:
   they pass through the same structural inspection as the active graph.
 - **Write source/config files** — create and edit with atomic saves and
@@ -80,10 +80,11 @@ flowchart LR
 - **Handles long conversations** — bulky old tool results are cleared, aging
   turns summarized (your messages always preserved), sized against the
   model's real context window probed from the backend.
-- **Prompt-injection safe** — every tool result is scanned; a malicious
-  instruction planted in a file or web page is withheld before reaching the
-  model. File access is sandboxed to your project folder; `.env` and `.git`
-  are off-limits.
+- **Prompt-injection safe** — every client-executed tool result (project
+  files via the fs tools, web pages via the local fetch fallback) is
+  scanned; a malicious instruction is withheld before reaching the model.
+  File access is sandboxed to your project folder; `.env` and `.git` are
+  off-limits.
 - **Sessions persist** — full chat history, resumable, searchable.
 
 ## Supported LLM providers

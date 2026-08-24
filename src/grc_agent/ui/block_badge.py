@@ -69,9 +69,6 @@ class BlockBadge(Gtk.EventBox):
             | Gdk.EventMask.LEAVE_NOTIFY_MASK
             | Gdk.EventMask.BUTTON_PRESS_MASK
         )
-        # Marker so the prose sizer can account for pills' own width without
-        # coupling to the EventBox type or its CSS chrome.
-        self.grc_is_badge = True
 
         lbl = Gtk.Label(label=name)
         lbl.set_selectable(False)

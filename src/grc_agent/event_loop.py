@@ -17,32 +17,38 @@ before any asyncio or GTK use.
 from __future__ import annotations
 
 import asyncio
+import logging
 
-# "" until install() runs; then "gi.events" or "gbulb". Read by callers that
-# want to report which backend is live (see desktop_app's startup logging).
-backend: str = ""
+_log = logging.getLogger(__name__)
 
+# False until install() runs. One flag, not two: a parallel `backend: str` used
+# to record which path was taken, but nothing ever read it — `_policy is not
+# None` is already the discriminator main_event_loop() branches on, so the
+# string was a second representation of the same fact that could only drift.
+_installed = False
 _policy = None
 
 
 def install() -> None:
     """Install the unified asyncio+GLib loop policy for this process."""
-    global _policy, backend
-    if backend:
+    global _policy, _installed
+    if _installed:
         return
     try:
         from gi.events import GLibEventLoopPolicy
     except ImportError:
         _install_gbulb()
-        backend = "gbulb"
+        _installed = True
+        _log.info("asyncio+GLib unification: gbulb")
         return
     _policy = GLibEventLoopPolicy()
-    backend = "gi.events"
+    _installed = True
+    _log.info("asyncio+GLib unification: gi.events")
 
 
 def main_event_loop() -> asyncio.AbstractEventLoop:
     """Return the loop attached to GTK's main context, and make it current."""
-    if not backend:
+    if not _installed:
         raise RuntimeError("event_loop.install() must be called before main_event_loop()")
     # gi.events: get_event_loop() binds to the thread-default GMainContext — on
     # the main thread, GLib's *default* context, which is the one GTK dispatches
@@ -78,5 +84,5 @@ def _install_gbulb() -> None:
             return _original_loop_reading(self, fut)
 
         gbulb.transports.ReadTransport._loop_reading = _patched_loop_reading
-    except Exception as e:  # pragma: no cover - defensive, gbulb-only path
-        print(f"Warning: Failed to patch gbulb transports: {e}")
+    except Exception:  # pragma: no cover - defensive, gbulb-only path
+        _log.warning("Failed to patch gbulb transports", exc_info=True)

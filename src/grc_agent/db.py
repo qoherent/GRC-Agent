@@ -4,20 +4,20 @@ import threading
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from pydantic_ai import ModelMessagesTypeAdapter
-from pydantic_ai.messages import ModelMessage
+from pydantic_ai.messages import ModelMessage, UserPromptPart
 from pydantic_ai_harness.planning import PlanItem, SqlitePlanStore
-from pydantic_ai_harness.step_persistence import SqliteStepStore
+from pydantic_ai_harness.step_persistence import (
+    ContinuableSnapshot,
+    RunRecord,
+    SqliteStepStore,
+)
 
 from .settings import env_path
 
 _log = logging.getLogger(__name__)
-
-# Latest on-disk schema version applied by init_db(). Each migration in
-# _apply_migrations() bumps the version recorded in the `_meta` table so a
-# crashed migration resumes cleanly and a stale-schema DB is detectable.
-LATEST_SCHEMA_VERSION = 4
 
 # Generous cap so the sessions table cannot grow without limit. The previous
 # JSON-file store bounded itself to 10 on write; this only prunes well outside
@@ -25,20 +25,15 @@ LATEST_SCHEMA_VERSION = 4
 _MAX_SESSIONS = 200
 
 # Per-db-path "already initialized" guard. init_db() is idempotent, but the
-# guard avoids re-running the PRAGMA-table_info / migration probes on every
-# call. Keyed on the resolved db path so test isolation via GRC_AGENT_ENV
-# still re-inits for each fresh tmp path.
+# guard avoids re-running the schema/table-existence probes on every call.
+# Keyed on the resolved db path so test isolation via GRC_AGENT_ENV still
+# re-inits for each fresh tmp path.
 _initialized_paths: set[str] = set()
-
-# Per-db-path "cleanup already ran" guard — same path-keying rationale as
-# _initialized_paths, so test isolation via GRC_AGENT_ENV re-runs cleanup for
-# each fresh tmp path rather than being skipped by a stale global flag.
-_cleanup_done: set[str] = set()
 
 # Guards the init_db check-then-add sequence. Worker threads can
 # call init_db() concurrently with the main loop, so two threads could
-# otherwise both pass the _initialized_paths guard and run the migrations
-# concurrently.
+# otherwise both pass the _initialized_paths guard and run the
+# CREATE TABLE IF NOT EXISTS + orphan sweeps concurrently.
 _init_lock = threading.Lock()
 
 
@@ -65,17 +60,19 @@ def get_connection() -> sqlite3.Connection:
 
     The app is single-threaded (gbulb), but session writes are dispatched via
     ``asyncio.to_thread`` (worker thread) while reads like
-    ``get_recent_sessions`` run on the main loop — WAL + busy_timeout is the
-    one uniform rule that keeps the two from blocking each other under the
-    default rollback journal.
+    ``get_recent_sessions`` run on the main loop — WAL is what keeps the two
+    from blocking each other under the default rollback journal, paired with
+    the 5s busy timeout sqlite3.connect() applies by default.
     """
     db_path = get_db_path()
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
     # journal_mode persists at the DB-file level, but setting it per-connection
-    # is idempotent and cheap (returns the current mode); busy_timeout and
-    # foreign_keys are per-connection and MUST be set on every open.
+    # is idempotent and cheap (returns the current mode). The busy timeout is
+    # per-connection and comes from sqlite3.connect()'s own `timeout=5.0`
+    # default, which calls sqlite3_busy_timeout(5000) — an explicit
+    # `PRAGMA busy_timeout=5000` here only re-set the same value (verified).
     mode_row = conn.execute("PRAGMA journal_mode=WAL").fetchone()
     if mode_row is not None and mode_row[0] != "wal":
         _log.warning(
@@ -83,7 +80,6 @@ def get_connection() -> sqlite3.Connection:
             "'database is locked' errors under concurrent access",
             mode_row[0],
         )
-    conn.execute("PRAGMA busy_timeout=5000")
     return conn
 
 
@@ -102,159 +98,42 @@ def _conn():
         conn.close()
 
 
-def _read_schema_version(conn: sqlite3.Connection) -> int:
-    """Read the persisted schema version from `_meta`, or 0 if unset/corrupt."""
-    row = conn.execute("SELECT value FROM _meta WHERE key = 'schema_version'").fetchone()
-    try:
-        return int(row["value"]) if row else 0
-    except (ValueError, TypeError):
-        return 0
-
-
-def _set_schema_version(conn: sqlite3.Connection, version: int) -> None:
-    conn.execute(
-        "INSERT OR REPLACE INTO _meta (key, value) VALUES ('schema_version', ?)",
-        (str(version),),
-    )
-    conn.commit()
-
-
-def _migrate_to_v1(conn: sqlite3.Connection) -> None:
-    """v1: ``sessions`` table with a ``first_message`` column.
-
-    Two-phase, fully idempotent:
-    1. Ensure the ``first_message`` column exists — CREATE on a fresh DB,
-       ALTER TABLE on a pre-existing v0 ``sessions`` table.
-    2. Backfill any row whose ``first_message`` is empty AND whose messages
-       blob is non-empty.
-
-    The backfill runs unconditionally (not gated on whether the column was
-    just added) because Python's sqlite3 module auto-commits DDL (ALTER
-    TABLE) but not DML (UPDATE). If the process is killed after the ALTER
-    but before the backfill UPDATEs commit, the column will be present on
-    restart but unbackfilled. The idempotent backfill catches this on the
-    next init. Re-runs after a successful backfill are a no-op because
-    every populated row has ``first_message != ''``.
-    """
-    cols = {r["name"] for r in conn.execute("PRAGMA table_info(sessions)").fetchall()}
-    if not cols:
-        conn.execute(
-            """
-            CREATE TABLE sessions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                grc_file_path TEXT NOT NULL,
-                messages TEXT NOT NULL,
-                first_message TEXT NOT NULL DEFAULT '',
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-            """
-        )
-    elif "first_message" not in cols:
-        conn.execute("ALTER TABLE sessions ADD COLUMN first_message TEXT NOT NULL DEFAULT ''")
-    # Idempotent backfill — see method docstring for why this is outside the
-    # elif. Only touches rows that still need it (first_message = '' AND
-    # messages != '').
-    for r in conn.execute(
-        "SELECT id, messages FROM sessions WHERE first_message = '' AND messages != ''"
-    ).fetchall():
-        conn.execute(
-            "UPDATE sessions SET first_message = ? WHERE id = ?",
-            (_extract_first_user_prompt_json(r["messages"]), r["id"]),
-        )
-
-
-def _migrate_to_v2(conn: sqlite3.Connection) -> None:
-    """v2 (superseded): `turn_traces` table. Kept so existing v0/v1 databases
-    pass through the ordered migration chain to v4, which drops the table
-    (replaced by pydantic-ai-harness `StepPersistence` events/snapshots)."""
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS turn_traces (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            session_id INTEGER NOT NULL,
-            run_id TEXT,
-            conversation_id TEXT,
-            provider TEXT,
-            model TEXT,
-            base_url TEXT,
-            system_prompt_hash TEXT,
-            user_prompt TEXT,
-            origin_page_path TEXT,
-            started_at REAL NOT NULL,
-            ended_at REAL,
-            duration_ms INTEGER,
-            events TEXT NOT NULL DEFAULT '[]',
-            final_output TEXT,
-            error TEXT,
-            input_tokens INTEGER NOT NULL DEFAULT 0,
-            output_tokens INTEGER NOT NULL DEFAULT 0,
-            reasoning_tokens INTEGER NOT NULL DEFAULT 0,
-            total_tokens INTEGER NOT NULL DEFAULT 0,
-            FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
-        )
-        """
-    )
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_turn_traces_session ON turn_traces(session_id)")
-
-
-def _migrate_to_v3(conn: sqlite3.Connection) -> None:
-    """v3 (superseded): `turn_traces.generation_ms`. Kept as a no-op step so
-    existing v2 databases pass through the ordered migration chain to v4,
-    which drops the whole `turn_traces` table (replaced by pydantic-ai-harness
-    `StepPersistence` events/snapshots)."""
-
-
-def _migrate_to_v4(conn: sqlite3.Connection) -> None:
-    """v4: drop `turn_traces` — per-turn observability is now owned by the
-    harness `StepPersistence` capability (events/snapshots/tool_effects/runs
-    tables, created by `SqliteStepStore` on the same file), grouped per chat
-    session via `conversation_id = 'session-{id}'`. No bridge, no dual write."""
-    conn.execute("DROP TABLE IF EXISTS turn_traces")
-
-
-_MIGRATIONS = (
-    _migrate_to_v1,
-    _migrate_to_v2,
-    _migrate_to_v3,
-    _migrate_to_v4,
-)
-
-
-def _apply_migrations(conn: sqlite3.Connection, current: int) -> None:
-    """Apply ordered, idempotent migrations to bring the schema from `current`
-    to LATEST_SCHEMA_VERSION. Each step commits its own version bump so a
-    crash mid-migration resumes cleanly on the next open."""
-    for version, migrate in enumerate(_MIGRATIONS, start=1):
-        if current < version:
-            migrate(conn)
-            _set_schema_version(conn, version)
-
-
 def init_db() -> None:
-    """Initialize the chat-sessions + turn-traces schema (idempotent per path).
+    """Initialize the SQLite schema directly (idempotent per path).
 
-    Ensures the `_meta` table exists, reads the persisted schema version, and
-    applies any pending migrations. Subsequent calls short-circuit on the
-    per-path ``_initialized_paths`` guard. Thread-safe via ``_init_lock`` so
-    a worker-thread ``init_db()`` can't race the
-    main loop's init.
+    Creates the `sessions` table and its recency index, and sweeps orphan
+    rows if harness-managed step or plan tables exist. Thread-safe via
+    `_init_lock`.
     """
     db_path = str(get_db_path())
     if db_path in _initialized_paths:
         return
     with _init_lock:
-        # Re-check inside the lock — another thread may have initialized
-        # while we were waiting.
         if db_path in _initialized_paths:
             return
         with _conn() as conn:
             conn.execute(
-                "CREATE TABLE IF NOT EXISTS _meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+                """
+                CREATE TABLE IF NOT EXISTS sessions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    grc_file_path TEXT NOT NULL,
+                    messages TEXT NOT NULL,
+                    first_message TEXT NOT NULL DEFAULT '',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+                """
             )
-            current = _read_schema_version(conn)
-            if current < LATEST_SCHEMA_VERSION:
-                _apply_migrations(conn, current)
+            # Covers both reads that sort the session list: get_recent_sessions
+            # and _prune_in (which runs on every save). Without it SQLite plans
+            # each as `SCAN sessions` + `USE TEMP B-TREE FOR ORDER BY` — the
+            # column order here matches the ORDER BY exactly so the sort is
+            # answered from the index.
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_sessions_recent "
+                "ON sessions(updated_at DESC, id DESC)"
+            )
+
             # Harness-owned tables are created lazily by their respective
             # stores. Guard each sweep so a fresh DB remains valid before the
             # first agent or planning operation.
@@ -296,6 +175,49 @@ def get_step_store() -> SqliteStepStore:
         store = SqliteStepStore(database=key, max_snapshots_per_run=None)
         _step_stores[key] = store
     return store
+
+
+async def archive_transcript(
+    messages: list[ModelMessage],
+    *,
+    conversation_id: str,
+    agent_name: str,
+    kind: str,
+    step_index: int = 0,
+) -> str:
+    """Persist `messages` as a standalone run in the shared step store.
+
+    Used wherever a history is about to be replaced and the original must stay
+    recoverable by ConversationSearch — automatic compaction, the manual Compact
+    button, and the truncated-thinking archive. All three previously inlined the
+    same register_run + save_snapshot pair and each re-derived StepPersistence's
+    own run-id shape (`{agent_name}-{8-hex}`) by hand from a comment; this is now
+    the single place that replicates it, and `kind` labels the run consistently
+    in both the id and the metadata.
+
+    Returns the run id. Deliberately does not catch: a store failure must reach
+    the caller, since compaction would otherwise destroy the only durable copy.
+    """
+    store = get_step_store()
+    run_id = f"{agent_name}-{kind}-{uuid4().hex[:8]}"
+    await store.register_run(
+        RunRecord(
+            run_id=run_id,
+            conversation_id=conversation_id,
+            agent_name=agent_name,
+            metadata={"kind": kind},
+        )
+    )
+    await store.save_snapshot(
+        ContinuableSnapshot(
+            run_id=run_id,
+            step_index=step_index,
+            messages=messages,
+            conversation_id=conversation_id,
+            agent_name=agent_name,
+        )
+    )
+    return run_id
 
 
 def _step_tables_exist(conn: sqlite3.Connection) -> bool:
@@ -372,33 +294,12 @@ def _sweep_orphan_plan_rows(conn: sqlite3.Connection) -> None:
     )
 
 
-def _cleanup_invalid_sessions() -> None:
-    """Delete any corrupted database sessions where the path is a directory or empty."""
-    with _conn() as conn:
-        for r in conn.execute("SELECT id, grc_file_path FROM sessions").fetchall():
-            p = r["grc_file_path"]
-            if not p:
-                conn.execute("DELETE FROM sessions WHERE id = ?", (r["id"],))
-            else:
-                try:
-                    path_obj = Path(p)
-                    if path_obj.exists() and path_obj.is_dir():
-                        conn.execute("DELETE FROM sessions WHERE id = ?", (r["id"],))
-                except Exception:
-                    pass
-        conn.commit()
-
-
 def get_recent_sessions(limit: int = 10) -> list[dict[str, Any]]:
     """Load recently active GRC flowgraph sessions, newest first, filtered to
     paths still on disk. Bounded by a SQL LIMIT. The `first_message` column is
     read directly — no per-row messages-blob deserialization on the hot path
     (the column is populated at save_session time)."""
     init_db()
-    db_path = str(get_db_path())
-    if db_path not in _cleanup_done:
-        _cleanup_invalid_sessions()
-        _cleanup_done.add(db_path)
 
     with _conn() as conn:
         rows = conn.execute(
@@ -478,6 +379,23 @@ def deserialize_messages(messages_json: str) -> list[ModelMessage]:
         return []
 
 
+def user_prompt_text(part: UserPromptPart) -> str:
+    """Flatten a `UserPromptPart`'s content to plain text.
+
+    `content` is `str | Sequence[UserContent]`, so a multimodal prompt has to be
+    reduced to its text pieces. Pydantic AI exposes no accessor for this
+    (`user_text_prompt` is a constructor, not a getter), so this is the one
+    implementation — the sidebar's history renderer and `_first_user_prompt`
+    below both used to carry their own copy of it.
+    """
+    content = part.content
+    if isinstance(content, str):
+        return content
+    return "".join(
+        item if isinstance(item, str) else getattr(item, "text", "") for item in content
+    )
+
+
 def _first_user_prompt(messages: list[ModelMessage]) -> str:
     """Extract the first user prompt's text from a list of ModelMessages.
 
@@ -486,28 +404,9 @@ def _first_user_prompt(messages: list[ModelMessage]) -> str:
     prompt yet (e.g. an empty session just created to pin an id)."""
     for m in messages:
         for part in getattr(m, "parts", []):
-            if part.__class__.__name__ != "UserPromptPart" or not part.content:
-                continue
-            content = part.content
-            if not isinstance(content, str):
-                pieces = []
-                for item in content:
-                    if hasattr(item, "text"):
-                        pieces.append(item.text)
-                    elif isinstance(item, str):
-                        pieces.append(item)
-                content = "".join(pieces)
-            return content
+            if isinstance(part, UserPromptPart) and part.content:
+                return user_prompt_text(part)
     return ""
-
-
-def _extract_first_user_prompt_json(messages_json: str) -> str:
-    """Backfill helper used by the v0→v1 migration: extract the first user
-    prompt from a stored messages blob. Best-effort — ``deserialize_messages``
-    already catches all exceptions internally and returns ``[]`` on a malformed
-    blob, so this never raises; a corrupt row yields ``""`` rather than
-    blocking the migration."""
-    return _first_user_prompt(deserialize_messages(messages_json))
 
 
 def _prune_in(conn: sqlite3.Connection, keep: int = _MAX_SESSIONS) -> None:

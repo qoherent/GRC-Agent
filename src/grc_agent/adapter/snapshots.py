@@ -20,8 +20,8 @@ def _prune_old_backups(backup_dir: Path) -> None:
         excess = len(backups) - MAX_BACKUPS_PER_DIR
         for old in backups[: max(0, excess)]:
             old.unlink(missing_ok=True)
-    except Exception:
-        pass
+    except Exception as exc:
+        _log.debug("backup pruning failed for %s: %s", backup_dir, exc)
 
 
 # ---- Undo snapshot stack (append-only) ----
@@ -105,6 +105,12 @@ def push_undo_snapshot(
             baseline_hash = hashlib.sha256(baseline_payload.encode()).hexdigest()
             _atomic_write_text(baseline_payload, undo_dir / "00000.grc")
             cursor = {"count": 1, "hash": baseline_hash}
+            # Persist the seeded cursor BEFORE the dedup return below: a
+            # first-ever no-op push (serialization identical to the
+            # baseline) must not leave cursor.json at count 0 while
+            # 00000.grc exists — a later manual save would read count 0,
+            # skip re-seeding, and silently overwrite the baseline entry.
+            _write_undo_cursor(undo_dir, cursor)
 
         if current_hash == cursor["hash"]:
             return  # nothing actually changed since the last tracked state
