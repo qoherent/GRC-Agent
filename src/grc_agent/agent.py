@@ -582,6 +582,7 @@ async def generate_python_func(ctx: RunContext[Any], k: int = 5) -> str:
 
 async def change_graph_func(
     ctx: RunContext[Any],
+    reason: str,
     add_blocks: list[BlockAdd] | None = None,
     remove_blocks: list[str] | None = None,
     update_params: list[ParamUpdate] | None = None,
@@ -591,6 +592,9 @@ async def change_graph_func(
     force: bool = False,
 ) -> str:
     """Apply a batch of structural graph edits in a single transaction.
+
+    The edit is applied only after the user approves it — this tool requires
+    human-in-the-loop approval, and the flowgraph is never mutated before then.
 
     Runs in a fixed phase order regardless of argument order: remove_connections,
     remove_blocks, add_blocks, update_params, resolve 'auto' types, update_states,
@@ -602,6 +606,8 @@ async def change_graph_func(
     actionable error instead of guessing.
 
     Args:
+        reason: One-sentence justification of this edit's intent, shown to the
+            user alongside the proposed changes for approval.
         add_blocks: New blocks to create.
         remove_blocks: Instance names of blocks to delete.
         update_params: Parameter updates for existing (or just-added) blocks.
@@ -656,7 +662,10 @@ async def change_graph_func(
     # harness) notify_edit is absent and this is skipped.
     if hasattr(ctx.deps, "notify_edit"):
         await ctx.deps.notify_edit()
-    return json.dumps(res)
+    # The `reason` argument is consumed by the approval UI, not by the engine;
+    # it is echoed into the result so the persisted transcript carries the
+    # edit's intent next to its outcome.
+    return json.dumps({**res, "reason": reason})
 
 
 async def get_run_log_func(ctx: RunContext[Any]) -> str:
@@ -766,6 +775,11 @@ def grc_tools() -> list[Tool[Any]]:
     change_tool = Tool(
         change_graph_func,
         name="change_graph",
+        # PydanticAI's own sanctioned human-in-the-loop approval mechanism:
+        # the model's call is never executed — the run ends with a
+        # DeferredToolRequests output the UI resolves with
+        # ToolApproved()/ToolDenied() before the tool body runs.
+        requires_approval=True,
         # docstring_format + require_parameter_descriptions is PydanticAI's
         # own sanctioned idiom for deriving both the tool description and
         # each top-level arg's schema description straight from the

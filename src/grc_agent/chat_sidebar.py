@@ -56,10 +56,18 @@ from pydantic_ai.messages import (
     ToolReturnPart,
     UserPromptPart,
 )
+from pydantic_ai.tools import (
+    DeferredToolRequests,
+    DeferredToolResults,
+    ToolApproved,
+    ToolDenied,
+)
 from pydantic_graph import End
 
 from .agent import GrcAgentResponse
 from .agent_factory import describe_model, resolve_model_context_length
+from .settings import get_approval_mode, set_approval_mode
+from .ui.approval_card import ApprovalCard
 
 # Sourced from the model rather than retyped, so renaming a GrcAgentResponse
 # field breaks loudly at import instead of silently disabling the summary card.
@@ -953,10 +961,43 @@ class ChatSidebar(Gtk.Box):
         self._compact_btn.set_sensitive(False)
         context_row.pack_start(self._compact_btn, False, False, 0)
 
+        # Flowgraph-change gate: asks for approval before every change_graph
+        # call (default) or auto-approves ("always"). The toggle is the
+        # always-visible affordance to re-enable the gate after "Always
+        # accept" turns it off — same persistent-setting pattern as the
+        # theme mode.
+        self._approval_toggle = Gtk.ToggleButton()
+        self._approval_toggle.set_valign(Gtk.Align.CENTER)
+        self._approval_toggle.get_style_context().add_class("chat-mode-btn")
+        self._approval_toggle.get_accessible().set_name("Flowgraph change gate")
+        self._approval_toggle.connect("toggled", self._on_approval_toggled)
+        self._update_approval_toggle()
+        context_row.pack_start(self._approval_toggle, False, False, 0)
+
         vbox.pack_start(context_row, False, False, 0)
 
         content.pack_start(vbox, False, False, 0)
         self._update_context_label()
+
+    def _on_approval_toggled(self, button: Gtk.ToggleButton, _pspec: Any = None) -> None:
+        """Persist the gate state: checked = ask, unchecked = auto-approve."""
+        set_approval_mode("ask" if button.get_active() else "always")
+        self._update_approval_toggle()
+
+    def _update_approval_toggle(self) -> None:
+        """Sync the toggle widget to the persisted gate mode (no signal echo)."""
+        asking = get_approval_mode() == "ask"
+        if self._approval_toggle.get_active() != asking:
+            self._approval_toggle.handler_block_by_func(self._on_approval_toggled)
+            self._approval_toggle.set_active(asking)
+            self._approval_toggle.handler_unblock_by_func(self._on_approval_toggled)
+        self._approval_toggle.set_label("Mode: Manual" if asking else "Mode: Auto")
+        self._approval_toggle.set_tooltip_text(
+            "Mode: Manual — ask before the agent changes the flowgraph (currently ON). "
+            "Click to switch to Auto (changes apply without asking)."
+            if asking
+            else "Mode: Auto — flowgraph changes apply without asking (gate OFF). Click to switch to Manual (ask for approval before changes)."
+        )
 
     def _update_context_label(self) -> None:
         """Update the context usage label under the input box using Pydantic AI's native msg.usage."""
@@ -1686,7 +1727,11 @@ class ChatSidebar(Gtk.Box):
         replaced by this run's final per-response rendering.
         """
         parent = ctx.box.get_parent()
-        row = parent.get_parent() if parent is not None else None
+        row = (
+            parent
+            if isinstance(parent, Gtk.ListBoxRow)
+            else (parent.get_parent() if parent is not None else None)
+        )
         if not isinstance(row, Gtk.ListBoxRow) or row.get_parent() is not self._listbox:
             self._render_history()
             return
@@ -2180,59 +2225,83 @@ class ChatSidebar(Gtk.Box):
         clipboard.set_text(text, -1)
         self.set_status("Copied message to clipboard.")
         if btn is not None:
-            btn.set_label("Copied")
-            btn.set_tooltip_text("Copied")
+            btn.set_tooltip_text("Copied!")
+            image = btn.get_image()
+            if isinstance(image, Gtk.Image):
+                image.set_from_icon_name("object-select-symbolic", Gtk.IconSize.MENU)
+            if btn.get_label():
+                btn.set_label("Copied")
 
             def _revert() -> bool:
-                btn.set_label("Copy")
-                btn.set_tooltip_text("Copy message")
+                try:
+                    img = btn.get_image()
+                    if isinstance(img, Gtk.Image):
+                        img.set_from_icon_name("edit-copy-symbolic", Gtk.IconSize.MENU)
+                    btn.set_tooltip_text("Copy message")
+                    if btn.get_label():
+                        btn.set_label("Copy")
+                except Exception:
+                    pass
                 return False
 
             GLib.timeout_add(1500, _revert)
 
     def _update_copy_text(self, box: Gtk.Box, text: Any) -> None:
-        parent = box.get_parent()
-        if parent and hasattr(parent, "_grc_copy_btn"):
-            parent._grc_copy_btn._grc_copy_text = str(text)
+        btn = getattr(box, "_grc_copy_btn", None)
+        if btn is None:
+            parent = box.get_parent()
+            if parent and hasattr(parent, "_grc_copy_btn"):
+                btn = parent._grc_copy_btn
+        if btn is not None:
+            btn._grc_copy_text = str(text)
 
     def _append_user_message(self, text: str) -> None:
+        vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        vbox.get_style_context().add_class("chat-user-msg-box")
+        vbox.set_halign(Gtk.Align.END)
+        vbox.set_margin_start(40)
+
         lbl = Gtk.Label(label=text)
         lbl.set_line_wrap(True)
         lbl.set_line_wrap_mode(Pango.WrapMode.WORD_CHAR)
-        lbl.set_xalign(1.0)
-        lbl.set_halign(Gtk.Align.END)
+        lbl.set_xalign(0.0)
+        lbl.set_halign(Gtk.Align.START)
         lbl.set_selectable(True)
-        lbl.set_margin_start(40)
+        vbox.pack_start(lbl, False, False, 0)
 
-        hbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
-        hbox.set_halign(Gtk.Align.END)
-        hbox.get_style_context().add_class("chat-user-msg-box")
+        action_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=2)
+        action_row.set_halign(Gtk.Align.END)
 
-        copy_btn = Gtk.Button(label="Copy")
+        copy_btn = Gtk.Button()
+        copy_icon = Gtk.Image.new_from_icon_name("edit-copy-symbolic", Gtk.IconSize.MENU)
+        copy_btn.set_image(copy_icon)
+        copy_btn.set_always_show_image(True)
         copy_btn.set_focus_on_click(False)
-        copy_btn.set_valign(Gtk.Align.START)
         copy_btn.set_tooltip_text("Copy message")
         copy_btn.get_accessible().set_name("Copy message")
         copy_btn.get_style_context().add_class("chat-copy-btn")
         copy_btn.connect("clicked", lambda b: self._copy_to_clipboard(text, b))
+        action_row.pack_start(copy_btn, False, False, 0)
 
-        hbox.pack_start(copy_btn, False, False, 0)
-        hbox.pack_start(lbl, True, True, 0)
-        self._add_message_row(hbox)
+        vbox.pack_start(action_row, False, False, 0)
+        vbox._grc_copy_btn = copy_btn
+        self._add_message_row(vbox)
 
     def _start_agent_message(self) -> Gtk.Box:
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         box.get_style_context().add_class("chat-agent-msg-box")
         box.set_hexpand(True)
+        box.set_halign(Gtk.Align.FILL)
 
-        hbox = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
-        hbox.set_hexpand(True)
-        hbox.set_halign(Gtk.Align.FILL)
-        hbox.pack_start(box, True, True, 0)
+        action_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=2)
+        action_row.set_halign(Gtk.Align.END)
+        action_row.get_style_context().add_class("chat-msg-actions")
 
-        copy_btn = Gtk.Button(label="Copy")
+        copy_btn = Gtk.Button()
+        copy_icon = Gtk.Image.new_from_icon_name("edit-copy-symbolic", Gtk.IconSize.MENU)
+        copy_btn.set_image(copy_icon)
+        copy_btn.set_always_show_image(True)
         copy_btn.set_focus_on_click(False)
-        copy_btn.set_valign(Gtk.Align.START)
         copy_btn.set_tooltip_text("Copy message")
         copy_btn.get_accessible().set_name("Copy message")
         copy_btn.get_style_context().add_class("chat-copy-btn")
@@ -2242,10 +2311,12 @@ class ChatSidebar(Gtk.Box):
             "clicked", lambda b: self._copy_to_clipboard(getattr(b, "_grc_copy_text", ""), b)
         )
 
-        hbox.pack_start(copy_btn, False, False, 0)
-        hbox._grc_copy_btn = copy_btn
+        action_row.pack_start(copy_btn, False, False, 0)
+        box.pack_end(action_row, False, False, 0)
+        box._grc_copy_btn = copy_btn
+        box._grc_action_row = action_row
 
-        self._add_message_row(hbox)
+        self._add_message_row(box)
         return box
 
     def _get_cm(self):
@@ -2397,6 +2468,28 @@ class ChatSidebar(Gtk.Box):
 
                 box.pack_start(exp, False, False, 0)
                 exp.show_all()
+
+        action_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=2)
+        action_row.set_halign(Gtk.Align.END)
+        action_row.get_style_context().add_class("chat-msg-actions")
+
+        copy_btn = Gtk.Button()
+        copy_icon = Gtk.Image.new_from_icon_name("edit-copy-symbolic", Gtk.IconSize.MENU)
+        copy_btn.set_image(copy_icon)
+        copy_btn.set_always_show_image(True)
+        copy_btn.set_focus_on_click(False)
+        copy_btn.set_tooltip_text("Copy message")
+        copy_btn.get_accessible().set_name("Copy message")
+        copy_btn.get_style_context().add_class("chat-copy-btn")
+        copy_btn._grc_copy_text = full_text
+        copy_btn.connect(
+            "clicked", lambda b: self._copy_to_clipboard(getattr(b, "_grc_copy_text", ""), b)
+        )
+        action_row.pack_start(copy_btn, False, False, 0)
+        box.pack_end(action_row, False, False, 0)
+        box._grc_copy_btn = copy_btn
+        box._grc_action_row = action_row
+        box.show_all()
 
         parent = box.get_parent()
         if parent and hasattr(parent, "_grc_copy_btn"):
@@ -2803,40 +2896,68 @@ class ChatSidebar(Gtk.Box):
             ):
                 self._message_history = cleaned_history
             self._message_history = _clean_message_history_for_new_turn(self._message_history)
-            async with self._agent.iter(
-                text,
-                message_history=self._message_history,
-                deps=self._flowgraph_proxy,
-                # Groups this turn's StepPersistence runs/events/snapshots
-                # under the active chat session — the same conversation id
-                # db.py's cleanup SQL matches. Inherited by message_history
-                # on later turns, but passed explicitly every turn as one
-                # uniform rule (runs before a session row exists — e.g. a
-                # failed first send — fall back to pydantic-ai's fresh id
-                # and are simply ungrouped).
-                conversation_id=(
-                    conversation_id_for_session(self._active_session_id)
-                    if self._active_session_id is not None
-                    else None
-                ),
-            ) as run:
-                active_run = run
-                self._active_run = run
-                node = run.next_node
-                while node is not None and not isinstance(node, End):
-                    if Agent.is_model_request_node(node):
-                        self._model_wait_start()
-                        try:
-                            await self._stream_request(ctx, node, run)
-                        finally:
-                            self._model_wait_stop()
-                    elif Agent.is_call_tools_node(node):
-                        self._close_text(ctx)
-                        self._close_thinking(ctx)
-                        await self._stream_tools(ctx, node, run)
-                    self._scroll_to_bottom()
-                    node = await run.next(node)
-                    self._update_context_label()
+
+            # Human-in-the-loop approval loop: change_graph requires approval
+            # (pydantic-ai requires_approval=True), so a run can END with a
+            # DeferredToolRequests output before the model's final answer.
+            # Persist that run's messages, surface the approval card(s), then
+            # resume the SAME turn with the native deferred-tool results
+            # (ToolApproved/ToolDenied) until the run reaches a final output.
+            deferred_results: DeferredToolResults | None = None
+            turn_required_approval = False
+            prompt = text
+            while True:
+                async with self._agent.iter(
+                    prompt if deferred_results is None else None,
+                    message_history=self._message_history,
+                    deferred_tool_results=deferred_results,
+                    deps=self._flowgraph_proxy,
+                    # Groups this turn's StepPersistence runs/events/snapshots
+                    # under the active chat session — the same conversation id
+                    # db.py's cleanup SQL matches. Inherited by message_history
+                    # on later turns, but passed explicitly every turn as one
+                    # uniform rule (runs before a session row exists — e.g. a
+                    # failed first send — fall back to pydantic-ai's fresh id
+                    # and are simply ungrouped).
+                    conversation_id=(
+                        conversation_id_for_session(self._active_session_id)
+                        if self._active_session_id is not None
+                        else None
+                    ),
+                ) as run:
+                    active_run = run
+                    self._active_run = run
+                    node = run.next_node
+                    while node is not None and not isinstance(node, End):
+                        if Agent.is_model_request_node(node):
+                            self._model_wait_start()
+                            try:
+                                await self._stream_request(ctx, node, run)
+                            finally:
+                                self._model_wait_stop()
+                        elif Agent.is_call_tools_node(node):
+                            self._close_text(ctx)
+                            self._close_thinking(ctx)
+                            await self._stream_tools(ctx, node, run)
+                        self._scroll_to_bottom()
+                        node = await run.next(node)
+                        self._update_context_label()
+
+                if run.result is None or not isinstance(
+                    run.result.output, DeferredToolRequests
+                ):
+                    break
+                # A change_graph call is pending approval. The run's messages
+                # (including the unapproved call) are persisted now so a crash
+                # mid-approval keeps the transcript; the next turn strips the
+                # unfulfilled trailing call. The approval cards live in the
+                # streaming row and are transient — the final transcript is
+                # rebuilt from canonical history below.
+                self._message_history = run.result.all_messages()
+                await self._save_history()
+                deferred_results = await self._request_approvals(ctx, run.result.output)
+                prompt = None
+                turn_required_approval = True
 
             if run.result is not None:
                 planner_wrote_plan = origin_agent_mode == "planner" and _messages_call_tool(
@@ -2844,7 +2965,14 @@ class ChatSidebar(Gtk.Box):
                 )
                 self._message_history = run.result.all_messages()
                 await self._save_history()
-                self._replace_streaming_turn(ctx, run.result.new_messages())
+                if turn_required_approval:
+                    # The turn spanned an approval pause; rebuild the
+                    # transcript from canonical history so the first run's
+                    # tool calls (and the resumed final answer) both render —
+                    # the streaming row carried the transient approval cards.
+                    self._render_history()
+                else:
+                    self._replace_streaming_turn(ctx, run.result.new_messages())
                 if planner_wrote_plan and origin_session_id is not None:
                     await self._show_implement_plan_if_ready(origin_session_id)
                 rich_rendered = True
@@ -2903,6 +3031,80 @@ class ChatSidebar(Gtk.Box):
             self._set_busy(False)
             self._scroll_to_bottom()
 
+    async def _request_approvals(
+        self, ctx: _StreamCtx, output: DeferredToolRequests
+    ) -> DeferredToolResults:
+        """Resolve a run's pending change_graph approval requests.
+
+        With the gate in 'ask' mode, renders one ApprovalCard per request into
+        the streaming row and awaits the user's decision; with the gate in
+        'always' mode, auto-approves every request without UI. Returns the
+        native DeferredToolResults consumed by the resumed ``agent.iter``.
+        """
+        approvals = [c for c in output.approvals]
+        if not approvals:
+            return DeferredToolResults()
+        if get_approval_mode() != "ask":
+            return DeferredToolResults(
+                approvals={c.tool_call_id: ToolApproved() for c in approvals}
+            )
+
+        pending: dict[str, asyncio.Future] = {}
+        cards: list[ApprovalCard] = []
+        for call in approvals:
+            fut: asyncio.Future = asyncio.get_running_loop().create_future()
+            pending[call.tool_call_id] = fut
+            card = ApprovalCard(
+                self._md,
+                call,
+                on_approve=lambda cid=call.tool_call_id: self._resolve_approval(
+                    pending, cid, ToolApproved()
+                ),
+                on_deny=lambda cid=call.tool_call_id: self._resolve_approval(
+                    pending,
+                    cid,
+                    ToolDenied(message="The user rejected the proposed change."),
+                ),
+                on_always_accept=lambda: self._always_approve_all(pending, cards),
+            )
+            cards.append(card)
+            ctx.box.pack_start(card, False, False, 0)
+            card.show_all()
+        self._scroll_to_bottom()
+
+        try:
+            return DeferredToolResults(
+                approvals={cid: await fut for cid, fut in pending.items()}
+            )
+        except asyncio.CancelledError:
+            # Stop was pressed while waiting: remove the transient cards; the
+            # CancelledError propagates to the turn's abort path, which keeps
+            # the user's prompt and strips the unfulfilled tool call.
+            for card in cards:
+                card.destroy()
+            raise
+
+    @staticmethod
+    def _resolve_approval(
+        pending: dict[str, asyncio.Future], cid: str, result: Any
+    ) -> None:
+        fut = pending.get(cid)
+        if fut is not None and not fut.done():
+            fut.set_result(result)
+
+    def _always_approve_all(
+        self, pending: dict[str, asyncio.Future], cards: list[ApprovalCard]
+    ) -> None:
+        """'Always accept': persist the gate-off choice, approve every pending
+        request, and drop the remaining cards (deferred to idle so a card is
+        never destroyed from inside its own click handler)."""
+        set_approval_mode("always")
+        self._update_approval_toggle()
+        for fut in pending.values():
+            if not fut.done():
+                fut.set_result(ToolApproved())
+        GLib.idle_add(lambda: [c.destroy() for c in cards])
+
     def _on_chat_task_done(self, task: asyncio.Task) -> None:
         """Defence in depth: log any unhandled exception that escaped the
         _run_agent_turn try/except (e.g. a BaseException), and guarantee the
@@ -2931,6 +3133,7 @@ class ChatSidebar(Gtk.Box):
             self._theme_btn.set_sensitive(not busy)
         self._compact_btn.set_sensitive(not busy and bool(self._message_history))
         self._planner_toggle.set_sensitive(not busy)
+        self._approval_toggle.set_sensitive(not busy)
         if self._implement_plan_button is not None:
             self._implement_plan_button.set_sensitive(not busy)
         if busy:

@@ -123,13 +123,14 @@ class MarkdownView:
         if tag_table.lookup("italic") is None:
             buffer.create_tag("italic", style=Pango.Style.ITALIC)
         if tag_table.lookup("code") is None:
-            # Monospace only — inline code inherits the theme's fg, which is
-            # readable on every theme. (A hardcoded light bg like #f0f0f0 is
-            # invisible-on-dark; deriving the theme color per-tag is unreliable
-            # before the widget is realized, so we rely on the theme itself.)
-            buffer.create_tag("code", family="monospace")
+            buffer.create_tag(
+                "code",
+                family="monospace",
+                weight=Pango.Weight.BOLD,
+                scale=0.95,
+            )
         if tag_table.lookup("heading") is None:
-            buffer.create_tag("heading", weight=Pango.Weight.BOLD, scale=1.15)
+            buffer.create_tag("heading", weight=Pango.Weight.BOLD, scale=1.16)
 
     def _insert_plain_tagged(self, buffer: Gtk.TextBuffer, text: str, tags: list) -> None:
         if not text:
@@ -319,15 +320,11 @@ class MarkdownView:
         return lbl
 
     # Horizontal chrome between the ListBox's allocated width and a message
-    # TextView's own content area: the per-row Copy button + spacing, the
-    # chat-agent-msg-box border+padding, and slack — measured ≈102px at the
-    # default theme (Copy button ~76 realized + spacing 4 + msg-box 18 + list
-    # chrome). The constant must OVER-estimate: since each TextView is inside
-    # an AUTOMATIC-hscrollbar ScrolledWindow, an over-estimate only makes the
-    # bubble wrap slightly narrower — while an under-estimate would show a
-    # bubble hscrollbar (and, pre-isolation, re-created the divider-shove
-    # ratchet).
-    _COLUMN_CHROME = 140
+    # TextView's content area: box padding (8px left + 8px right = 16px),
+    # listbox slack, and border — measured ≈24-32px. Reduced from 140px since
+    # the Copy button is now embedded at the message bottom rather than in a
+    # wide side-by-side column.
+    _COLUMN_CHROME = 36
 
     def pin_to_column(self, tv: Gtk.TextView, extra: int = 0) -> None:
         """Pin ``tv``'s width request to the current chat column width.

@@ -60,8 +60,8 @@ Active feature requests, architectural improvements, and planned capabilities. C
 ---
 
 ### 5. Deterministic Block Placement (algorithm-based layout)
-* **Status**: ✅ Shipped — `adapter/layout.py` `compute_full_layout()` (header band + grandalf Sugiyama-style flow band, full-canvas relayout from `change_graph`'s `add_blocks` path only). The sketch below is kept for the record; the implementation is authoritative (see AGENTS.md's layout conventions).
-* **Scope**: Fix the "blocks thrown at random places" problem. When `change_graph` adds blocks (or any new component appears), the whole workspace must be rearranged deterministically — and **positions must stay algorithm-based, never LLM-based**: block coordinates are deliberately filtered out of the model's context (they would flood it and confuse it), so the model can never be asked to choose positions.
+* **Status**: ✅ Shipped — `adapter/layout.py` `compute_full_layout()` (header band + grandalf Sugiyama-style flow band, full-canvas relayout from **any topology-changing `change_graph` batch**: `add_blocks`/`remove_blocks`/`add_connections`/`remove_connections` — one uniform rule added 2026-08-24, so a later wire-only call re-ranks blocks that were added unwired instead of freezing the stale alphabetical stack; the old `add_blocks`-only gate is gone). The sketch below is kept for the record; the implementation is authoritative (see AGENTS.md's layout conventions).
+* **Scope**: Fix the "blocks thrown at random places" problem. When `change_graph` changes topology (add/remove blocks or connections), the whole workspace must be rearranged deterministically — and **positions must stay algorithm-based, never LLM-based**: block coordinates are deliberately filtered out of the model's context (they would flood it and confuse it), so the model can never be asked to choose positions.
 * **User requirements (paraphrased)**:
   - **Variables/parameters first**: all variable and parameter blocks are listed horizontally along the top of the workspace — the universal GNU Radio convention. Order doesn't matter, but alphabetical is preferred.
   - **Full rearrangement on add**: whenever a new component is added, the agent arranges the *entire* workspace, not just the new block — moving existing components is cheap and expected.
@@ -69,7 +69,7 @@ Active feature requests, architectural improvements, and planned capabilities. C
   - Split the workspace into a grid of defined cells (e.g. 150×150 px).
   - Row 1: all variables/parameters (alphabetical).
   - Remaining rows: place components column-by-column following connection topology — e.g. blocks with no inputs go in the first column (stacked vertically), their consumers in the next column, and so on (a Sugiyama-style rank assignment; the existing `adapter/layout.py` grandalf machinery already does rank assignment and can be extended rather than replaced).
-* **Constraints**: must stay fully automatic (no model input), deterministic, and must not fight manual user drags (the current rule: relayout runs only from `change_graph`'s `add_blocks` path, never on manual edits — keep that).
+* **Constraints**: must stay fully automatic (no model input), deterministic, and must not fight manual user drags (the current rule: relayout runs only from `change_graph`, never on manual edits — keep that).
 
 ---
 
@@ -90,6 +90,29 @@ Active feature requests, architectural improvements, and planned capabilities. C
 * **Scope**:
   - **✅ Shipped in 0.3.1**: Pure GTK3 symbolic theming (`@theme_bg_color`, `@theme_fg_color`, `@theme_selected_bg_color`, and `alpha(@theme_fg_color, ...)`), 3-way theme switching (`system`, `dark`, `light`) paired with native installed desktop themes (`Yaru-dark`, `Adwaita-dark`), and dynamic Pygments syntax highlighting (`monokai` vs `friendly`) based on background relative luminance.
   - **📥 Future / Optional**: Dynamic in-memory patch for GNU Radio's Cairo canvas palette (`gnuradio.grc.gui.canvas.colors`) to optionally support dark schematic canvas backgrounds while preserving port data-type color legibility.
+
+---
+
+### 8. Flowgraph Change Approval (human-in-the-loop gate)
+* **Status**: ✅ Implemented — pydantic-ai native `requires_approval=True` + `DeferredToolRequests`/`ToolApproved`/`ToolDenied`; `ApprovalCard` in-chat UI (reason + structured summary + Approve/Deny/Always-accept); persisted `GRC_AGENT_APPROVE_CHANGES` gate with composer `Mode` toggle (Manual = ask / Auto = apply without asking).
+* **Origin**: Intern feedback — "a change approval button before it rewires and edits the whole flowgraph … a pictorial representation of the graph with the recommended changes, as well as a description of what will be changed and why. This prevents me from having to load my back up files every time the agent makes a change I didn't ask for."
+* **Key Design Decisions**:
+  - Use pydantic-ai's **native deferred-tool approval** (the same mechanism the harness's `exa` capability uses): the tool body never executes before consent — no hand-rolled gate, no interception layer, and the 1.5s safety-net poll has no unapproved mutation to auto-write by construction.
+  - `change_graph` gains a required `reason: str` (one-sentence intent) shown with the change and echoed into the tool result for transcript self-description.
+  - The gate is static per tool (never dynamic per-turn logic) and persists in `.env` (`GRC_AGENT_APPROVE_CHANGES` = `ask` default | `always`); the composer's `Mode` toggle (Manual/Auto) re-enables it anytime.
+  - Approval pauses the SAME turn (run ends with `DeferredToolRequests`, resume with `deferred_tool_results=`); denial feeds back to the model via `ToolDenied`, and the system prompt forbids re-submitting a denied edit.
+  - **Pictorial preview (PNG of the proposed graph)**: not yet shipped — the offscreen render recipe is verified (gui FlowGraph `draw(cr)` → pycairo `ImageSurface`; `element.highlighted` marks proposed changes) and is a natural follow-up on the card's summary text.
+
+---
+
+### 9. RCA-Derived Hardening (evidence-verified, not yet greenlit)
+* **Status**: 📥 Proposed / Research — root causes verified by two adversarial subagent rounds against the intern feedback (reports `/tmp/grc_rca_*.md`, `/tmp/grc_verify_*.md`). Each item cites its verified mechanism; none is a product decision yet.
+* **Items**:
+  1. **`vlen` visibility on ports** — `render_port`/`render_catalog_block` omit `port.vlen` (native GRC attribute, `port.py:23-24`), so an `fft_vxx` (vlen 1024) vs scalar-sink mismatch reads as an opaque "8 vs 8192" byte puzzle; emit `vlen` when ≠ 1. Fix-at-source, one uniform rule; kills the need for any item-size error rewriting.
+  2. **Retry-exhaustion UX** — 4 consecutive `change_graph` failures end the turn with a raw `UnexpectedModelBehavior` bubble ("crashed with an error message" in user terms). Surface it as a bounded continuation message ("out of fix attempts this turn — graph unchanged; send Continue"), optionally reusing the `notify_run_failure` queued-message pattern.
+  3. **Validation-gate error attribution** — GRC's `iter_error_messages()` natively yields `(element, message)`; snapshot the pre-batch error-element set and report pre-existing vs newly-introduced errors separately, so a fix batch isn't blamed for unrelated pre-existing graph errors (verified: even a trivially valid add is rejected on a broken graph, citing only the pre-existing error).
+  4. **Corpus extension** — the shipped wiki corpus (94 files) has no QT GUI sink pages, no FM-stereo/pilot-tone recipes, and lexical queries return false positives (OFDM "pilot symbols" for "pilot tone"). Add wiki pages as data (never code heuristics).
+  5. **Code-block readability** — GTK3-native `pixels-above/below-lines` spacing on chat TextViews (verified capability; GTK3 CSS has no `line-height`), soft-wrap toggle for code fences, and a prompt rule that list-like content belongs in Markdown lists, not fences.
 
 ---
 

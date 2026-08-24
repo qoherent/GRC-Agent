@@ -16,7 +16,7 @@ from pydantic_ai.providers.ollama import OllamaProvider
 from pydantic_ai.providers.openai import OpenAIProvider
 from pydantic_ai.providers.openrouter import OpenRouterProvider
 from pydantic_ai.retries import AsyncTenacityTransport, RetryConfig
-from pydantic_ai.tools import ToolDefinition
+from pydantic_ai.tools import DeferredToolRequests, ToolDefinition
 from pydantic_ai_harness import ToolOutputLimits
 from pydantic_ai_harness.compaction import (
     ClampOversizedMessages,
@@ -811,7 +811,7 @@ def build_agents_from_cfg(cfg: dict) -> AgentBundle:
     executor: Agent[NativeFlowgraphProxy, Any] = Agent(
         model=model,
         deps_type=NativeFlowgraphProxy,
-        output_type=[GrcAgentResponse, str],
+        output_type=[GrcAgentResponse, str, DeferredToolRequests],
         name="grc_desktop_executor_agent",
         instructions=build_system_prompt("pai-desktop-chat"),
         tools=grc_tools(),

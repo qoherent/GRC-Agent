@@ -9,6 +9,46 @@ import os
 from conftest import _count_sessions_for_path, _seed_session
 
 
+def test_change_summary_formatter():
+    """The approval card's uniform change_graph-JSON → Markdown formatter."""
+    from grc_agent.ui.approval_card import format_change_summary
+
+    text = format_change_summary(
+        {
+            "add_blocks": [
+                {"name": "lpf_0", "block_id": "filter_low_pass_filter_x", "params": {"cutoff": "19e3"}}
+            ],
+            "add_connections": ["src:0->lpf_0:0"],
+            "force": True,
+        }
+    )
+    assert "**Add blocks:**" in text and "`lpf_0` (`filter_low_pass_filter_x`)" in text
+    assert "src:0 → lpf_0:0" in text  # cosmetic arrow
+    assert "force" in text and "bypasses" in text
+
+    text = format_change_summary(
+        {"update_params": [{"name": "samp_rate", "param": "value", "value": "48000"}]}
+    )
+    assert "`samp_rate.value` = `48000`" in text
+    assert format_change_summary({}) == "_No changes in this batch._"
+
+
+def test_approval_mode_settings_helpers(tmp_path, monkeypatch):
+    """The flowgraph-change gate persists via .env like the other settings."""
+    from grc_agent.settings import get_approval_mode, set_approval_mode
+
+    env_file = tmp_path / ".env"
+    env_file.write_text("")
+    monkeypatch.setenv("GRC_AGENT_ENV", str(env_file))
+    assert get_approval_mode() == "ask"  # default: gate on
+    set_approval_mode("always")
+    assert get_approval_mode() == "always"
+    set_approval_mode("bogus")
+    assert get_approval_mode() == "always"  # invalid values are ignored
+    set_approval_mode("ask")
+    assert get_approval_mode() == "ask"
+
+
 def test_chat_sidebar_copy_and_rich_rendering():
     from gi.repository import Gdk, Gtk
     from pydantic_ai.messages import ModelResponse, TextPart, ThinkingPart, ToolCallPart
@@ -22,11 +62,13 @@ def test_chat_sidebar_copy_and_rich_rendering():
     sidebar._update_copy_text(box, "test copy text")
     parent = box.get_parent()
     assert parent is not None
-    assert parent._grc_copy_btn._grc_copy_text == "test copy text"
-    assert parent._grc_copy_btn.get_label() == "Copy"
-    parent._grc_copy_btn.clicked()
+    copy_btn = getattr(box, "_grc_copy_btn", getattr(parent, "_grc_copy_btn", None))
+    assert copy_btn is not None
+    assert copy_btn._grc_copy_text == "test copy text"
+    assert copy_btn.get_tooltip_text() == "Copy message"
+    copy_btn.clicked()
     assert Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD).wait_for_text() == "test copy text"
-    assert parent._grc_copy_btn.get_label() == "Copied"
+    assert copy_btn.get_tooltip_text() == "Copied!"
 
     # 2. Test horizontal-scrolling table rendering
     sidebar._render_markdown_to_box(box, "| Head |\n|---|\n| cell |")
@@ -2133,7 +2175,13 @@ def test_copy_code_block_to_clipboard():
     walk(box)
 
     buttons = [
-        w for w in widgets if isinstance(w, Gtk.Button) and w.get_label() in ("Copy", "✓ Copied!")
+        w
+        for w in widgets
+        if isinstance(w, Gtk.Button)
+        and (
+            w.get_style_context().has_class("chat-copy-btn")
+            or w.get_tooltip_text() in ("Copy code to clipboard", "Copied!")
+        )
     ]
     assert len(buttons) >= 1, "Expected Copy button in rendered code block"
 
@@ -2141,7 +2189,7 @@ def test_copy_code_block_to_clipboard():
 
     # Trigger click on Copy button
     copy_btn.emit("clicked")
-    assert copy_btn.get_label() == "✓ Copied!"
+    assert copy_btn.get_tooltip_text() == "Copied!"
 
     # Verify text was written to system clipboard
     clipboard = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)

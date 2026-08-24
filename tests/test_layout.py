@@ -186,20 +186,32 @@ def test_change_graph_disconnected_flow_components_share_rank_columns_without_ov
             assert not _rects_overlap(*a, *b)
 
 
-def test_change_graph_remove_only_does_not_relayout_or_move_anything(temp_dial_tone):
-    # Relayout is gated purely on non-empty add_blocks (graph.py's Phase 3) —
-    # a remove_blocks-only call must leave every remaining block's coordinate
-    # byte-identical, not just "still non-overlapping".
+def test_change_graph_remove_only_relays_out_post_removal_state(temp_dial_tone):
+    # One uniform rule (approved rule change): any batch that changes
+    # topology — including remove_blocks-only — re-ranks and relayouts, so
+    # the layout always reflects the current topology. The old gate (relayout
+    # only on non-empty add_blocks) left stale holes after removals.
     fg = load_flow_graph(str(temp_dial_tone))
     before = {
-        b.name: tuple(b.states["coordinate"])
-        for b in fg.blocks
-        if b.name != "analog_noise_source_x_0"
+        b.name: tuple(b.states["coordinate"]) for b in fg.blocks
     }
     res = change_graph(fg, remove_blocks=["analog_noise_source_x_0"], force=True)
     assert res["ok"] is True
     after = {b.name: tuple(b.states["coordinate"]) for b in fg.blocks}
-    assert after == before
+    # The removal changed the topology, so the surviving blocks must have
+    # been re-ranked — at least one coordinate must have moved.
+    moved = [n for n in after if before.get(n) is not None and after[n] != before[n]]
+    assert moved, "remove-only batch must relayout the remaining blocks"
+    # Grid guarantees still hold and the layout stays monotone with the
+    # connection topology (sources left of sinks).
+    values = list(after.values())
+    for i, a in enumerate(values):
+        for b in values[i + 1 :]:
+            assert not _rects_overlap(*a, *b)
+    for conn in fg.connections:
+        src = tuple(fg.get_block(conn.source_block.name).states["coordinate"])
+        dst = tuple(fg.get_block(conn.sink_block.name).states["coordinate"])
+        assert src[0] < dst[0], f"flow not left-to-right: {conn}"
 
 
 def test_change_graph_remove_and_add_in_same_batch_relays_out_post_removal_state(temp_dial_tone):
@@ -439,4 +451,40 @@ def test_change_graph_add_block_across_calls_no_overlap(temp_empty):
     coords = [tuple(fg.get_block(f"call_sink_{i}").states["coordinate"]) for i in range(4)]
     for i, a in enumerate(coords):
         for b in coords[i + 1 :]:
+            assert not _rects_overlap(*a, *b)
+
+
+def test_change_graph_wire_only_call_re_ranks_unwired_adds(temp_empty):
+    # The taught incremental strategy adds blocks unwired (force=True) and
+    # wires them in a LATER call. The old gate (relayout only on non-empty
+    # add_blocks) froze the unwired alphabetical stack in column 0 — sink
+    # above source — and the wire-only call never healed it. The uniform
+    # topology gate must re-rank on the wiring call so the final graph
+    # reads left-to-right.
+    fg = load_flow_graph(str(temp_empty))
+    res = change_graph(
+        fg,
+        add_blocks=[
+            {"block_id": "analog_sig_source_x", "instance_name": "src", "params": {"type": "float"}},
+            {"block_id": "analog_quadrature_demod_cf", "instance_name": "demod"},
+            {"block_id": "audio_sink", "instance_name": "snd"},
+        ],
+        force=True,
+    )
+    assert res["ok"] is True
+    res = change_graph(
+        fg,
+        add_connections=["src:0->demod:0", "demod:0->snd:0"],
+        force=True,
+    )
+    assert res["ok"] is True
+    coords = {
+        name: tuple(fg.get_block(name).states["coordinate"]) for name in ("src", "demod", "snd")
+    }
+    # The wiring call must have re-ranked the graph: flow reads left-to-right.
+    assert coords["src"][0] < coords["demod"][0] < coords["snd"][0], coords
+    # And no two blocks overlap.
+    values = list(coords.values())
+    for i, a in enumerate(values):
+        for b in values[i + 1 :]:
             assert not _rects_overlap(*a, *b)

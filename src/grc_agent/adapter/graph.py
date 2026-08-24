@@ -985,13 +985,19 @@ def change_graph(  # noqa: C901
                             }
                         )
 
-            # Relayout every block in the flowgraph from scratch (not just
-            # the ones just added) — variable/options/import/snippet blocks
-            # pack into a header band at the top, everything else flows
-            # below via rank-ordered placement. Runs only here, gated on
-            # add_blocks being non-empty — change_graph is the only caller
-            # of compute_full_layout, and manual/GUI edits never call
-            # change_graph, so this can't run outside an agent-driven edit.
+            # Relayout every block in the flowgraph from scratch whenever
+            # this batch changes topology — one uniform rule: the layout
+            # always reflects the current topology, so a later wire-only call
+            # re-ranks blocks that were added unwired (and previously frozen
+            # in a stale alphabetical stack). variable/options/import/snippet
+            # blocks pack into a header band at the top, everything else
+            # flows below via rank-ordered placement. change_graph is the
+            # only caller of compute_full_layout, and manual/GUI edits never
+            # call change_graph, so this can't run outside an agent-driven
+            # edit.
+        if add_blocks or remove_blocks or add_connections or remove_connections:
+            if not add_blocks:
+                ranks = _compute_ranks(flow_graph, set(), add_connections)
             full_positions = compute_full_layout(
                 flow_graph, new_block_names, add_connections, ranks=ranks
             )

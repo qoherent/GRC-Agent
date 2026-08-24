@@ -289,6 +289,26 @@ def save_settings(
         upsert_env_key("GRC_THEME_MODE", theme)
 
 
+_VALID_APPROVAL_MODES = ("ask", "always")
+_DEFAULT_APPROVAL_MODE = "ask"
+
+
+def get_approval_mode() -> str:
+    """Get the persisted flowgraph-change gate ('ask' or 'always').
+
+    'ask' (default) requires the user to approve every change_graph call;
+    'always' auto-approves without showing the approval card.
+    """
+    val = get_env_value("GRC_AGENT_APPROVE_CHANGES")
+    return val if val in _VALID_APPROVAL_MODES else _DEFAULT_APPROVAL_MODE
+
+
+def set_approval_mode(mode: str) -> None:
+    """Persist the flowgraph-change gate mode into the `.env` file."""
+    if mode in _VALID_APPROVAL_MODES:
+        upsert_env_key("GRC_AGENT_APPROVE_CHANGES", mode)
+
+
 def get_theme_mode() -> str:
     """Get the persisted theme mode ('dark', 'light', or 'system')."""
     val = get_env_value("GRC_THEME_MODE")

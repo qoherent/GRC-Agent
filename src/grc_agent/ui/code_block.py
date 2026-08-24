@@ -106,7 +106,10 @@ class CodeBlock(Gtk.Box):
         lang_lbl.set_xalign(0.0)
         lang_lbl.get_style_context().add_class("dim-label")
 
-        self._copy_btn = Gtk.Button(label="Copy")
+        self._copy_btn = Gtk.Button()
+        copy_icon = Gtk.Image.new_from_icon_name("edit-copy-symbolic", Gtk.IconSize.MENU)
+        self._copy_btn.set_image(copy_icon)
+        self._copy_btn.set_always_show_image(True)
         self._copy_btn.get_style_context().add_class("chat-copy-btn")
         self._copy_btn.set_halign(Gtk.Align.END)
         self._copy_btn.set_valign(Gtk.Align.CENTER)
@@ -165,10 +168,19 @@ class CodeBlock(Gtk.Box):
     def _on_copy(self, btn: Gtk.Button) -> None:
         clipboard = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
         clipboard.set_text(self._code, -1)
-        btn.set_label("\u2713 Copied!")
+        btn.set_tooltip_text("Copied!")
+        image = btn.get_image()
+        if isinstance(image, Gtk.Image):
+            image.set_from_icon_name("object-select-symbolic", Gtk.IconSize.MENU)
 
         def _reset() -> bool:
-            btn.set_label("Copy")
+            try:
+                img = btn.get_image()
+                if isinstance(img, Gtk.Image):
+                    img.set_from_icon_name("edit-copy-symbolic", Gtk.IconSize.MENU)
+                btn.set_tooltip_text("Copy code to clipboard")
+            except Exception:
+                pass
             return False
 
         GLib.timeout_add_seconds(2, _reset)

@@ -26,19 +26,23 @@ _CSS_TEMPLATE = """
 .chat-monospace { font-family: monospace; }
 .chat-side-toggle { min-width: 18px; }
 
-/* Non-editable TextViews blend into the conversation, not look like inputs. */
+/* Non-editable TextViews blend into the conversation with crisp, clear text. */
 textview.chat-agent-label,
 textview.chat-agent-label text,
 textview.chat-thinking-textview,
 textview.chat-thinking-textview text {
     background: transparent;
+    color: @theme_fg_color;
+}
+.chat-agent-label {
+    color: @theme_fg_color;
 }
 
 /* ---- panel separators ----------------------------------------------- */
 .chat-sidebar { border-left: 1px solid @SOFT@; }
 .chat-project-bar { border-bottom: 1px solid @SOFT@; }
 .chat-project-label {
-    color: alpha(@theme_fg_color, 0.78);
+    color: alpha(@theme_fg_color, 0.85);
     font-size: 0.85em;
 }
 .chat-toolbar { border-bottom: 1px solid @SOFT@; }
@@ -87,14 +91,31 @@ textview.chat-thinking-textview text {
 .chat-entry-frame,
 .chat-welcome-box,
 .chat-tool-expander,
-.chat-thinking-expander,
-.chat-agent-msg-box {
+.chat-thinking-expander {
     border: 1px solid @STRONG@;
     border-radius: 6px;
+}
+.chat-code-block {
+    border: 1px solid alpha(@theme_fg_color, 0.22);
+    border-radius: 6px;
+    margin: 4px 0;
 }
 .chat-code-header {
     border-bottom: 1px solid @SOFT@;
     border-radius: 6px 6px 0 0;
+    background-color: alpha(@theme_fg_color, 0.04);
+    padding: 2px 6px;
+}
+.chat-thinking-expander,
+.chat-tool-expander {
+    border: 1px solid alpha(@theme_fg_color, 0.20);
+    border-radius: 6px;
+    background-color: alpha(@theme_fg_color, 0.035);
+    margin-bottom: 2px;
+}
+.chat-thinking-expander:hover,
+.chat-tool-expander:hover {
+    border-color: alpha(@theme_fg_color, 0.40);
 }
 
 /* Inline status messages */
@@ -104,11 +125,20 @@ textview.chat-thinking-textview text {
     border-radius: 6px;
 }
 
+/* Approval card for human-in-the-loop change approval */
+.chat-approval-card {
+    border: 1px solid @STRONG@;
+    border-radius: 6px;
+    padding: 8px;
+}
+.chat-approval-reason {
+    font-weight: bold;
+}
+
 /* ---- buttons: explicit bounded affordance --------------------------- */
 .chat-toolbar-btn,
 .chat-compact-btn,
 .chat-quick-prompt-btn,
-.chat-copy-btn,
 .chat-recent-delete-btn {
     border: 1px solid @SOFT@;
     border-radius: 4px;
@@ -116,7 +146,6 @@ textview.chat-thinking-textview text {
 .chat-toolbar-btn:hover,
 .chat-compact-btn:hover,
 .chat-quick-prompt-btn:hover,
-.chat-copy-btn:hover,
 .chat-recent-delete-btn:hover {
     border-color: @STRONG@;
 }
@@ -126,8 +155,26 @@ textview.chat-thinking-textview text {
     padding: 2px 6px;
 }
 .chat-agent-mode-label {
-    color: alpha(@theme_fg_color, 0.78);
+    color: alpha(@theme_fg_color, 0.82);
     font-size: 0.80em;
+}
+
+/* Copy buttons (symbolic icon, unobtrusive flat button) */
+.chat-copy-btn {
+    border: none;
+    background: transparent;
+    border-radius: 4px;
+    padding: 3px 5px;
+    min-height: 22px;
+    min-width: 22px;
+    opacity: 0.60;
+}
+.chat-copy-btn:hover {
+    background: alpha(@theme_fg_color, 0.14);
+    opacity: 1.0;
+}
+.chat-msg-actions {
+    margin-top: 4px;
 }
 
 /* Recent-session list rows */
@@ -142,7 +189,7 @@ textview.chat-thinking-textview text {
     padding: 2px;
 }
 .chat-recent-meta {
-    color: alpha(@theme_fg_color, 0.62);
+    color: alpha(@theme_fg_color, 0.68);
     font-size: 0.80em;
 }
 
@@ -170,13 +217,16 @@ textview.chat-thinking-textview text {
     min-height: 34px;
 }
 .chat-agent-msg-box {
-    padding: 6px 8px;
-}
-.chat-user-msg-box {
     border: 1px solid @SOFT@;
     border-radius: 8px;
-    padding: 5px 7px;
-    background-color: alpha(@theme_fg_color, 0.035);
+    padding: 8px 12px;
+    background-color: alpha(@theme_fg_color, 0.025);
+}
+.chat-user-msg-box {
+    border: 1px solid alpha(@theme_fg_color, 0.22);
+    border-radius: 8px;
+    padding: 8px 12px;
+    background-color: alpha(@theme_fg_color, 0.08);
 }
 .chat-plan-action-box {
     border: 1px solid @STRONG@;
@@ -212,12 +262,12 @@ textview.chat-thinking-textview text {
 /* Base is muted fg; escalation via full-fg bold (75-89%) then the theme's
    required accent (>=90%). No error/warning symbols used — they are not
    defined by every GTK theme, and a dropped rule would silently lose the cue. */
-.chat-context-label { color: alpha(@theme_fg_color, 0.65); }
+.chat-context-label { color: alpha(@theme_fg_color, 0.72); }
 .chat-context-label.warn { color: @theme_fg_color; font-weight: bold; }
 .chat-context-label.alarm { color: @theme_selected_bg_color; font-weight: bold; }
 
 /* ---- status bar: quiet base, loud errors ----------------------------- */
-.chat-status-bar { color: alpha(@theme_fg_color, 0.78); }
+.chat-status-bar { color: alpha(@theme_fg_color, 0.85); }
 .validation-invalid { color: @theme_fg_color; font-weight: bold; }
 """
 

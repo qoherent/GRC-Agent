@@ -9,6 +9,12 @@ web-dashboard codebase and are not part of this history.
 
 ## [Unreleased]
 
+### Added
+- **Human-in-the-loop flowgraph-change approval** via pydantic-ai's native `requires_approval=True` deferred-tool mechanism: `change_graph` calls never execute before the user approves. Each proposed edit shows an in-chat `ApprovalCard` with the model's required one-line `reason`, a uniform structured summary of the change (rendered as Markdown bullets — no raw JSON), and Approve / Deny / Always-accept actions. The gate persists in `.env` (`GRC_AGENT_APPROVE_CHANGES`, default `ask`) and is re-enabled any time via the new `Mode` toggle under the composer (Manual = ask, Auto = apply without asking). Denial feeds back to the model natively (`ToolDenied`); the same turn resumes automatically after the decision.
+- `change_graph` now requires a `reason: str` argument (one-sentence intent) shown to the user in the approval card and echoed into the success payload, so the persisted transcript carries the edit's intent next to its outcome.
+- The layout gate became one uniform rule: any `change_graph` batch that changes topology (`add_blocks`/`remove_blocks`/`add_connections`/`remove_connections`) re-ranks and relayouts the whole flowgraph — a later wire-only call now heals the stale alphabetical stack that add-then-wire editing previously froze.
+- System prompt: failed-fix counter-strategy (never repeat a failed fix; re-inspect and reconsider topology), external-grounding nudge for concepts local knowledge can't cover, the QT GUI freq-sink-owns-its-FFT quirk, and the approval/reason contract.
+
 ## [0.3.1] - 2026-08-24
 
 ### Added
