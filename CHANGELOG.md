@@ -16,6 +16,9 @@ web-dashboard codebase and are not part of this history.
 - RCA hardening (backlog item 9): ports now expose `vlen` when ≠ 1 in both `inspect_graph` and catalog results (turns the opaque "8 vs 8192" item-size puzzle into vlen 1024 vs vlen 1); retry-budget turn deaths render a friendly continuation message instead of pydantic-ai's developer-aimed "Consider raising the max retry limit" text; chat CodeBlock + prose TextViews gained GTK3-native 3px inter-line spacing (with the code-block height pin updated to include per-line spacing); the prompt gained a formatting rule (lists as Markdown lists, fences for code only).
 - System prompt: failed-fix counter-strategy (never repeat a failed fix; re-inspect and reconsider topology), external-grounding nudge for concepts local knowledge can't cover, the QT GUI freq-sink-owns-its-FFT quirk, and the approval/reason contract.
 
+### Changed
+- **Icon-based copy buttons** on code blocks and chat messages (compact, tooltip feedback instead of text swap), and the chat column chrome constant reduced 140 → 36 px — bubbles are wider with more reading width, empirically verified hbar-free at 320–1000 px window widths.
+
 ## [0.3.1] - 2026-08-24
 
 ### Added
