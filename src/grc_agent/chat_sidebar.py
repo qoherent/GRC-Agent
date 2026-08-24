@@ -319,9 +319,39 @@ def _format_turn_error(e: Exception) -> str:
         return f"Usage Limit Exceeded: {e}{cause_str}"
 
     if isinstance(e, UnexpectedModelBehavior):
+        friendly = _friendly_exhaustion_message(e)
+        if friendly is not None:
+            return friendly
         return f"Unexpected Model Behavior: {e}{cause_str}"
 
     return f"Agent Error: {e}{cause_str}"
+
+
+def _friendly_exhaustion_message(e: Exception) -> str | None:
+    """Friendlier text when a turn died on pydantic-ai's bounded retry budgets.
+
+    The raw UnexpectedModelBehavior text ("Consider raising the max retry
+    limit…") is aimed at developers; a user needs to know the flowgraph is
+    safe and that the next turn starts with a fresh budget. Returns None for
+    any other error, so callers fall back to the standard formatting.
+    """
+    if not isinstance(e, UnexpectedModelBehavior):
+        return None
+    msg = str(e)
+    if "exceeded max retries count of" in msg:
+        tool = msg.split("'", 2)[1] if msg.count("'") >= 2 else "a tool"
+        return (
+            f"The agent ran out of fix attempts for '{tool}' this turn — the "
+            "flowgraph is unchanged and safe (every failed batch was rolled back). "
+            "Send Continue or rephrase the request; the next attempt has a fresh budget."
+        )
+    if "Exceeded maximum output retries" in msg:
+        return (
+            "The agent's final state failed flowgraph validation more than the allowed "
+            "attempts this turn — the flowgraph is unchanged and safe. "
+            "Send Continue to retry with the previous errors still in context."
+        )
+    return None
 
 
 def _clean_message_history_for_new_turn(

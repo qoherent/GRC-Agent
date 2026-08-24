@@ -260,3 +260,17 @@ def test_save_block_func_branch_coverage(monkeypatch):
         raise AssertionError("expected ModelRetry")
     except ModelRetry as exc:
         assert "boom" in str(exc)
+
+
+def test_render_catalog_block_exposes_vlen():
+    """The catalog renderer must carry the same vlen rule as render_port so
+    query_knowledge can show vector ports (fft_vxx vlen 1024) vs scalar."""
+    from grc_agent.adapter import render_catalog_block
+
+    r = render_catalog_block("fft_vxx", 0.0)
+    assert r is not None
+    assert r["inputs"][0].get("vlen") not in (None, 1, "1", "")
+    r2 = render_catalog_block("blocks_float_to_complex", 0.0)
+    assert r2 is not None
+    for p in r2["inputs"] + r2["outputs"]:
+        assert "vlen" not in p

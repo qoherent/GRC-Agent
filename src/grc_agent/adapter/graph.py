@@ -490,6 +490,13 @@ def render_port(port: Any, mode: str = "overview") -> dict[str, Any] | None:
     res = {"port_id": str(port.key), "dtype": str(getattr(port, "dtype", ""))}
     if domain and domain != "stream":
         res["domain"] = domain
+    # Vector lengths are the structural cause behind item-size mismatch
+    # errors (an fft_vxx port is vlen=1024, a scalar sink vlen=1) — without
+    # them two ports with the same dtype read as interchangeable. One uniform
+    # rule: emit vlen whenever it differs from the scalar default.
+    vlen = getattr(port, "vlen", 1)
+    if vlen not in (None, 1, "1", ""):
+        res["vlen"] = vlen
     return res
 
 

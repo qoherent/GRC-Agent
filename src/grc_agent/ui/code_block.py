@@ -135,6 +135,12 @@ class CodeBlock(Gtk.Box):
         tv.set_right_margin(6)
         tv.set_top_margin(6)
         tv.set_bottom_margin(6)
+        # Inter-line breathing room (the intern's "lack of spacing between
+        # the lines" complaint). GTK3-native TextView property — no CSS
+        # line-height exists in GTK3 (verified by introspection); the
+        # default is 0px on every side.
+        tv.set_pixels_above_lines(3)
+        tv.set_pixels_below_lines(3)
         self._highlight(tv.get_buffer(), lang, code)
 
         # Height pin — same uniform rule as the prose width pin: a row child
@@ -156,9 +162,18 @@ class CodeBlock(Gtk.Box):
         # fights the horizontal scrollbar.
         buf = tv.get_buffer()
         buf_text = buf.get_slice(buf.get_start_iter(), buf.get_end_iter(), True)
-        _lw, content_h = tv.create_pango_layout(buf_text).get_pixel_size()
+        layout = tv.create_pango_layout(buf_text)
+        _lw, content_h = layout.get_pixel_size()
+        # The per-line pixel spacing set above (3px above + 3px below) is not
+        # part of the Pango measurement — the TextView adds one above/below
+        # pair per line, so the pin must too (verified: 10-line diagram +
+        # trailing newline = 11 lines, spacing 66px exactly accounts for the
+        # measured natural-vs-pango delta).
+        spacing = (
+            tv.get_pixels_above_lines() + tv.get_pixels_below_lines()
+        ) * layout.get_line_count()
         sw.set_size_request(
-            -1, min(content_h + tv.get_top_margin() + tv.get_bottom_margin() + 2, 420)
+            -1, min(content_h + spacing + tv.get_top_margin() + tv.get_bottom_margin(), 420)
         )
 
         sw.add(tv)

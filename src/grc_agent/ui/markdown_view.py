@@ -283,6 +283,9 @@ class MarkdownView:
         tv.set_right_margin(0)
         tv.set_top_margin(0)
         tv.set_bottom_margin(0)
+        # Same inter-line spacing rule as CodeBlock — one uniform value.
+        tv.set_pixels_above_lines(3)
+        tv.set_pixels_below_lines(3)
         tv.set_hexpand(True)
         tv.set_halign(Gtk.Align.FILL)
         tv.add_events(Gdk.EventMask.POINTER_MOTION_MASK)

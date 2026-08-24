@@ -681,3 +681,22 @@ def test_preview_flowgraph_py_k_below_total_keeps_everything(temp_empty):
     result = preview_flowgraph_py(fg, k=5)
     assert len(result["files"]) == 3
     assert result["omitted_files"] == 0
+
+
+def test_render_port_exposes_vlen_when_vector():
+    """A vector port (fft_vxx, vlen=1024) must show its vlen while scalar
+    ports stay lean — the structural cause behind item-size mismatch errors
+    (the intern's "8 vs 8192" buffer puzzle) is invisible without it."""
+    from grc_agent.adapter import get_platform
+    from grc_agent.adapter.graph import render_port
+
+    fg = get_platform().make_flow_graph()
+    fft = fg.new_block("fft_vxx")
+    fg.rewrite()
+    info = render_port(fft.active_sinks[0], mode="details")
+    assert info["vlen"] not in (None, 1, "1", "")
+
+    scalar = fg.new_block("qtgui_freq_sink_x")
+    fg.rewrite()
+    info2 = render_port(scalar.active_sinks[0], mode="details")
+    assert "vlen" not in info2

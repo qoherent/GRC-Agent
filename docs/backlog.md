@@ -105,14 +105,14 @@ Active feature requests, architectural improvements, and planned capabilities. C
 
 ---
 
-### 9. RCA-Derived Hardening (evidence-verified, not yet greenlit)
-* **Status**: 📥 Proposed / Research — root causes verified by two adversarial subagent rounds against the intern feedback (reports `/tmp/grc_rca_*.md`, `/tmp/grc_verify_*.md`). Each item cites its verified mechanism; none is a product decision yet.
+### 9. RCA-Derived Hardening (evidence-verified)
+* **Status**: 🔄 Partial — items 1, 2, 5 implemented 2026-08-24 (✅ below); items 3, 4 remain proposed. Root causes verified by two adversarial subagent rounds against the intern feedback (reports `/tmp/grc_rca_*.md`, `/tmp/grc_verify_*.md`).
 * **Items**:
-  1. **`vlen` visibility on ports** — `render_port`/`render_catalog_block` omit `port.vlen` (native GRC attribute, `port.py:23-24`), so an `fft_vxx` (vlen 1024) vs scalar-sink mismatch reads as an opaque "8 vs 8192" byte puzzle; emit `vlen` when ≠ 1. Fix-at-source, one uniform rule; kills the need for any item-size error rewriting.
-  2. **Retry-exhaustion UX** — 4 consecutive `change_graph` failures end the turn with a raw `UnexpectedModelBehavior` bubble ("crashed with an error message" in user terms). Surface it as a bounded continuation message ("out of fix attempts this turn — graph unchanged; send Continue"), optionally reusing the `notify_run_failure` queued-message pattern.
+  1. **✅ `vlen` visibility on ports** — `render_port`/`render_catalog_block` omit `port.vlen` (native GRC attribute, `port.py:23-24`), so an `fft_vxx` (vlen 1024) vs scalar-sink mismatch reads as an opaque "8 vs 8192" byte puzzle; emit `vlen` when ≠ 1. Fix-at-source, one uniform rule; kills the need for any item-size error rewriting. (2026-08-24: `render_port` and `_catalog_port_info` emit `vlen` when ≠ 1, live + catalog; both tested.)
+  2. **✅ Retry-exhaustion UX** — 4 consecutive `change_graph` failures end the turn with a raw `UnexpectedModelBehavior` bubble ("crashed with an error message" in user terms). Surface it as a bounded continuation message ("out of fix attempts this turn — graph unchanged; send Continue"). (2026-08-24: `_friendly_exhaustion_message` in `chat_sidebar.py` renders the continuation text for both tool-retry and output-validation exhaustion; tested.)
   3. **Validation-gate error attribution** — GRC's `iter_error_messages()` natively yields `(element, message)`; snapshot the pre-batch error-element set and report pre-existing vs newly-introduced errors separately, so a fix batch isn't blamed for unrelated pre-existing graph errors (verified: even a trivially valid add is rejected on a broken graph, citing only the pre-existing error).
   4. **Corpus extension** — the shipped wiki corpus (94 files) has no QT GUI sink pages, no FM-stereo/pilot-tone recipes, and lexical queries return false positives (OFDM "pilot symbols" for "pilot tone"). Add wiki pages as data (never code heuristics).
-  5. **Code-block readability** — GTK3-native `pixels-above/below-lines` spacing on chat TextViews (verified capability; GTK3 CSS has no `line-height`), soft-wrap toggle for code fences, and a prompt rule that list-like content belongs in Markdown lists, not fences.
+  5. **✅ Code-block readability (spacing part)** — GTK3-native `pixels-above/below-lines` spacing on chat TextViews (verified capability; GTK3 CSS has no `line-height`), a prompt rule that list-like content belongs in Markdown lists, not fences, and a soft-wrap toggle for code fences (the last remains proposed). (2026-08-24: 3px spacing on CodeBlock + prose TextViews with the height pin updated to include per-line spacing; prompt formatting rule added; tested.)
 
 ---
 

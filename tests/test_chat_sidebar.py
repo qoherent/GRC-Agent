@@ -2779,3 +2779,58 @@ def test_theme_toggle_and_persistence(tmp_path, monkeypatch):
     assert cb is not None
 
 
+
+
+def test_friendly_exhaustion_message():
+    """Retry-budget turn deaths render a continuation message, not pydantic-
+    ai's developer-aimed "Consider raising the max retry limit" text."""
+    from pydantic_ai.exceptions import UnexpectedModelBehavior
+
+    from grc_agent.chat_sidebar import _friendly_exhaustion_message
+
+    tool_msg = _friendly_exhaustion_message(
+        UnexpectedModelBehavior(
+            "Tool 'change_graph' exceeded max retries count of 3. Consider raising the max retry limit."
+        )
+    )
+    assert tool_msg is not None
+    assert "change_graph" in tool_msg and "safe" in tool_msg and "Continue" in tool_msg
+
+    out_msg = _friendly_exhaustion_message(
+        UnexpectedModelBehavior("Exceeded maximum output retries (3).")
+    )
+    assert out_msg is not None and "validation" in out_msg
+
+    assert _friendly_exhaustion_message(UnexpectedModelBehavior("other")) is None
+    assert _friendly_exhaustion_message(ValueError("other")) is None
+
+
+def test_chat_textviews_have_line_spacing():
+    """The intern's "lack of spacing between the lines" — both CodeBlock and
+    prose TextViews must carry GTK3's native pixel line spacing."""
+    from gi.repository import Gtk
+
+    from grc_agent.ui.code_block import CodeBlock
+    from grc_agent.ui.markdown_view import MarkdownView
+
+    cb = CodeBlock("python", "print('x')")
+
+    def _find_textview(w):
+        if isinstance(w, Gtk.TextView):
+            return w
+        if isinstance(w, Gtk.Container):
+            for c in w.get_children():
+                found = _find_textview(c)
+                if found is not None:
+                    return found
+        return None
+
+    tv = _find_textview(cb)
+    assert tv is not None
+    assert tv.get_pixels_above_lines() == 3
+    assert tv.get_pixels_below_lines() == 3
+
+    md = MarkdownView(Gtk.ListBox(), lambda: None)
+    prose = md._make_prose_textview()
+    assert prose.get_pixels_above_lines() == 3
+    assert prose.get_pixels_below_lines() == 3

@@ -658,6 +658,20 @@ def query_catalog(query: str, limit: int = 5) -> dict[str, Any]:
     return response
 
 
+def _catalog_port_info(p: Any) -> dict[str, Any]:
+    """One uniform port shape for the catalog renderer — same vlen rule as
+    render_port: emit the vector length whenever it differs from scalar."""
+    info = {
+        "port_id": str(p.key),
+        "dtype": str(getattr(p, "dtype", "")),
+        "domain": str(getattr(p, "domain", "") or "stream"),
+    }
+    vlen = getattr(p, "vlen", 1)
+    if vlen not in (None, 1, "1", ""):
+        info["vlen"] = vlen
+    return info
+
+
 def render_catalog_block(block_id: str, distance: float) -> dict[str, Any] | None:
     from grc_agent.adapter.graph import get_platform, keep_param, type_controlling_params
 
@@ -693,24 +707,8 @@ def render_catalog_block(block_id: str, distance: float) -> dict[str, Any] | Non
             else:
                 params[k] = f"[{dtype}]={cleaned_default}"
 
-    inputs = []
-    for p in b.active_sinks:
-        inputs.append(
-            {
-                "port_id": str(p.key),
-                "dtype": str(getattr(p, "dtype", "")),
-                "domain": str(getattr(p, "domain", "") or "stream"),
-            }
-        )
-    outputs = []
-    for p in b.active_sources:
-        outputs.append(
-            {
-                "port_id": str(p.key),
-                "dtype": str(getattr(p, "dtype", "")),
-                "domain": str(getattr(p, "domain", "") or "stream"),
-            }
-        )
+    inputs = [_catalog_port_info(p) for p in b.active_sinks]
+    outputs = [_catalog_port_info(p) for p in b.active_sources]
 
     return {
         "block_id": block_id,
