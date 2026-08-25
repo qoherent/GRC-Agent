@@ -186,6 +186,17 @@ class GrcShellToolset(ShellToolset[AgentDepsT]):
             tool = self.tools.get(name)
             if tool is not None:
                 tool.requires_approval = True
+                if name == "run_command":
+                    tool.description = (
+                        "Execute a shell command in the project directory (e.g. build toolchains, "
+                        "SDR utilities, standalone scripts, data analysis). Do not use this to run the "
+                        "active flowgraph — use run_flowgraph so GRC generates the latest code."
+                    )
+                elif name == "start_command":
+                    tool.description = (
+                        "Start a long-running command in the background (e.g. captures, servers). "
+                        "Do not use this to run the active flowgraph — use run_flowgraph instead."
+                    )
 
     # -- dynamic project root (fs_tools._root pattern) ----------------------
 

@@ -9,6 +9,9 @@ web-dashboard codebase and are not part of this history.
 
 ## [Unreleased]
 
+### Added
+- **Flowgraph execution boundary & shell tool grounding**: Added explicit system prompt invariants and Pydantic AI tool descriptions in `run_flowgraph_func` and `GrcShellToolset` (`run_command`/`start_command`) clarifying that flowgraphs must be executed via `run_flowgraph` (which compiles and generates the latest Python code from the in-memory graph and streams to GRC console) rather than via shell tools (which execute stale/un-compiled scripts on disk and bypass console logging).
+
 ### Fixed
 - **Block-name badges no longer render as superscript in chat prose.** GTK3
   child-anchor widgets are top-aligned and stretch to the full line box, with

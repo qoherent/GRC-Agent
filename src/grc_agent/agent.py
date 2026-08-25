@@ -754,7 +754,10 @@ async def save_block_func(
 async def run_flowgraph_func(
     ctx: RunContext[Any], wait: bool = True, timeout_seconds: float = 60.0
 ) -> str:
-    """Run the active flowgraph using GRC's native Execute action (the same thing as the toolbar Run button).
+    """Run the active flowgraph using GRC's native Execute action, generating the latest Python code from the in-memory graph.
+
+    Always use this tool to execute flowgraphs — do not execute flowgraph Python
+    scripts in the shell, which would run stale code and bypass GRC console logging.
 
     The user watches the output live in GRC's console while the flowgraph runs;
     this tool returns only the run status — read the full stdout/stderr with
