@@ -94,7 +94,9 @@ class MarkdownView:
         return pattern
 
     def _make_block_badge_widget(self, name: str) -> Gtk.EventBox:
-        return BlockBadge(name, self._get_cm)
+        # anchored=True: prose child-anchor embedding — the padded inner box
+        # aligns the pill's text with the sentence baseline (see BlockBadge).
+        return BlockBadge(name, self._get_cm, anchored=True)
 
     # -- table cell renderer (badge-aware) ---------------------------------
     def render_inline(self, text: str, bold: bool = False) -> Gtk.Box:

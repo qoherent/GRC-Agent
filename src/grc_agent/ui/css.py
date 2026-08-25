@@ -256,6 +256,14 @@ textview.chat-thinking-textview text {
     border-radius: 10px;
 }
 
+/* Prose-embedded (child-anchor) badges: the inner box's top padding lowers
+   the label text onto the sentence baseline. GTK3 anchors stretch the widget
+   to the full line box and center its child, so without this the pill text
+   rides ~4px above the surrounding text (measured; see block_badge.py). */
+.chat-block-badge-anchored {
+    padding-top: 4px;
+}
+
 /* Send button: primary action — the theme's accent (selected bg) so it reads
    as the main affordance on any theme. */
 .chat-send-btn {

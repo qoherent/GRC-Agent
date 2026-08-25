@@ -7,6 +7,21 @@ Versioning starts fresh at `0.1.0` for the current native GTK3 architecture —
 earlier `v1.0.0`/`v2.0.0` tags belonged to an unrelated, since-rewritten
 web-dashboard codebase and are not part of this history.
 
+## [Unreleased]
+
+### Fixed
+- **Block-name badges no longer render as superscript in chat prose.** GTK3
+  child-anchor widgets are top-aligned and stretch to the full line box, with
+  the label text centered inside that stretched box — so the pill text rode
+  ~4px above the surrounding sentence baseline (measured: label center 11.5px
+  vs text center ~15.2px). The proposed `rise`-tag fix does nothing (measured
+  0px movement), and CSS padding on the `EventBox` is ignored by GtkBin. The
+  anchored badge now wraps its label in a `Gtk.Box` with `padding-top: 4px`
+  (GtkBox respects CSS padding), landing the label center within 0.2px of the
+  text baseline; table-cell badges keep the plain centered look. Regression
+  test measures the alignment numerically against the TextView's own font
+  baseline.
+
 ## [0.4.0] - 2026-08-26
 
 ### Added

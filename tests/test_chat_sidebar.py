@@ -3275,3 +3275,58 @@ def test_always_allow_command_resolves_matching_pending_futures():
     from grc_agent.settings import get_approval_mode
 
     assert get_approval_mode() in ("ask", "always")  # unchanged by this click
+
+
+def test_block_badge_anchored_text_aligns_with_prose_baseline():
+    """GTK3 child-anchor widgets stretch to the full line box and center
+    their child, so an un-padded badge's label text rides ~4px above the
+    sentence baseline — the 'superscript' look. The anchored badge's padded
+    inner box must bring the label text onto the baseline; the table-cell
+    badge (anchored=False) keeps the old centered look. Numeric regression
+    test, not an eyeball check: the label center is measured against the
+    TextView's own font baseline."""
+    from gi.repository import Gtk
+
+    from grc_agent.ui.block_badge import BlockBadge
+    from grc_agent.ui.css import apply_css
+
+    apply_css()  # the app's real rules (incl. .chat-block-badge-anchored)
+
+    def measure(anchored):
+        win = Gtk.Window()
+        tv = Gtk.TextView()
+        buf = tv.get_buffer()
+        buf.set_text("The ")
+        anchor = buf.create_child_anchor(buf.get_end_iter())
+        buf.insert(buf.get_end_iter(), " variable")
+        pill = BlockBadge("data_source", lambda: None, anchored=anchored)
+        tv.add_child_at_anchor(pill, anchor)
+        pill.show_all()
+        win.add(tv)
+        win.set_default_size(420, 90)
+        win.show_all()
+        win.realize()
+        for _ in range(20):
+            Gtk.main_iteration_do(False)
+        rect = tv.get_iter_location(buf.get_iter_at_offset(4))
+        pctx = tv.get_pango_context()
+        font = tv.get_style_context().get_font(Gtk.StateFlags.NORMAL)
+        metrics = pctx.get_metrics(font)
+        baseline = rect.y + metrics.get_ascent() / 1024.0
+        lbl = pill.get_child().get_children()[0] if anchored else pill.get_child()
+        la = lbl.get_allocation()
+        center = la.y + la.height / 2.0
+        font_size = font.get_size() / 1024.0
+        text_center = baseline - font_size * 0.25  # ~x-height/2 above baseline
+        win.destroy()
+        return center - text_center
+
+    anchored_delta = measure(True)
+    plain_delta = measure(False)
+    assert abs(anchored_delta) <= 2.0, (
+        f"anchored badge text off the prose baseline by {anchored_delta:+.1f}px"
+    )
+    assert plain_delta <= -2.0, (
+        f"plain badge no longer superscript ({plain_delta:+.1f}px) — "
+        "the anchor-stretch mechanism changed?"
+    )
