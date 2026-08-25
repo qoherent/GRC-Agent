@@ -1,3 +1,4 @@
+import logging
 from dataclasses import dataclass
 from typing import Any
 
@@ -5,6 +6,8 @@ from grandalf.graphs import Edge as GrandalfEdge
 from grandalf.graphs import Graph as GrandalfGraph
 from grandalf.graphs import Vertex as GrandalfVertex
 from grandalf.layouts import SugiyamaLayout, VertexViewer
+
+_log = logging.getLogger(__name__)
 
 # Conservative estimate of a block's on-canvas footprint — the single size
 # assumption behind the whole full-canvas grid: every placement cell
@@ -116,25 +119,27 @@ def _rank_and_order_component(component: Any, model: LayoutModel) -> None:
     # sets (identity-hash order, varies between processes), and the barycenter
     # sweeps below sort stably — so ties would otherwise break by hash. Sort
     # every layer alphabetically and re-derive its vertex positions first.
-    for layer in sug.layers:
-        layer.sort(key=lambda v: v.data)
-        layer.setup(sug)
-    # Crossing-minimized vertical order via grandalf's own Layer.order
-    # (verified on 200 random layered DAGs against a hand-rolled single
-    # top-down barycenter pass: strictly fewer crossings on 106, equal on 55,
-    # worse on 39; 0 crashes).
-    sweeps = ORDER_SWEEPS
+    # Note: sug.init_all() creates DummyVertex instances for multi-rank edges,
+    # which lack a .data attribute — getattr(v, "data", "") handles them safely.
     try:
+        for layer in sug.layers:
+            layer.sort(key=lambda v: getattr(v, "data", ""))
+            layer.setup(sug)
+        # Crossing-minimized vertical order via grandalf's own Layer.order
+        # (verified on 200 random layered DAGs against a hand-rolled single
+        # top-down barycenter pass: strictly fewer crossings on 106, equal on 55,
+        # worse on 39; 0 crashes).
+        sweeps = ORDER_SWEEPS
         while sweeps > 0.5:
             for _ in sug.ordering_step():
                 pass
             sweeps -= 1
+        for layer in sug.layers:
+            for v in layer:
+                if not getattr(sug.grx[v], "dummy", 0):
+                    ordered.setdefault(sug.grx[v].rank, []).append(v.data)
     except Exception:
         pass
-    for layer in sug.layers:
-        for v in layer:
-            if not getattr(sug.grx[v], "dummy", 0):
-                ordered.setdefault(sug.grx[v].rank, []).append(v.data)
     model.components.append(comp_names)
     model.ordered_ranks.append(ordered)
 
@@ -167,18 +172,21 @@ def _compute_layout_model(
             edges.append(GrandalfEdge(vertices[p["src_block"]], vertices[p["dst_block"]]))
 
     model = LayoutModel(ranks={}, components=[], ordered_ranks=[])
-    graph = GrandalfGraph(list(vertices.values()), edges)
-    for component in graph.C:
-        _rank_and_order_component(component, model)
-    # Deterministic band order: grandalf discovers components by walking a
-    # Python set (identity-hash order), so without this the topmost band would
-    # vary between processes. Alphabetical first member is stable and readable.
-    pairs = sorted(
-        zip(model.components, model.ordered_ranks, strict=True),
-        key=lambda p: (p[0][0] if p[0] else "", p[0]),
-    )
-    model.components = [c for c, _ in pairs]
-    model.ordered_ranks = [o for _, o in pairs]
+    try:
+        graph = GrandalfGraph(list(vertices.values()), edges)
+        for component in graph.C:
+            _rank_and_order_component(component, model)
+        # Deterministic band order: grandalf discovers components by walking a
+        # Python set (identity-hash order), so without this the topmost band would
+        # vary between processes. Alphabetical first member is stable and readable.
+        pairs = sorted(
+            zip(model.components, model.ordered_ranks, strict=True),
+            key=lambda p: (p[0][0] if p[0] else "", p[0]),
+        )
+        model.components = [c for c, _ in pairs]
+        model.ordered_ranks = [o for _, o in pairs]
+    except Exception as exc:
+        _log.warning("Layout model computation failed; falling back to unranked layout: %s", exc)
     return model
 
 

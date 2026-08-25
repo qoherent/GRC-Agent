@@ -48,9 +48,10 @@ if row and row[0]:
             if pk == 'retry-prompt' and 'DummyVertex' in str(p.get('content')):
                 print(f'=== Msg {i} RETRY ===\n{p.get(\"content\")}\n')
             elif pk == 'tool-call' and p.get('tool_name') == 'change_graph':
-                args = p.get('args', {})
+                raw_args = p.get('args', {})
+                args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
                 if 'add_connections' in args:
-                    print(f'Msg {i} change_graph connections: {args.get(\"add_connections\")}')
+                    print(f'Msg {i} change_graph connections: {args.get("add_connections")}')
 "
 ```
 

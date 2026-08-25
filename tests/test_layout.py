@@ -580,3 +580,75 @@ def test_change_graph_wire_only_call_re_ranks_unwired_adds(temp_empty):
     for i, a in enumerate(values):
         for b in values[i + 1 :]:
             assert not _rects_overlap(*a, *b)
+
+
+def test_skip_layer_connection_layout_does_not_crash_on_dummy_vertex(temp_empty):
+    # Multi-rank / skip-layer edges (e.g. rank 0 to rank 2) create Grandalf
+    # DummyVertex instances in intermediate layers. Layer ordering must handle
+    # DummyVertex safely without crashing with AttributeError.
+    fg = load_flow_graph(str(temp_empty))
+    res = change_graph(
+        fg,
+        add_blocks=[
+            {"block_id": "analog_sig_source_x", "instance_name": "src", "params": {"type": "float"}},
+            {"block_id": "blocks_multiply_xx", "instance_name": "mix", "params": {"type": "float"}},
+            {
+                "block_id": "blocks_add_xx",
+                "instance_name": "add",
+                "params": {"type": "float", "num_inputs": "2"},
+            },
+        ],
+        add_connections=["src:0->mix:0", "mix:0->add:0", "src:0->add:1"],
+        force=True,
+    )
+    assert res["ok"] is True
+    ranks = _compute_ranks(fg, set(), [])
+    assert ranks["src"] == 0
+    assert ranks["mix"] == 1
+    assert ranks["add"] == 2
+    coords = {
+        name: tuple(fg.get_block(name).states["coordinate"]) for name in ("src", "mix", "add")
+    }
+    assert coords["src"][0] < coords["mix"][0] < coords["add"][0]
+    values = list(coords.values())
+    for i, a in enumerate(values):
+        for b in values[i + 1 :]:
+            assert not _rects_overlap(*a, *b)
+
+
+def test_multi_branch_ask_receiver_layout_success(temp_empty):
+    # Regression test for Session 95 scenario: multi-branch ASK modulator with
+    # AWGN channel adder, noise source, down-mixer receiver, and visualization sinks.
+    fg = load_flow_graph(str(temp_empty))
+    res = change_graph(
+        fg,
+        add_blocks=[
+            {"block_id": "analog_sig_source_x", "instance_name": "carrier", "params": {"type": "float"}},
+            {"block_id": "blocks_vector_source_x", "instance_name": "data", "params": {"type": "float", "vector": "(0, 1, 0, 1)"}},
+            {"block_id": "blocks_multiply_xx", "instance_name": "ask_mixer", "params": {"type": "float"}},
+            {"block_id": "analog_noise_source_x", "instance_name": "noise_src", "params": {"type": "float"}},
+            {"block_id": "blocks_add_xx", "instance_name": "channel_adder", "params": {"type": "float", "num_inputs": "2"}},
+            {"block_id": "blocks_multiply_xx", "instance_name": "rx_mixer", "params": {"type": "float"}},
+            {"block_id": "qtgui_time_sink_x", "instance_name": "time_sink", "params": {"type": "float"}},
+            {"block_id": "qtgui_freq_sink_x", "instance_name": "freq_sink", "params": {"type": "float"}},
+        ],
+        add_connections=[
+            "carrier:0->ask_mixer:0",
+            "data:0->ask_mixer:1",
+            "ask_mixer:0->channel_adder:0",
+            "noise_src:0->channel_adder:1",
+            "channel_adder:0->rx_mixer:0",
+            "carrier:0->rx_mixer:1",
+            "channel_adder:0->time_sink:0",
+            "channel_adder:0->freq_sink:0",
+        ],
+        force=True,
+    )
+    assert res["ok"] is True
+    ranks = _compute_ranks(fg, set(), [])
+    assert ranks["carrier"] == 0
+    assert ranks["data"] == 0
+    assert ranks["noise_src"] == 0
+    assert ranks["ask_mixer"] == 1
+    assert ranks["channel_adder"] == 2
+    assert ranks["rx_mixer"] == 3

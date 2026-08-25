@@ -1016,7 +1016,12 @@ def change_graph(  # noqa: C901
             # Must never need agent or user input: the agent's own context
             # has block coordinates filtered out entirely, so positioning
             # has to be fully self-contained.
-            model = _compute_layout_model(flow_graph, new_block_names, add_connections)
+            try:
+                model = _compute_layout_model(flow_graph, new_block_names, add_connections)
+            except Exception as exc:
+                _log.warning("Pre-add layout model computation failed: %s", exc)
+                from grc_agent.adapter.layout import LayoutModel
+                model = LayoutModel(ranks={}, components=[], ordered_ranks=[])
 
             # Sort add_blocks topologically by rank so upstream blocks (sources)
             # are placed first, providing solid layout anchors for downstream blocks.
@@ -1086,15 +1091,18 @@ def change_graph(  # noqa: C901
             # call change_graph, so this can't run outside an agent-driven
             # edit.
         if add_blocks or remove_blocks or add_connections or remove_connections:
-            if not add_blocks:
-                model = _compute_layout_model(flow_graph, set(), add_connections)
-            full_positions = compute_full_layout(
-                flow_graph, new_block_names, add_connections, model=model
-            )
-            for b in flow_graph.blocks:
-                pos = full_positions.get(b.name)
-                if pos is not None:
-                    b.states["coordinate"] = list(pos)
+            try:
+                if not add_blocks:
+                    model = _compute_layout_model(flow_graph, set(), add_connections)
+                full_positions = compute_full_layout(
+                    flow_graph, new_block_names, add_connections, model=model
+                )
+                for b in flow_graph.blocks:
+                    pos = full_positions.get(b.name)
+                    if pos is not None:
+                        b.states["coordinate"] = list(pos)
+            except Exception as exc:
+                _log.warning("Full layout computation failed during change_graph: %s", exc)
 
         # Phase 4: update_params
         if update_params:
