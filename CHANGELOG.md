@@ -7,9 +7,14 @@ Versioning starts fresh at `0.1.0` for the current native GTK3 architecture —
 earlier `v1.0.0`/`v2.0.0` tags belonged to an unrelated, since-rewritten
 web-dashboard codebase and are not part of this history.
 
-## [Unreleased]
+## [0.3.2] - 2026-08-25
 
 ### Added
+- **Direct AST Markdown Renderer (`markdown-it-py` `SyntaxTreeNode`)**: Replaced the intermediate HTML generation and BeautifulSoup (`bs4`) DOM parser with a direct recursive AST walker into `Gtk.TextBuffer` tags and native GTK widgets. Removed `beautifulsoup4` dependency.
+- **Native GTK3 List Typography & Hanging Indents**: Replaced manual whitespace prefixes with centralized `Gtk.TextTag` indentation (`left_margin=24`, `indent=-16`), ensuring wrapped list continuation lines align with the bullet text across arbitrarily nested depths and ordered steps (`1.`, `9.`, `10.`, `100.`). Contiguous tag coverage spans all embedded `BlockBadge` child anchor characters (`U+FFFC`).
+- **Normalized Vertical Rhythm & Loose Lists**: Consolidated structural block boundary newlines so list items and paragraphs emit single structural newlines with GTK text tag spacing (`pixels_above_lines`/`pixels_below_lines`), eliminating redundant blank lines and oversized gaps at list-to-block transitions while supporting multi-paragraph loose lists.
+- **Search Mode Tool Indicator**: Settled `query_knowledge` tool expander titles dynamically display the active search mode (`⚙ query_knowledge (vector) ✓` or `⚙ query_knowledge (lexical) ✓`).
+- **Stream Pacing & Timing Instrumentation**: Added monotonic timing fields (`queue_wait_ms`, `flush_duration_ms`, `pending_chunks`, `pending_chars`) in `_flush_streaming()` to diagnose streaming pacing without artificial debouncing or timers.
 - **Human-in-the-loop flowgraph-change approval** via pydantic-ai's native `requires_approval=True` deferred-tool mechanism: `change_graph` calls never execute before the user approves. Each proposed edit shows an in-chat `ApprovalCard` with the model's required one-line `reason`, a uniform structured summary of the change (rendered as Markdown bullets — no raw JSON), and Approve / Deny / Always-accept actions. The gate persists in `.env` (`GRC_AGENT_APPROVE_CHANGES`, default `ask`) and is re-enabled any time via the new `Mode` toggle under the composer (Manual = ask, Auto = apply without asking). Denial feeds back to the model natively (`ToolDenied`); the same turn resumes automatically after the decision.
 - `change_graph` now requires a `reason: str` argument (one-sentence intent) shown to the user in the approval card and echoed into the success payload, so the persisted transcript carries the edit's intent next to its outcome.
 - The layout gate became one uniform rule: any `change_graph` batch that changes topology (`add_blocks`/`remove_blocks`/`add_connections`/`remove_connections`) re-ranks and relayouts the whole flowgraph — a later wire-only call now heals the stale alphabetical stack that add-then-wire editing previously froze.
@@ -18,6 +23,10 @@ web-dashboard codebase and are not part of this history.
 
 ### Changed
 - **Icon-based copy buttons** on code blocks and chat messages (compact, tooltip feedback instead of text swap), and the chat column chrome constant reduced 140 → 36 px — bubbles are wider with more reading width, empirically verified hbar-free at 320–1000 px window widths.
+- Standardized footer typography and font sizes (`0.92em`) across toggle buttons and status labels.
+
+### Fixed
+- Fixed PyGObject segfaults caused by background `GLib.timeout_add` timers on destroyed copy buttons in `CodeBlock` and message rows.
 
 ## [0.3.1] - 2026-08-24
 

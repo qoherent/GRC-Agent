@@ -16,7 +16,11 @@ def test_change_summary_formatter():
     text = format_change_summary(
         {
             "add_blocks": [
-                {"name": "lpf_0", "block_id": "filter_low_pass_filter_x", "params": {"cutoff": "19e3"}}
+                {
+                    "name": "lpf_0",
+                    "block_id": "filter_low_pass_filter_x",
+                    "params": {"cutoff": "19e3"},
+                }
             ],
             "add_connections": ["src:0->lpf_0:0"],
             "force": True,
@@ -488,7 +492,7 @@ def test_settings_dialog_persists_api_key(tmp_path, monkeypatch):
     from grc_agent.settings import get_env_value, save_settings
 
     monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
-    save_settings("openai_compatible", "openai/gpt-4o-mini")
+    save_settings("openai_compatible", "liquid/lfm-2.5-2.6b:free")
 
     sidebar = ChatSidebar()
     sidebar._open_settings()
@@ -672,23 +676,51 @@ def test_streaming_text_flush_is_throttled(monkeypatch):
     ctx.text_acc = _ChunkAccumulator("chunk1")
     ctx.text_dirty = True
     sidebar._flush_streaming(ctx)
-    assert ctx.text_lbl.get_buffer().get_text(ctx.text_lbl.get_buffer().get_start_iter(), ctx.text_lbl.get_buffer().get_end_iter(), True) == ""  # throttled, not painted
+    assert (
+        ctx.text_lbl.get_buffer().get_text(
+            ctx.text_lbl.get_buffer().get_start_iter(),
+            ctx.text_lbl.get_buffer().get_end_iter(),
+            True,
+        )
+        == ""
+    )  # throttled, not painted
 
     # Advance past the interval -> flush fires.
     t[0] = 0.05
     sidebar._flush_streaming(ctx)
-    assert ctx.text_lbl.get_buffer().get_text(ctx.text_lbl.get_buffer().get_start_iter(), ctx.text_lbl.get_buffer().get_end_iter(), True) == "chunk1"
+    assert (
+        ctx.text_lbl.get_buffer().get_text(
+            ctx.text_lbl.get_buffer().get_start_iter(),
+            ctx.text_lbl.get_buffer().get_end_iter(),
+            True,
+        )
+        == "chunk1"
+    )
     assert ctx.text_dirty is False
 
     # A second chunk in the same text part is append-only and throttled again.
     ctx.text_acc += "chunk2"
     ctx.text_dirty = True
     sidebar._flush_streaming(ctx)  # t=0.05, last_flush=0.05 -> skip
-    assert ctx.text_lbl.get_buffer().get_text(ctx.text_lbl.get_buffer().get_start_iter(), ctx.text_lbl.get_buffer().get_end_iter(), True) == "chunk1"
+    assert (
+        ctx.text_lbl.get_buffer().get_text(
+            ctx.text_lbl.get_buffer().get_start_iter(),
+            ctx.text_lbl.get_buffer().get_end_iter(),
+            True,
+        )
+        == "chunk1"
+    )
 
     # force=True bypasses the interval (used on part start/close/stream end).
     sidebar._flush_streaming(ctx, force=True)
-    assert ctx.text_lbl.get_buffer().get_text(ctx.text_lbl.get_buffer().get_start_iter(), ctx.text_lbl.get_buffer().get_end_iter(), True) == "chunk1chunk2"
+    assert (
+        ctx.text_lbl.get_buffer().get_text(
+            ctx.text_lbl.get_buffer().get_start_iter(),
+            ctx.text_lbl.get_buffer().get_end_iter(),
+            True,
+        )
+        == "chunk1chunk2"
+    )
 
 
 def test_streaming_thinking_flush_throttled(monkeypatch):
@@ -710,21 +742,49 @@ def test_streaming_thinking_flush_throttled(monkeypatch):
     ctx.think_acc = _ChunkAccumulator("thought1")
     ctx.think_dirty = True
     sidebar._flush_streaming(ctx)  # t=0, last_flush=0.0 -> throttled
-    assert ctx.think_body.get_buffer().get_text(ctx.think_body.get_buffer().get_start_iter(), ctx.think_body.get_buffer().get_end_iter(), True) == ""
+    assert (
+        ctx.think_body.get_buffer().get_text(
+            ctx.think_body.get_buffer().get_start_iter(),
+            ctx.think_body.get_buffer().get_end_iter(),
+            True,
+        )
+        == ""
+    )
 
     t[0] = 0.30
     sidebar._flush_streaming(ctx)
-    assert ctx.think_body.get_buffer().get_text(ctx.think_body.get_buffer().get_start_iter(), ctx.think_body.get_buffer().get_end_iter(), True) == "thought1"
+    assert (
+        ctx.think_body.get_buffer().get_text(
+            ctx.think_body.get_buffer().get_start_iter(),
+            ctx.think_body.get_buffer().get_end_iter(),
+            True,
+        )
+        == "thought1"
+    )
 
     ctx.think_acc += "thought2"  # real streaming appends deltas, never replaces
     ctx.think_dirty = True
     sidebar._flush_streaming(ctx)  # immediately after -> throttled
-    assert ctx.think_body.get_buffer().get_text(ctx.think_body.get_buffer().get_start_iter(), ctx.think_body.get_buffer().get_end_iter(), True) == "thought1"
+    assert (
+        ctx.think_body.get_buffer().get_text(
+            ctx.think_body.get_buffer().get_start_iter(),
+            ctx.think_body.get_buffer().get_end_iter(),
+            True,
+        )
+        == "thought1"
+    )
     sidebar._flush_streaming(ctx, force=True)
     # Buffers accumulate (delta-append, never full replace) — replacing the
     # whole buffer per flush would reset the thinking scroller's scroll
     # position mid-stream.
-    assert ctx.think_body.get_buffer().get_text(ctx.think_body.get_buffer().get_start_iter(), ctx.think_body.get_buffer().get_end_iter(), True) == "thought1thought2"
+    assert (
+        ctx.think_body.get_buffer().get_text(
+            ctx.think_body.get_buffer().get_start_iter(),
+            ctx.think_body.get_buffer().get_end_iter(),
+            True,
+        )
+        == "thought1thought2"
+    )
 
 
 def test_thinking_expander_label_changes_on_close():
@@ -812,7 +872,11 @@ def test_welcome_ui_stays_compact_with_long_recent_sessions(monkeypatch):
         and widget.get_style_context().has_class("chat-recent-meta")
     ]
 
-    assert [button.get_label() for button in quick_buttons] == ["🔍 Inspect", "⚡ Validate", "❓ Explain"]
+    assert [button.get_label() for button in quick_buttons] == [
+        "🔍 Inspect",
+        "⚡ Validate",
+        "❓ Explain",
+    ]
     assert len(metadata_labels) == 5
     assert all(label.get_ellipsize().value_nick == "end" for label in metadata_labels)
     assert window.get_allocated_width() <= 500
@@ -982,15 +1046,21 @@ def test_format_turn_error_covers_each_exception_type():
 
     # Deep cause extraction from HTTPStatusError
     import httpx
+
     req = httpx.Request("POST", "https://api.openai.com/v1/chat/completions")
-    resp_json = httpx.Response(401, request=req, json={"error": {"message": "Invalid API key provided"}})
+    resp_json = httpx.Response(
+        401, request=req, json={"error": {"message": "Invalid API key provided"}}
+    )
     try:
         resp_json.raise_for_status()
     except Exception as c:
         try:
             raise ModelAPIError("gpt-5.6-sol", "Connection error.") from c
         except Exception as exc:
-            assert _format_turn_error(exc) == "Model API Error: Connection error. (Cause: Invalid API key provided)"
+            assert (
+                _format_turn_error(exc)
+                == "Model API Error: Connection error. (Cause: Invalid API key provided)"
+            )
 
 
 def test_run_agent_turn_missing_api_key_shows_error(tmp_path, monkeypatch):
@@ -1101,16 +1171,14 @@ def test_planner_toggle_is_manual_and_reuses_current_session():
     sidebar._planner_toggle.set_active(True)
     assert sidebar._agent_mode == "planner"
     assert sidebar._agent is planner
-    assert sidebar._planner_mode_label.get_text() == "Planner"
+    assert sidebar._planner_mode_label.get_text() == "Active:Planner"
     assert sidebar._planner_toggle.get_parent() is sidebar._context_label.get_parent()
     assert sidebar._compact_btn.get_parent() is sidebar._context_label.get_parent()
     sidebar.send_message.assert_not_called()
 
     sidebar._planner_toggle.set_active(False)
-    assert sidebar._planner_mode_label.get_text() == "Agent"
-    sidebar._message_history = [
-        ModelRequest(parts=[UserPromptPart(content="Build a receiver")])
-    ]
+    assert sidebar._planner_mode_label.get_text() == "Active:Agent"
+    sidebar._message_history = [ModelRequest(parts=[UserPromptPart(content="Build a receiver")])]
     sidebar._active_session_id = 17
     sidebar._planner_toggle.set_active(True)
 
@@ -1137,7 +1205,7 @@ def test_planner_toggle_cannot_switch_while_busy():
 
     assert sidebar._agent_mode == "executor"
     assert sidebar._agent is executor
-    assert sidebar._planner_mode_label.get_text() == "Agent"
+    assert sidebar._planner_mode_label.get_text() == "Active:Agent"
 
 
 def test_planner_write_shows_implement_action_and_click_runs_executor(tmp_path, monkeypatch):
@@ -1200,7 +1268,7 @@ def test_planner_write_shows_implement_action_and_click_runs_executor(tmp_path, 
     assert sidebar._agent_mode == "executor"
     assert sidebar._agent is executor
     assert sidebar._planner_toggle.get_active() is False
-    assert sidebar._planner_mode_label.get_text() == "Agent"
+    assert sidebar._planner_mode_label.get_text() == "Active:Agent"
     assert sidebar._implement_plan_row is None
     assert any(
         part.__class__.__name__ == "UserPromptPart"
@@ -1305,9 +1373,7 @@ def test_turn_completion_preserves_selection_in_older_message():
     sidebar._render_markdown_to_box(old_box, "older selectable text")
     old_tv = _unwrap_textviews(old_box)[0]
     old_buffer = old_tv.get_buffer()
-    old_buffer.select_range(
-        old_buffer.get_iter_at_offset(0), old_buffer.get_iter_at_offset(5)
-    )
+    old_buffer.select_range(old_buffer.get_iter_at_offset(0), old_buffer.get_iter_at_offset(5))
 
     stream_ctx = _StreamCtx(sidebar._start_agent_message())
     sidebar._replace_streaming_turn(
@@ -1367,13 +1433,9 @@ def test_truncated_thinking_is_archived_before_active_history_cleanup(tmp_path, 
     assert cleaned == messages[:1]
 
     sidebar = ChatSidebar()
-    assert asyncio.run(
-        sidebar._archive_truncated_thinking(messages, session_id, "executor")
-    )
+    assert asyncio.run(sidebar._archive_truncated_thinking(messages, session_id, "executor"))
     runs = asyncio.run(
-        get_step_store().list_runs(
-            conversation_id=conversation_id_for_session(session_id)
-        )
+        get_step_store().list_runs(conversation_id=conversation_id_for_session(session_id))
     )
     archived = next(
         run for run in runs if run.metadata.get("kind") == "truncated_thinking_transcript"
@@ -1892,7 +1954,9 @@ def test_markdown_link_drag_selects_without_opening(monkeypatch):
     release = SimpleNamespace(type=Gdk.EventType.BUTTON_RELEASE, x=40, y=10, time=2)
     assert sidebar._md._on_link_tag_event(tag, widget, press, None, "https://example.com") is False
     widget.drag_check_threshold.return_value = True
-    assert sidebar._md._on_link_tag_event(tag, widget, release, None, "https://example.com") is False
+    assert (
+        sidebar._md._on_link_tag_event(tag, widget, release, None, "https://example.com") is False
+    )
     show_uri.assert_not_called()
 
     assert sidebar._md._on_link_tag_event(tag, widget, press, None, "https://example.com") is False
@@ -2091,9 +2155,7 @@ def test_link_click_opens_uri(monkeypatch):
     widget.drag_check_threshold.return_value = False
     press = MagicMock(type=Gdk.EventType.BUTTON_PRESS, x=10, y=10, time=998)
     release = MagicMock(type=Gdk.EventType.BUTTON_RELEASE, x=10, y=10, time=999)
-    sidebar._md._on_link_tag_event(
-        link_tags[0], widget, press, None, "https://example.com"
-    )
+    sidebar._md._on_link_tag_event(link_tags[0], widget, press, None, "https://example.com")
     handled = sidebar._md._on_link_tag_event(
         link_tags[0], widget, release, None, "https://example.com"
     )
@@ -2723,6 +2785,7 @@ def test_welcome_view_clear_all_sessions_button(tmp_path, monkeypatch):
 
     # Find the Delete all sessions button in listbox children
     buttons = []
+
     def _find_buttons(widget):
         if isinstance(widget, Gtk.Button) and widget.get_label() == "Delete all sessions":
             buttons.append(widget)
@@ -2779,8 +2842,6 @@ def test_theme_toggle_and_persistence(tmp_path, monkeypatch):
     assert cb is not None
 
 
-
-
 def test_friendly_exhaustion_message():
     """Retry-budget turn deaths render a continuation message, not pydantic-
     ai's developer-aimed "Consider raising the max retry limit" text."""
@@ -2832,5 +2893,227 @@ def test_chat_textviews_have_line_spacing():
 
     md = MarkdownView(Gtk.ListBox(), lambda: None)
     prose = md._make_prose_textview()
-    assert prose.get_pixels_above_lines() == 3
-    assert prose.get_pixels_below_lines() == 3
+    assert prose.get_pixels_above_lines() == 2
+    assert prose.get_pixels_below_lines() == 2
+    assert prose.get_pixels_inside_wrap() == 2
+
+
+def test_query_knowledge_label_shows_search_mode():
+    from grc_agent.chat_sidebar import _tool_label
+
+    assert (
+        _tool_label("query_knowledge", result='{"search_mode": "vector"}')
+        == "\u2699 query_knowledge (vector) \u2713"
+    )
+    assert (
+        _tool_label("query_knowledge", result='{"search_mode": "lexical"}')
+        == "\u2699 query_knowledge (lexical) \u2713"
+    )
+    assert (
+        _tool_label("query_knowledge", ok=False, result='{"search_mode": "vector"}')
+        == "\u2699 query_knowledge (vector) \u2717"
+    )
+    assert (
+        _tool_label("query_knowledge", retry=True, result='{"search_mode": "lexical"}')
+        == "\u26a0 query_knowledge (lexical) retry"
+    )
+    assert _tool_label("inspect_graph", result='{"ok": true}') == "\u2699 inspect_graph \u2713"
+
+
+def test_markdown_ast_formatting_and_tags():
+    """Verify AST node walker applies correct Gtk.TextBuffer tags and structure."""
+    from gi.repository import Gtk
+
+    from grc_agent.chat_sidebar import ChatSidebar
+
+    sidebar = ChatSidebar()
+    box = sidebar._start_agent_message()
+    md_text = (
+        "# Title Heading\n\n"
+        "Normal text with **bold**, *italic*, ~~strike~~, and `inline_code`.\n\n"
+        "> Blockquote line 1\n"
+        "> Blockquote line 2\n\n"
+        "* Bullet 1\n"
+        "  * Sub-bullet A\n"
+        "* Bullet 2\n\n"
+        "1. Step 1\n"
+        "2. Step 2\n"
+        "   1. Substep 2.1"
+    )
+    sidebar._render_markdown_to_box(box, md_text, clear=True)
+
+    textviews = [
+        c.get_child()
+        for c in box.get_children()
+        if isinstance(c, Gtk.ScrolledWindow) and isinstance(c.get_child(), Gtk.TextView)
+    ]
+    assert len(textviews) == 1
+    buf = textviews[0].get_buffer()
+    content = buf.get_slice(buf.get_start_iter(), buf.get_end_iter(), True)
+
+    assert "Title Heading" in content
+    assert "bold" in content
+    assert "italic" in content
+    assert "strike" in content
+    assert "inline_code" in content
+    assert "│" in content or "Blockquote" in content
+    assert "• Bullet 1" in content
+    assert "• Sub-bullet A" in content
+    assert "1. Step 1" in content
+    assert "1. Substep 2.1" in content
+
+
+def test_table_block_parse_table_ast():
+    """Verify parse_table on SyntaxTreeNode handles standard and edge-case tables."""
+    from markdown_it import MarkdownIt
+    from markdown_it.tree import SyntaxTreeNode
+
+    from grc_agent.ui.table_block import parse_table
+
+    md = MarkdownIt("commonmark", {"html": False}).enable("table")
+
+    # 1. Standard table with thead & tbody
+    t1 = SyntaxTreeNode(md.parse("| Col A | Col B |\n|---|---|\n| 1 | 2 |\n| 3 | 4 |"))
+    headers, rows = parse_table(t1.children[0])
+    assert headers == ["Col A", "Col B"]
+    assert rows == [["1", "2"], ["3", "4"]]
+
+    # 2. Ragged rows padded to uniform column count
+    t2 = SyntaxTreeNode(md.parse("| H1 | H2 | H3 |\n|---|---|---|\n| val1 |\n| a | b | c |"))
+    headers, rows = parse_table(t2.children[0])
+    assert headers == ["H1", "H2", "H3"]
+    assert rows == [["val1", "", ""], ["a", "b", "c"]]
+
+    # 3. Header only
+    t3 = SyntaxTreeNode(md.parse("| Only Header |\n|---|"))
+    headers, rows = parse_table(t3.children[0])
+    assert headers == ["Only Header"]
+    assert rows == []
+
+
+def test_markdown_list_hanging_indent_and_anchor_coverage():
+    """Verify list items have contiguous tag coverage including child anchors,
+    correct hanging indent properties, and single structural newlines."""
+    from unittest.mock import MagicMock
+
+    from gi.repository import Gtk
+
+    from grc_agent.chat_sidebar import ChatSidebar
+
+    sidebar = ChatSidebar()
+    # Mock canvas manager with a live block name to trigger BlockBadge embedding
+    mock_block = MagicMock()
+    mock_block.name = "time_sink"
+    mock_fg = MagicMock()
+    mock_fg.blocks = [mock_block]
+    mock_cm = MagicMock()
+    mock_cm.current_flow_graph = mock_fg
+    sidebar._get_cm = lambda: mock_cm
+    sidebar._md._get_cm = lambda: mock_cm
+
+    box = sidebar._start_agent_message()
+    md_text = (
+        "### Sinks\n"
+        "* `time_sink` (`qtgui_time_sink_x`, 2 connections) — shows the **input carrier** and output.\n"
+        "* `const_sink` — constellation display.\n\n"
+        "### Notes\n"
+        "* The PLL's lock range comfortably brackets the carrier, so it should lock cleanly."
+    )
+    sidebar._render_markdown_to_box(box, md_text, clear=True)
+
+    textviews = [
+        c.get_child()
+        for c in box.get_children()
+        if isinstance(c, Gtk.ScrolledWindow) and isinstance(c.get_child(), Gtk.TextView)
+    ]
+    assert len(textviews) == 1
+    tv = textviews[0]
+    buf = tv.get_buffer()
+
+    # Verify list_depth_0 tag properties
+    list_tag = buf.get_tag_table().lookup("list_depth_0")
+    assert list_tag is not None
+    assert list_tag.get_property("left-margin") == 24
+    assert list_tag.get_property("indent") == -16
+    assert list_tag.get_property("pixels-below-lines") == 2
+
+    # Verify exact transitions: no unwanted blank lines between list items or before headings
+    content = buf.get_slice(buf.get_start_iter(), buf.get_end_iter(), True)
+    expected = (
+        "Sinks\n"
+        "• \ufffc (qtgui_time_sink_x, 2 connections) — shows the input carrier and output.\n"
+        "• const_sink — constellation display.\n"
+        "Notes\n"
+        "• The PLL's lock range comfortably brackets the carrier, so it should lock cleanly.\n"
+    )
+    assert content == expected
+
+    # Verify every character in the list lines (including anchor \ufffc) has list_tag applied
+    it = buf.get_start_iter()
+    while not it.is_end():
+        char = it.get_char()
+        if char == "•":
+            line_end = it.copy()
+            line_end.forward_to_line_end()
+            check_it = it.copy()
+            while check_it.compare(line_end) < 0:
+                tags = check_it.get_tags()
+                assert list_tag in tags, f"Missing list_tag at offset {check_it.get_offset()}"
+                check_it.forward_char()
+        it.forward_char()
+
+
+def test_markdown_nested_list_ordered_markers_and_loose_lists():
+    """Verify nested lists with wrapping, ordered markers (1, 9, 10, 100), and loose lists."""
+    from gi.repository import Gtk
+
+    from grc_agent.chat_sidebar import ChatSidebar
+
+    sidebar = ChatSidebar()
+    box = sidebar._start_agent_message()
+    md_text = (
+        "### Nested and Ordered\n"
+        "* Top level bullet item with long text\n"
+        "  * Nested bullet item depth 1\n"
+        "    * Nested bullet item depth 2\n"
+        "1. First step\n"
+        "9. Ninth step\n"
+        "10. Tenth step\n"
+        "100. Hundredth step\n\n"
+        "### Loose List\n"
+        "* Item 1, paragraph A\n\n"
+        "  Item 1, paragraph B\n"
+        "* Item 2\n\n"
+        "Follow-up standalone paragraph."
+    )
+    sidebar._render_markdown_to_box(box, md_text, clear=True)
+
+    textviews = [
+        c.get_child()
+        for c in box.get_children()
+        if isinstance(c, Gtk.ScrolledWindow) and isinstance(c.get_child(), Gtk.TextView)
+    ]
+    assert len(textviews) == 1
+    tv = textviews[0]
+    buf = tv.get_buffer()
+
+    # Verify depth tags exist and scale margins
+    tag0 = buf.get_tag_table().lookup("list_depth_0")
+    tag1 = buf.get_tag_table().lookup("list_depth_1")
+    tag2 = buf.get_tag_table().lookup("list_depth_2")
+    assert tag0 is not None and tag0.get_property("left-margin") == 24
+    assert tag1 is not None and tag1.get_property("left-margin") == 40
+    assert tag2 is not None and tag2.get_property("left-margin") == 56
+
+    content = buf.get_slice(buf.get_start_iter(), buf.get_end_iter(), True)
+    assert "• Top level bullet item with long text\n" in content
+    assert "• Nested bullet item depth 1\n" in content
+    assert "• Nested bullet item depth 2\n" in content
+    assert "1. First step\n" in content
+    assert "9. Ninth step\n" in content
+    assert "10. Tenth step\n" in content
+    assert "100. Hundredth step\n" in content
+    # Verify loose list separates paragraphs within item
+    assert "• Item 1, paragraph A\nItem 1, paragraph B\n• Item 2\n" in content
+    # Verify clean list -> paragraph transition without double blank line
+    assert "• Item 2\nFollow-up standalone paragraph.\n" in content

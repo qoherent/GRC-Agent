@@ -38,7 +38,7 @@ The application merges the GNU Radio Companion desktop canvas with the AI sideba
 - **Pane Layout**: GRC's main window horizontal pane (`window.main`) is wrapped in an outer horizontal paned layout (`Gtk.Paned`), placing the GRC canvas and panels in the left pane and the Chat Sidebar in the right pane.
 - **Block Library Toggling**: GRC's native Block Library panel (`BlockTreeWindow`) is packed inside the main widget. The sidebar's toggle arrow connects directly to GRC's native `Actions.TOGGLE_BLOCKS_WINDOW` action to slide the block panel into view or collapse it dynamically.
 - **Divider Auto-Positioning**: When expanding/collapsing the block library panel via the sidebar toggle, the main widget pane positions are updated dynamically (collapsed to 100% of width, or expanded to 78%) to ensure GRC's block menu renders with adequate width.
-- **Safe Markdown Rendering**: Assistant responses are parsed to HTML with custom safe Pango markup formatting, falling back to raw text layout dynamically if malformed markdown syntax is emitted by the LLM.
+- **Native AST Markdown Rendering**: Assistant responses are parsed directly via `markdown-it-py`'s `SyntaxTreeNode` AST into native `Gtk.TextBuffer` tags and specialized GTK widgets (`CodeBlock` with Pygments highlighting, `TableBlock` grid, `BlockBadge` live canvas pills), with native `Gtk.TextTag` list hanging indents and structural paragraph spacing — completely eliminating intermediate HTML or DOM round-trips.
 
 ---
 

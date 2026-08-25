@@ -198,7 +198,8 @@ class CodeBlock(Gtk.Box):
                 pass
             return False
 
-        GLib.timeout_add_seconds(2, _reset)
+        tid = GLib.timeout_add_seconds(2, _reset)
+        btn.connect("destroy", lambda *_: GLib.source_remove(tid))
 
     def _highlight(self, buffer: Gtk.TextBuffer, lang: str, code: str) -> None:
         try:

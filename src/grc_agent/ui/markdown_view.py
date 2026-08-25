@@ -1,7 +1,7 @@
 # ruff: noqa: E402
 """Markdown → widget renderer for agent messages.
 
-Owns the prose ``TextView`` path (MarkdownIt → BeautifulSoup → ``Gtk.TextBuffer``
+Owns the prose ``TextView`` path (markdown-it AST → ``Gtk.TextBuffer``
 with named tags), inline block-name badges (child anchors), code blocks
 (``CodeBlock`` with Pygments), tables (``TableBlock``), and the column-width
 pin/rewrap subsystem. ``ChatSidebar`` holds one instance and delegates
@@ -27,8 +27,8 @@ import re
 from typing import Any
 
 import gi
-from bs4 import BeautifulSoup, NavigableString
 from markdown_it import MarkdownIt
+from markdown_it.tree import SyntaxTreeNode
 
 gi.require_version("Gtk", "3.0")
 gi.require_version("Gdk", "3.0")
@@ -44,6 +44,17 @@ _log = logging.getLogger(__name__)
 
 def _esc(text: str) -> str:
     return GLib.markup_escape_text(text, -1)
+
+
+# Centralized typography metrics for native GTK3 text tags (no ad-hoc \n\n)
+_LIST_MARGIN_BASE = 24
+_LIST_MARGIN_PER_LEVEL = 16
+_LIST_HANGING_INDENT = -16
+_PARAGRAPH_PIXELS_BELOW = 6
+_HEADING_PIXELS_ABOVE = 10
+_HEADING_PIXELS_BELOW = 4
+_BLOCKQUOTE_LEFT_MARGIN = 16
+_BLOCKQUOTE_PIXELS_BELOW = 4
 
 
 class MarkdownView:
@@ -122,6 +133,8 @@ class MarkdownView:
             buffer.create_tag("bold", weight=Pango.Weight.BOLD)
         if tag_table.lookup("italic") is None:
             buffer.create_tag("italic", style=Pango.Style.ITALIC)
+        if tag_table.lookup("strikethrough") is None:
+            buffer.create_tag("strikethrough", strikethrough=True)
         if tag_table.lookup("code") is None:
             buffer.create_tag(
                 "code",
@@ -130,7 +143,35 @@ class MarkdownView:
                 scale=0.95,
             )
         if tag_table.lookup("heading") is None:
-            buffer.create_tag("heading", weight=Pango.Weight.BOLD, scale=1.16)
+            buffer.create_tag(
+                "heading",
+                weight=Pango.Weight.BOLD,
+                scale=1.16,
+                pixels_above_lines=_HEADING_PIXELS_ABOVE,
+                pixels_below_lines=_HEADING_PIXELS_BELOW,
+            )
+        if tag_table.lookup("paragraph") is None:
+            buffer.create_tag("paragraph", pixels_below_lines=_PARAGRAPH_PIXELS_BELOW)
+        if tag_table.lookup("blockquote") is None:
+            buffer.create_tag(
+                "blockquote",
+                style=Pango.Style.ITALIC,
+                left_margin=_BLOCKQUOTE_LEFT_MARGIN,
+                pixels_below_lines=_BLOCKQUOTE_PIXELS_BELOW,
+            )
+
+    def _get_or_create_list_tag(self, buffer: Gtk.TextBuffer, list_depth: int) -> Gtk.TextTag:
+        tag_name = f"list_depth_{list_depth}"
+        tag = buffer.get_tag_table().lookup(tag_name)
+        if tag is None:
+            left_m = _LIST_MARGIN_BASE + list_depth * _LIST_MARGIN_PER_LEVEL
+            tag = buffer.create_tag(
+                tag_name,
+                left_margin=left_m,
+                indent=_LIST_HANGING_INDENT,
+                pixels_below_lines=2,
+            )
+        return tag
 
     def _insert_plain_tagged(self, buffer: Gtk.TextBuffer, text: str, tags: list) -> None:
         if not text:
@@ -162,7 +203,16 @@ class MarkdownView:
             self._insert_plain_tagged(buffer, text[last_end : m.start()], tags)
 
             name = m.group(1)
+            anchor_start = buffer.get_end_iter().get_offset()
             anchor = buffer.create_child_anchor(buffer.get_end_iter())
+            if tags:
+                s_it = buffer.get_iter_at_offset(anchor_start)
+                e_it = buffer.get_end_iter()
+                for t in tags:
+                    if isinstance(t, str):
+                        buffer.apply_tag_by_name(t, s_it, e_it)
+                    else:
+                        buffer.apply_tag(t, s_it, e_it)
             pill = self._make_block_badge_widget(name)
             tv.add_child_at_anchor(pill, anchor)
             pill.show_all()
@@ -171,9 +221,7 @@ class MarkdownView:
 
         self._insert_plain_tagged(buffer, text[last_end:], tags)
 
-    def _on_link_tag_event(
-        self, tag: Any, widget: Any, event: Any, _iter: Any, href: str
-    ) -> bool:
+    def _on_link_tag_event(self, tag: Any, widget: Any, event: Any, _iter: Any, href: str) -> bool:
         """Open a link on click, never when release completes text selection."""
         if event.type == Gdk.EventType.BUTTON_PRESS:
             tag.grc_press_xy = (int(event.x), int(event.y))
@@ -204,73 +252,128 @@ class MarkdownView:
             window.set_cursor(cursor)
         return False
 
-    def _element_to_buffer(  # noqa: C901
-        self, element: Any, buffer: Gtk.TextBuffer, tv: Gtk.TextView, active_tags: list
+    def _render_node(  # noqa: C901
+        self,
+        node: SyntaxTreeNode,
+        buffer: Gtk.TextBuffer,
+        tv: Gtk.TextView,
+        active_tags: list,
+        in_list: bool = False,
+        list_depth: int = 0,
     ) -> None:
-        """Recursive MarkdownIt/BS4 element → TextBuffer walk with tag dispatch,
-        badge-aware leaf text and real per-link click handling."""
-        if isinstance(element, NavigableString):
-            self._insert_prose_text_with_badges(buffer, str(element), active_tags, tv)
-            return
-
-        tag = element.name
-        if not tag:
-            return
-
-        if tag in ("ul", "ol"):
-            li_children = [c for c in element.children if getattr(c, "name", None) == "li"]
-            for i, li in enumerate(li_children, start=1):
-                prefix = f"{i}." if tag == "ol" else "\u2022"
-                self._insert_plain_tagged(buffer, f"  {prefix}  ", active_tags)
-                for child in li.children:
-                    self._element_to_buffer(child, buffer, tv, active_tags)
-                if i < len(li_children):
-                    self._insert_plain_tagged(buffer, "\n", active_tags)
-            return
-
-        if tag in ("p", "div"):
-            for i, child in enumerate(element.children):
-                if i:
-                    self._insert_plain_tagged(buffer, "\n", active_tags)
-                self._element_to_buffer(child, buffer, tv, active_tags)
-        elif tag in ("strong", "b"):
-            for child in element.children:
-                self._element_to_buffer(child, buffer, tv, active_tags + ["bold"])
-        elif tag in ("em", "i"):
-            for child in element.children:
-                self._element_to_buffer(child, buffer, tv, active_tags + ["italic"])
-        elif tag in ("code", "tt"):
-            for child in element.children:
-                self._element_to_buffer(child, buffer, tv, active_tags + ["code"])
-        elif tag in ("h1", "h2", "h3", "h4", "h5", "h6"):
-            for child in element.children:
-                self._element_to_buffer(child, buffer, tv, active_tags + ["heading"])
-        elif tag == "a":
-            href = element.get("href", "")
+        """Recursive markdown-it SyntaxTreeNode -> TextBuffer walk with tag dispatch,
+        badge-aware leaf text, clickable links, and list/blockquote formatting."""
+        ntype = node.type
+        if ntype == "text":
+            self._insert_prose_text_with_badges(buffer, node.content, active_tags, tv)
+        elif ntype == "code_inline":
+            self._insert_prose_text_with_badges(buffer, node.content, active_tags + ["code"], tv)
+        elif ntype in ("softbreak", "hardbreak"):
+            self._insert_plain_tagged(buffer, "\n", active_tags)
+        elif ntype == "paragraph":
+            if in_list:
+                for child in node.children:
+                    self._render_node(
+                        child, buffer, tv, active_tags, in_list=True, list_depth=list_depth
+                    )
+            else:
+                for child in node.children:
+                    self._render_node(
+                        child, buffer, tv, active_tags + ["paragraph"], in_list=False, list_depth=list_depth
+                    )
+                self._insert_plain_tagged(buffer, "\n", active_tags + ["paragraph"])
+        elif ntype == "heading":
+            for child in node.children:
+                self._render_node(
+                    child, buffer, tv, active_tags + ["heading"], in_list=False, list_depth=list_depth
+                )
+            self._insert_plain_tagged(buffer, "\n", active_tags + ["heading"])
+        elif ntype in ("strong", "b"):
+            for child in node.children:
+                self._render_node(
+                    child, buffer, tv, active_tags + ["bold"], in_list=in_list, list_depth=list_depth
+                )
+        elif ntype in ("em", "i"):
+            for child in node.children:
+                self._render_node(
+                    child, buffer, tv, active_tags + ["italic"], in_list=in_list, list_depth=list_depth
+                )
+        elif ntype == "s":
+            for child in node.children:
+                self._render_node(
+                    child, buffer, tv, active_tags + ["strikethrough"], in_list=in_list, list_depth=list_depth
+                )
+        elif ntype == "link":
+            attrs = node.attrs or {}
+            href = attrs.get("href", "")
             # Theme fg + underline + hover pointer (see _on_prose_motion_notify).
             # GTK3's own GtkLinkButton uses plain theme fg here too; a hardcoded
             # blue (e.g. #1565c0) is unreadable on dark themes.
             link_tag = buffer.create_tag(None, underline=Pango.Underline.SINGLE)
             link_tag.grc_href = href
             link_tag.connect("event", self._on_link_tag_event, href)
-            for child in element.children:
-                self._element_to_buffer(child, buffer, tv, active_tags + [link_tag])
-        elif tag == "li":
-            # Defensive fallback for a stray orphaned <li> outside any ul/ol —
-            # the normal case is handled above by the ul/ol branch itself.
-            self._insert_plain_tagged(buffer, "  \u2022  ", active_tags)
-            for child in element.children:
-                self._element_to_buffer(child, buffer, tv, active_tags)
-        elif tag in ("table", "thead", "tbody", "tr", "td", "th", "pre"):
-            # Nested table/code inside a list item etc. — render() only
-            # intercepts top-level <table>/<pre>. Flatten the children inline
-            # (never silently drop them); the text survives, just without
-            # table/code-block chrome.
-            for child in element.children:
-                self._element_to_buffer(child, buffer, tv, active_tags)
+            for child in node.children:
+                self._render_node(
+                    child, buffer, tv, active_tags + [link_tag], in_list=in_list, list_depth=list_depth
+                )
+        elif ntype == "inline":
+            for child in node.children:
+                self._render_node(
+                    child, buffer, tv, active_tags, in_list=in_list, list_depth=list_depth
+                )
+        elif ntype in ("bullet_list", "ordered_list"):
+            list_tag = self._get_or_create_list_tag(buffer, list_depth)
+            for i, item in enumerate(node.children, start=1):
+                num = item.info if item.info else str(i)
+                prefix = f"{num}. " if ntype == "ordered_list" else "\u2022 "
+                self._insert_plain_tagged(buffer, prefix, active_tags + [list_tag])
+                for c_idx, child in enumerate(item.children):
+                    if child.type in ("bullet_list", "ordered_list"):
+                        self._insert_plain_tagged(buffer, "\n", active_tags + [list_tag])
+                        self._render_node(
+                            child, buffer, tv, active_tags, in_list=True, list_depth=list_depth + 1
+                        )
+                    else:
+                        if c_idx > 0:
+                            self._insert_plain_tagged(buffer, "\n", active_tags + [list_tag])
+                        self._render_node(
+                            child, buffer, tv, active_tags + [list_tag], in_list=True, list_depth=list_depth
+                        )
+                self._insert_plain_tagged(buffer, "\n", active_tags + [list_tag])
+        elif ntype == "list_item":
+            list_tag = self._get_or_create_list_tag(buffer, list_depth)
+            self._insert_plain_tagged(buffer, "\u2022 ", active_tags + [list_tag])
+            for c_idx, child in enumerate(node.children):
+                if c_idx > 0:
+                    self._insert_plain_tagged(buffer, "\n", active_tags + [list_tag])
+                self._render_node(
+                    child, buffer, tv, active_tags + [list_tag], in_list=True, list_depth=list_depth
+                )
+            self._insert_plain_tagged(buffer, "\n", active_tags + [list_tag])
+        elif ntype == "blockquote":
+            for child in node.children:
+                self._insert_plain_tagged(buffer, "│ ", active_tags + ["blockquote"])
+                self._render_node(
+                    child, buffer, tv, active_tags + ["blockquote"], in_list=False, list_depth=list_depth
+                )
+                self._insert_plain_tagged(buffer, "\n", active_tags + ["blockquote"])
+        elif ntype in ("fence", "code_block"):
+            self._insert_plain_tagged(buffer, node.content, active_tags + ["code"])
+        elif ntype in ("table", "thead", "tbody", "tr", "td", "th"):
+            for child in node.children:
+                self._render_node(
+                    child, buffer, tv, active_tags, in_list=in_list, list_depth=list_depth
+                )
+        elif ntype == "hr":
+            self._insert_plain_tagged(buffer, "\n───\n", active_tags)
         else:
-            for child in element.children:
-                self._element_to_buffer(child, buffer, tv, active_tags)
+            if node.content and not node.children:
+                self._insert_prose_text_with_badges(buffer, node.content, active_tags, tv)
+            else:
+                for child in node.children:
+                    self._render_node(
+                        child, buffer, tv, active_tags, in_list=in_list, list_depth=list_depth
+                    )
 
     # -- prose TextView building + column sizing --------------------------
     def _make_prose_textview(self) -> Gtk.TextView:
@@ -283,9 +386,9 @@ class MarkdownView:
         tv.set_right_margin(0)
         tv.set_top_margin(0)
         tv.set_bottom_margin(0)
-        # Same inter-line spacing rule as CodeBlock — one uniform value.
-        tv.set_pixels_above_lines(3)
-        tv.set_pixels_below_lines(3)
+        tv.set_pixels_above_lines(2)
+        tv.set_pixels_below_lines(2)
+        tv.set_pixels_inside_wrap(2)
         tv.set_hexpand(True)
         tv.set_halign(Gtk.Align.FILL)
         tv.add_events(Gdk.EventMask.POINTER_MOTION_MASK)
@@ -389,9 +492,8 @@ class MarkdownView:
                 box.remove(child)
 
         try:
-            md = MarkdownIt("commonmark").enable("table")
-            html = md.render(text)
-            soup = BeautifulSoup(html, "html.parser")
+            md = MarkdownIt("commonmark", {"html": False}).enable("table").enable("strikethrough")
+            tree = SyntaxTreeNode(md.parse(text))
 
             current_tv: Gtk.TextView | None = None
             current_buffer: Gtk.TextBuffer | None = None
@@ -409,46 +511,25 @@ class MarkdownView:
                 current_tv = None
                 current_buffer = None
 
-            for element in soup.contents:
-                if not element.name:
-                    t = str(element).strip()
-                    if t:
-                        if current_tv is None:
-                            current_tv = self._make_prose_textview()
-                            current_buffer = current_tv.get_buffer()
-                            self._ensure_buffer_tags(current_buffer)
-                        elif current_buffer.get_char_count() > 0:
-                            self._insert_plain_tagged(current_buffer, "\n\n", [])
-                        self._insert_prose_text_with_badges(current_buffer, t, [], current_tv)
-                    continue
-
-                tag = element.name
-                if tag == "table":
+            for node in tree.children:
+                if node.type in ("fence", "code_block"):
                     _flush_prose()
-                    headers, rows = parse_table(element)
+                    code_text = node.content.replace("\u00a0", " ")
+                    lang = node.info.strip().split()[0] if node.info and node.info.strip() else ""
+                    box.pack_start(CodeBlock(lang, code_text), False, False, 0)
+                elif node.type == "table":
+                    _flush_prose()
+                    headers, rows = parse_table(node)
                     if headers or rows:
                         box.pack_start(
                             TableBlock(headers, rows, self.render_inline), False, False, 0
                         )
-                elif tag == "pre":
-                    _flush_prose()
-                    code_text = element.get_text().replace("\u00a0", " ")
-                    lang = ""
-                    code_child = element.find("code")
-                    if code_child and code_child.has_attr("class"):
-                        for c in code_child["class"]:
-                            if c.startswith("language-"):
-                                lang = c[9:]
-                                break
-                    box.pack_start(CodeBlock(lang, code_text), False, False, 0)
                 else:
                     if current_tv is None:
                         current_tv = self._make_prose_textview()
                         current_buffer = current_tv.get_buffer()
                         self._ensure_buffer_tags(current_buffer)
-                    elif current_buffer.get_char_count() > 0:
-                        self._insert_plain_tagged(current_buffer, "\n\n", [])
-                    self._element_to_buffer(element, current_buffer, current_tv, active_tags=[])
+                    self._render_node(node, current_buffer, current_tv, active_tags=[])
 
             _flush_prose()
             box.show_all()

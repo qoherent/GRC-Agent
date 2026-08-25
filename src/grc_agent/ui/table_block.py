@@ -10,29 +10,59 @@ the markdown renderer so this widget stays decoupled from the canvas.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import gi
 
 gi.require_version("Gtk", "3.0")
 from gi.repository import Gtk
 
+if TYPE_CHECKING:
+    from markdown_it.tree import SyntaxTreeNode
 
-def parse_table(table_soup) -> tuple[list[str], list[list[str]]]:
-    """Extract (headers, rows) from a BeautifulSoup <table> element, padding
-    ragged rows to a uniform column count. Returns ([], []) for an empty table."""
+
+def _extract_cell_text(node: SyntaxTreeNode) -> str:
+    """Extract plain text from a table cell node."""
+    if node.type in ("text", "code_inline"):
+        return node.content
+    if node.type in ("softbreak", "hardbreak"):
+        return " "
+    if node.content and not node.children:
+        return node.content
+    return "".join(_extract_cell_text(child) for child in node.children)
+
+
+def _extract_row_cells(tr: SyntaxTreeNode) -> list[str]:
+    """Extract trimmed string cells from a row node."""
+    return [_extract_cell_text(c).strip() for c in tr.children if c.type in ("th", "td")]
+
+
+def _extract_section_rows(section: SyntaxTreeNode) -> list[list[str]]:
+    return [_extract_row_cells(tr) for tr in section.children if tr.type == "tr"]
+
+
+def parse_table(table_node: SyntaxTreeNode) -> tuple[list[str], list[list[str]]]:
+    """Extract (headers, rows) from a markdown-it SyntaxTreeNode <table> element,
+    padding ragged rows to a uniform column count. Returns ([], []) for an empty table."""
     headers: list[str] = []
-    thead = table_soup.find("thead")
-    if thead:
-        headers = [th.get_text().strip() for th in thead.find_all("th")]
-
-    tbody = table_soup.find("tbody")
     rows: list[list[str]] = []
-    tr_iter = tbody.find_all("tr") if tbody else table_soup.find_all("tr")
-    for tr in tr_iter:
-        rows.append([td.get_text().strip() for td in tr.find_all(["td", "th"])])
+
+    for section in table_node.children:
+        if section.type == "thead":
+            thead_rows = _extract_section_rows(section)
+            if thead_rows:
+                headers = thead_rows[0]
+        elif section.type == "tbody":
+            rows.extend(_extract_section_rows(section))
+        elif section.type == "tr":
+            cells = _extract_row_cells(section)
+            if not headers:
+                headers = cells
+            else:
+                rows.append(cells)
 
     if not headers and rows:
-        headers = rows[0]
-        rows = rows[1:]
+        headers, rows = rows[0], rows[1:]
 
     num_cols = max(len(headers), max((len(r) for r in rows), default=0))
     if num_cols == 0:

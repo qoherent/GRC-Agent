@@ -154,11 +154,32 @@ _CROSS = "\u2717"
 _WARN = "\u26a0"
 
 
-def _tool_label(name: str, *, ok: bool = True, retry: bool = False) -> str:
+def _tool_label(
+    name: str,
+    *,
+    ok: bool = True,
+    retry: bool = False,
+    result: Any = None,
+) -> str:
     """The expander title for a settled tool call."""
+    label_name = name
+    if name == "query_knowledge" and result is not None:
+        res_str = str(result)
+        if (
+            '"search_mode": "lexical"' in res_str
+            or "'search_mode': 'lexical'" in res_str
+            or '"search_mode":"lexical"' in res_str
+        ):
+            label_name = f"{name} (lexical)"
+        elif (
+            '"search_mode": "vector"' in res_str
+            or "'search_mode': 'vector'" in res_str
+            or '"search_mode":"vector"' in res_str
+        ):
+            label_name = f"{name} (vector)"
     if retry:
-        return f"{_WARN} {name} retry"
-    return f"{_GEAR} {name} {_CHECK if ok else _CROSS}"
+        return f"{_WARN} {label_name} retry"
+    return f"{_GEAR} {label_name} {_CHECK if ok else _CROSS}"
 
 
 def _tool_label_running(name: str) -> str:
@@ -483,6 +504,9 @@ class _StreamCtx:
     tools: dict[str, Gtk.Expander] = field(default_factory=dict)
     full_raw_text: _ChunkAccumulator = field(default_factory=_ChunkAccumulator)
     last_flush: float = 0.0
+    last_event_ts: float = 0.0
+    pending_chars: int = 0
+    pending_chunks: int = 0
 
 
 class _ChatTextView(Gtk.ScrolledWindow):
@@ -956,7 +980,7 @@ class ChatSidebar(Gtk.Box):
 
         # Context and conversation controls share one compact row under the
         # composer. These are turn/session controls, not global toolbar actions.
-        context_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        context_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
         context_row.get_style_context().add_class("chat-context-controls")
 
         self._context_label = Gtk.Label()
@@ -966,12 +990,12 @@ class ChatSidebar(Gtk.Box):
         self._context_label.set_ellipsize(Pango.EllipsizeMode.END)
         self._context_label.set_max_width_chars(48)
         self._context_label.get_style_context().add_class("chat-context-label")
-        self._context_label.set_margin_start(4)
+        self._context_label.set_margin_start(2)
         self._context_label.set_margin_top(2)
         self._context_label.set_margin_bottom(2)
         context_row.pack_start(self._context_label, True, True, 0)
 
-        self._planner_toggle = Gtk.ToggleButton(label="Agent")
+        self._planner_toggle = Gtk.ToggleButton(label="Active:Agent")
         self._planner_toggle.set_valign(Gtk.Align.CENTER)
         self._planner_toggle.get_style_context().add_class("chat-mode-btn")
         self._planner_toggle.get_style_context().add_class("chat-mode-agent")
@@ -1063,22 +1087,15 @@ class ChatSidebar(Gtk.Box):
 
         pct: float | None = None
         if not msgs or last_input_tokens == 0:
-            if max_context:
-                text = f"<span size='small'>0 / {format_tokens(max_context)} tok</span>"
-            else:
-                text = "<span size='small'>0 tok</span>"
+            text = f"0 / {format_tokens(max_context)} tok" if max_context else "0 tok"
         else:
             if max_context:
                 pct = min(100.0, (last_input_tokens / max_context) * 100)
                 text = (
-                    f"<span size='small'>"
                     f"{format_tokens(last_input_tokens)} / {format_tokens(max_context)} tok ({pct:.0f}%)"
-                    f"</span>"
                 )
             else:
-                text = (
-                    f"<span size='small'>{format_tokens(last_input_tokens)} tok</span>"
-                )
+                text = f"{format_tokens(last_input_tokens)} tok"
 
         if has_usage:
             cost_text = (
@@ -1086,7 +1103,7 @@ class ChatSidebar(Gtk.Box):
                 if last_turn_cost is not None
                 else "Cost: N/A"
             )
-            text = text.replace("</span>", f" · {cost_text}</span>")
+            text = f"{text} · {cost_text}"
 
         # Escalation ramp via CSS classes (ui/css.py): quiet at 0-74%,
         # bold at 75-89%, theme accent at >=90%. No hardcoded colors.
@@ -1098,7 +1115,7 @@ class ChatSidebar(Gtk.Box):
                 ctx_classes.add_class("alarm")
             elif pct >= 75:
                 ctx_classes.add_class("warn")
-        self._context_label.set_markup(text)
+        self._context_label.set_text(text)
         reasoning_str = (
             f" ({last_reasoning_tokens:,} reasoning)" if last_reasoning_tokens else ""
         )
@@ -1558,14 +1575,14 @@ class ChatSidebar(Gtk.Box):
         is_planner = self._agent_mode == "planner"
         ctx = self._planner_toggle.get_style_context()
         if is_planner:
-            self._planner_toggle.set_label("Planner")
+            self._planner_toggle.set_label("Active:Planner")
             self._planner_toggle.set_tooltip_text(
                 "Planner mode active (read-only plan generator). Click to switch to Agent mode."
             )
             ctx.remove_class("chat-mode-agent")
             ctx.add_class("chat-mode-planner")
         else:
-            self._planner_toggle.set_label("Agent")
+            self._planner_toggle.set_label("Active:Agent")
             self._planner_toggle.set_tooltip_text(
                 "Agent mode active (edits flowgraph & files). Click to switch to Planner mode."
             )
@@ -1623,9 +1640,7 @@ class ChatSidebar(Gtk.Box):
             return
         short_model = model.rsplit("/", 1)[-1]
         badge_label = _PROVIDER_BADGE_LABEL.get(provider, provider)
-        self._provider_label.set_markup(
-            f"<span size='small'>{GLib.markup_escape_text(badge_label, -1)} \u00b7 {GLib.markup_escape_text(short_model, -1)}</span>"
-        )
+        self._provider_label.set_text(f"{badge_label} · {short_model}")
 
         provider_title = _PROVIDER_LABELS.get(provider, provider.capitalize())
         # base_url is the running model's own provider URL; when it is empty
@@ -1958,7 +1973,7 @@ class ChatSidebar(Gtk.Box):
                             res_str = event.part.model_response()
                             name = getattr(exp, "_grc_tool_name", "?")
                             self._set_tool_body(exp, res_str)
-                            exp.set_label(_tool_label(name, retry=True))
+                            exp.set_label(_tool_label(name, retry=True, result=res_str))
                         else:
                             res_str = str(event.part.content)
                             self._set_tool_result(exp, res_str)
@@ -2042,10 +2057,14 @@ class ChatSidebar(Gtk.Box):
 
     def _on_part_delta(self, ctx: _StreamCtx, event: PartDeltaEvent) -> None:
         delta = event.delta
+        ctx.last_event_ts = time.monotonic()
         if isinstance(delta, TextPartDelta):
             self._close_thinking(ctx)
-            ctx.text_acc += delta.content_delta
-            ctx.full_raw_text += delta.content_delta
+            content = delta.content_delta or ""
+            ctx.text_acc += content
+            ctx.full_raw_text += content
+            ctx.pending_chunks += 1
+            ctx.pending_chars += len(content)
             self._ensure_text(ctx)
             ctx.text_dirty = True
             self._flush_streaming(ctx)
@@ -2058,8 +2077,11 @@ class ChatSidebar(Gtk.Box):
             if delta.content_delta is None:
                 return
             self._close_text(ctx)
-            ctx.think_acc += delta.content_delta
-            ctx.full_raw_text += delta.content_delta
+            content = delta.content_delta
+            ctx.think_acc += content
+            ctx.full_raw_text += content
+            ctx.pending_chunks += 1
+            ctx.pending_chars += len(content)
             self._ensure_thinking(ctx)
             ctx.think_dirty = True
             self._flush_streaming(ctx)
@@ -2095,6 +2117,7 @@ class ChatSidebar(Gtk.Box):
             if (now - ctx.last_flush) < interval:
                 return
 
+        flush_start = time.monotonic()
         flushed = False
         if ctx.text_dirty and ctx.text_lbl is not None:
             self._flush_text(ctx)
@@ -2104,6 +2127,19 @@ class ChatSidebar(Gtk.Box):
             self._flush_thinking(ctx)
             flushed = True
         if flushed or force:
+            flush_end = time.monotonic()
+            queue_wait_ms = (flush_start - ctx.last_event_ts) * 1000.0 if ctx.last_event_ts > 0 else 0.0
+            flush_duration_ms = (flush_end - flush_start) * 1000.0
+            if ctx.pending_chunks > 0:
+                _log.debug(
+                    "stream_flush: chunks=%d chars=%d queue_wait=%.2fms duration=%.2fms",
+                    ctx.pending_chunks,
+                    ctx.pending_chars,
+                    queue_wait_ms,
+                    flush_duration_ms,
+                )
+                ctx.pending_chunks = 0
+                ctx.pending_chars = 0
             ctx.last_flush = now
             if force:
                 self._update_copy_text(ctx.box, ctx.full_raw_text)
@@ -2274,7 +2310,8 @@ class ChatSidebar(Gtk.Box):
                     pass
                 return False
 
-            GLib.timeout_add(1500, _revert)
+            tid = GLib.timeout_add(1500, _revert)
+            btn.connect("destroy", lambda *_: GLib.source_remove(tid))
 
     def _update_copy_text(self, box: Gtk.Box, text: Any) -> None:
         btn = getattr(box, "_grc_copy_btn", None)
@@ -2490,7 +2527,7 @@ class ChatSidebar(Gtk.Box):
 
                 if ret_content:
                     self._set_tool_body(exp, ret_content)
-                    exp.set_label(_tool_label(tool_name, ok=ok, retry=retry))
+                    exp.set_label(_tool_label(tool_name, ok=ok, retry=retry, result=ret_content))
                     full_text += _transcript_tool_call(tool_name, args_str, ret_content)
                 else:
                     exp.set_label(_tool_label(tool_name))
@@ -2719,7 +2756,7 @@ class ChatSidebar(Gtk.Box):
     def _set_tool_result(self, exp: Gtk.Expander, result: str) -> None:
         self._set_tool_body(exp, result)
         name = getattr(exp, "_grc_tool_name", "?")
-        exp.set_label(_tool_label(name))
+        exp.set_label(_tool_label(name, result=result))
 
     def _append_error(self, message: str, style: str = "error") -> None:
         """Append an inline status label to the chat log.

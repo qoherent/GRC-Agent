@@ -1014,10 +1014,9 @@ wheels = [
 
 [[package]]
 name = "grc-agent"
-version = "0.3.1"
+version = "0.3.2"
 source = { editable = "." }
 dependencies = [
-    { name = "beautifulsoup4" },
     { name = "cohere" },
     { name = "ddgs" },
     { name = "gbulb", marker = "python_full_version < '3.13'" },
@@ -1048,7 +1047,6 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "beautifulsoup4", specifier = ">=4.12" },
     { name = "cohere", specifier = ">=5.0" },
     { name = "ddgs", specifier = ">=9.0" },
     { name = "gbulb", marker = "python_full_version < '3.13'", specifier = ">=0.6.6" },

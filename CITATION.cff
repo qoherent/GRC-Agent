@@ -2,8 +2,8 @@ cff-version: 1.2.0
 message: "If you use GRC Agent in research or a published project, please cite it."
 title: "GRC Agent"
 type: software
-date-released: 2026-08-24
-version: 0.3.1
+date-released: 2026-08-25
+version: 0.3.2
 license: AGPL-3.0-only
 authors:
   - given-names: Mahmoud

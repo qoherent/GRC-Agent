@@ -43,7 +43,7 @@ textview.chat-thinking-textview text {
 .chat-project-bar { border-bottom: 1px solid @SOFT@; }
 .chat-project-label {
     color: alpha(@theme_fg_color, 0.85);
-    font-size: 0.85em;
+    font-size: 0.90em;
 }
 .chat-toolbar { border-bottom: 1px solid @SOFT@; }
 .chat-status-bar { border-top: 1px solid @SOFT@; }
@@ -54,15 +54,19 @@ textview.chat-thinking-textview text {
 .chat-header-badge {
     border: 1px solid @SOFT@;
     border-radius: 4px;
-    padding: 2px 6px;
-    font-size: 0.78em;
+    padding: 3px 8px;
+    font-size: 0.92em;
+    font-weight: 500;
 }
 
+.chat-mode-btn,
+.chat-mode-btn label {
+    font-size: 0.92em;
+}
 .chat-mode-btn {
-    border-radius: 12px;
-    padding: 2px 10px;
-    font-size: 0.80em;
-    font-weight: bold;
+    border-radius: 10px;
+    padding: 2px 8px;
+    font-weight: 500;
     min-height: 22px;
 }
 .chat-mode-agent {
@@ -149,14 +153,18 @@ textview.chat-thinking-textview text {
 .chat-recent-delete-btn:hover {
     border-color: @STRONG@;
 }
-.chat-compact-btn {
-    font-size: 0.80em;
-    min-height: 22px;
-    padding: 2px 6px;
+.chat-compact-btn,
+.chat-compact-btn label {
+    font-size: 0.92em;
 }
-.chat-agent-mode-label {
+.chat-compact-btn {
+    min-height: 22px;
+    padding: 2px 7px;
+}
+.chat-agent-mode-label,
+.chat-agent-mode-label label {
     color: alpha(@theme_fg_color, 0.82);
-    font-size: 0.80em;
+    font-size: 0.92em;
 }
 
 /* Copy buttons (symbolic icon, unobtrusive flat button) */
@@ -190,13 +198,13 @@ textview.chat-thinking-textview text {
 }
 .chat-recent-meta {
     color: alpha(@theme_fg_color, 0.68);
-    font-size: 0.80em;
+    font-size: 0.85em;
 }
 
 /* Quick prompts are suggestions, not primary actions. Keep their labels
    compact so all three fit across a normal sidebar without widening it. */
 .chat-quick-prompt-btn {
-    font-size: 0.82em;
+    font-size: 0.85em;
     min-height: 22px;
     padding: 2px 6px;
 }
@@ -262,12 +270,22 @@ textview.chat-thinking-textview text {
 /* Base is muted fg; escalation via full-fg bold (75-89%) then the theme's
    required accent (>=90%). No error/warning symbols used — they are not
    defined by every GTK theme, and a dropped rule would silently lose the cue. */
-.chat-context-label { color: alpha(@theme_fg_color, 0.72); }
+.chat-context-controls,
+.chat-context-controls label,
+.chat-context-label,
+.chat-context-label label {
+    color: alpha(@theme_fg_color, 0.72);
+    font-size: 0.92em;
+}
 .chat-context-label.warn { color: @theme_fg_color; font-weight: bold; }
 .chat-context-label.alarm { color: @theme_selected_bg_color; font-weight: bold; }
 
 /* ---- status bar: quiet base, loud errors ----------------------------- */
-.chat-status-bar { color: alpha(@theme_fg_color, 0.85); }
+.chat-status-bar,
+.chat-status-bar label {
+    color: alpha(@theme_fg_color, 0.85);
+    font-size: 0.92em;
+}
 .validation-invalid { color: @theme_fg_color; font-weight: bold; }
 """
 
