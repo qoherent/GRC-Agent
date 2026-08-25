@@ -1,12 +1,13 @@
 # ruff: noqa: E402
-"""Approval card for human-in-the-loop flowgraph-change approval.
+"""Approval cards for human-in-the-loop tool approval.
 
-The change_graph tool is registered with ``requires_approval=True``; when the
-model proposes an edit, the run ends with a ``DeferredToolRequests`` output and
-the sidebar shows one :class:`ApprovalCard` per proposed call. The card
-renders the model-provided one-line ``reason`` plus a uniform, structured
-summary of the JSON args (derived by :func:`format_change_summary`) and offers
-Approve / Deny / Always-accept actions.
+Tools registered with ``requires_approval=True`` (``change_graph``,
+``run_flowgraph``, the shell exec tools) end their run with a
+``DeferredToolRequests`` output; the sidebar shows one :class:`ApprovalCard`
+per proposed call. The card renders the model-provided one-line ``reason``
+(when the tool has one) plus a per-tool structured summary of the JSON args
+(derived by :func:`format_tool_summary`) and offers Approve / Deny /
+Always-accept actions.
 """
 
 from __future__ import annotations
@@ -104,8 +105,51 @@ def format_change_summary(args: dict[str, Any]) -> str:
     return "\n".join(out)
 
 
+def format_tool_summary(tool_name: str, args: dict[str, Any]) -> str:
+    """Render a deferred tool call's JSON args as a compact Markdown summary.
+
+    One dispatch on the tool name — `change_graph` keeps its dedicated
+    field-aware renderer; the run/stop and shell exec tools get a literal,
+    copy-pasteable rendering (the command IS the reason for those tools);
+    anything else falls back to one uniform per-field bullet list. Never
+    raises on unexpected shapes: an unknown tool still gets its args shown.
+    """
+    if tool_name == "change_graph":
+        return format_change_summary(args)
+    if tool_name == "run_flowgraph":
+        lines = ["- Run the active flowgraph with GRC's native Execute action."]
+        if args.get("wait"):
+            lines.append(
+                f"- Wait up to `{args.get('timeout_seconds', 60)}s` for completion."
+            )
+        else:
+            lines.append("- Return immediately; the run continues until stopped.")
+        return "\n".join(lines)
+    if tool_name in ("run_command", "start_command"):
+        cmd = str(args.get("command") or "").strip() or "_(empty command)_"
+        suffix = "\n\n*(runs in the background)*" if tool_name == "start_command" else ""
+        return f"```sh\n{cmd}\n```{suffix}"
+    # Uniform fallback: one labeled bullet per argument value.
+    lines = []
+    for key, value in args.items():
+        text = str(value)
+        if len(text) > 300:
+            text = text[:300] + "…"
+        lines.append(f"- `{key}`: `{text}`")
+    return "\n".join(lines) if lines else "_No arguments._"
+
+
+_TOOL_CARD_TITLES = {
+    "change_graph": "Proposed change — requires approval",
+    "run_flowgraph": "Proposed flowgraph run — requires approval",
+    "run_command": "Proposed command — requires approval",
+    "start_command": "Proposed background command — requires approval",
+}
+_DEFAULT_CARD_TITLE = "Proposed action — requires approval"
+
+
 class ApprovalCard(Gtk.Box):
-    """The approve/deny card for one proposed change_graph call."""
+    """The approve/deny card for one proposed approval-gated tool call."""
 
     def __init__(
         self,
@@ -125,7 +169,9 @@ class ApprovalCard(Gtk.Box):
         reason = str(args.get("reason") or "") if isinstance(args, dict) else ""
 
         title = Gtk.Label()
-        title.set_markup("<b>Proposed change — requires approval</b>")
+        title.set_markup(
+            f"<b>{_TOOL_CARD_TITLES.get(call.tool_name, _DEFAULT_CARD_TITLE)}</b>"
+        )
         title.set_xalign(0.0)
         title.set_halign(Gtk.Align.START)
         self.pack_start(title, False, False, 0)
@@ -143,7 +189,7 @@ class ApprovalCard(Gtk.Box):
         if isinstance(args, dict):
             summary_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
             summary_box.set_hexpand(True)
-            summary_text = format_change_summary(args)
+            summary_text = format_tool_summary(call.tool_name, args)
             if md is not None:
                 md.render(summary_box, summary_text, clear=False)
             else:
@@ -172,10 +218,21 @@ class ApprovalCard(Gtk.Box):
         buttons.pack_start(deny, False, False, 0)
 
         always = Gtk.Button(label="Always accept")
-        always.set_tooltip_text(
-            "Apply this change and stop asking for approval — re-enable Manual mode with the "
-            "'Mode' toggle under the composer"
-        )
+        if call.tool_name in ("run_command", "start_command"):
+            token = str(args.get("command") or "").split()[0] if args.get("command") else ""
+            if token:
+                always.set_label(f"Always allow `{token}`")
+                always.set_tooltip_text(
+                    f"Allow `{token}` commands for the rest of this session — "
+                    "other commands still ask. The global Manual/Auto gate is untouched."
+                )
+            else:
+                always.set_tooltip_text("Allow this command for the rest of this session")
+        else:
+            always.set_tooltip_text(
+                "Apply this change and stop asking for approval — re-enable Manual mode with the "
+                "'Mode' toggle under the composer"
+            )
         always.set_focus_on_click(False)
         always.connect("clicked", lambda _b: on_always_accept())
         buttons.pack_start(always, False, False, 0)

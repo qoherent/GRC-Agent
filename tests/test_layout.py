@@ -8,8 +8,8 @@ from conftest import _DIAL_TONE_FLOW_BLOCKS
 from grc_agent.adapter import (
     GRID_H,
     GRID_W,
+    _compute_layout_model,
     _compute_ranks,
-    _order_flow_band,
     change_graph,
     load_flow_graph,
 )
@@ -143,7 +143,13 @@ def test_change_graph_header_band_wraps_when_many_variables(temp_empty):
     assert len(all_header_ys) == 3
 
 
-def test_change_graph_disconnected_flow_components_share_rank_columns_without_overlap(temp_empty):
+def test_change_graph_disconnected_flow_components_get_own_row_bands(temp_empty):
+    # Two independent chains (src_a->sink_a, src_b->sink_b) are separate
+    # weakly-connected components. Each must get its own row band starting at
+    # the left margin — not share columns in one vertical stack (the old
+    # behavior, where wires from one chain threaded through the other's
+    # blocks). Both sources land at x=0 (rank 0 of their own band), and the
+    # second band starts below the first band's full height.
     fg = load_flow_graph(str(temp_empty))
     res = change_graph(
         fg,
@@ -177,8 +183,12 @@ def test_change_graph_disconnected_flow_components_share_rank_columns_without_ov
         n: tuple(fg.get_block(n).states["coordinate"])
         for n in ["src_a", "sink_a", "src_b", "sink_b"]
     }
-    # Both sources are independent rank-0 components -> same column, different rows.
-    assert coords["src_a"][0] == coords["src_b"][0]
+    # Each band starts at the left margin; rank 0 sits at x=0, rank 1 at GRID_W.
+    assert coords["src_a"][0] == coords["src_b"][0] == 0.0
+    assert coords["sink_a"][0] == coords["sink_b"][0] == GRID_W
+    # Bands are separated: the whole of chain A sits above the whole of chain B.
+    assert coords["src_a"][1] < coords["src_b"][1]
+    assert coords["sink_a"][1] < coords["sink_b"][1]
     assert coords["src_a"][1] != coords["src_b"][1]
     values = list(coords.values())
     for i, a in enumerate(values):
@@ -299,26 +309,108 @@ def test_change_graph_flow_band_never_starts_above_a_wrapped_header_band(temp_em
     assert flow_y >= header_bottom_edge
 
 
-def test_order_flow_band_barycenter_orders_by_upstream_position():
+def test_layout_model_crossing_minimizer_orders_by_upstream_barycenter():
+    # rank0: s_a, s_c, plus an isolated s_b (no edges -> its own component).
+    # rank1: "high" anchors to s_c, "low" anchors to s_a, "mid" anchors to
+    # BOTH s_a and s_c. The alphabetical initial order + grandalf's barycenter
+    # sweeps must put low (row 0) above mid (row 1) above high (row 2), which
+    # is exactly the no-crossing order for s_a->low/mid and s_c->mid/high.
     from types import SimpleNamespace
 
     def blk(name):
         return SimpleNamespace(name=name)
 
-    # rank0: three sources, unresolved (no predecessors) -> alphabetical: s_a, s_b, s_c -> rows 0,1,2.
-    # rank1, given in an adversarial (non-barycenter) order: "high" anchors to
-    # s_c (row 2), "low" anchors to s_a (row 0), "mid" anchors to BOTH s_a and
-    # s_c (barycenter (0+2)/2 = 1) -> must land strictly between low and high.
-    flow_blocks = [blk("s_a"), blk("s_b"), blk("s_c"), blk("high"), blk("low"), blk("mid")]
-    ranks = {"s_a": 0, "s_b": 0, "s_c": 0, "high": 1, "low": 1, "mid": 1}
-    predecessors = {"high": {"s_c"}, "low": {"s_a"}, "mid": {"s_a", "s_c"}}
+    def conn(src, dst):
+        return SimpleNamespace(source_block=blk(src), sink_block=blk(dst))
 
-    positions = _order_flow_band(flow_blocks, ranks, predecessors, y_origin=0.0)
+    fg = SimpleNamespace(
+        blocks=[blk(n) for n in ["s_a", "s_b", "s_c", "high", "low", "mid"]],
+        connections=[conn("s_a", "low"), conn("s_c", "high"), conn("s_a", "mid"), conn("s_c", "mid")],
+    )
 
-    assert positions["high"][0] == positions["low"][0] == positions["mid"][0] == 1 * GRID_W
-    assert positions["low"][1] == 0 * GRID_H
-    assert positions["mid"][1] == 1 * GRID_H
-    assert positions["high"][1] == 2 * GRID_H
+    model = _compute_layout_model(fg, set(), None)
+
+    # s_b is disconnected -> its own component; the wired five share one.
+    assert sorted(model.components, key=len) == [["s_b"], ["high", "low", "mid", "s_a", "s_c"]]
+    wired = next(c for c in model.components if len(c) > 1)
+    ordered = model.ordered_ranks[model.components.index(wired)]
+    rank1 = ordered[1]
+    assert rank1.index("low") < rank1.index("mid") < rank1.index("high")
+    # Rows must also be consecutive (no gaps in the crossing-minimized stack).
+    assert rank1 == sorted(rank1, key=rank1.index) and len(rank1) == 3
+
+
+def test_change_graph_crossing_minimizer_removes_crossings(temp_empty):
+    # Classic crossing setup: two sources feeding two merges in a crossed
+    # pattern (s1->m2, s2->m1, s2->m2). Alphabetical order of rank 1
+    # (m1 above m2) crosses s1->m2 over s2->m1; the barycenter sweep must put
+    # m2 above m1, making every wire left-to-right with zero crossings.
+    fg = load_flow_graph(str(temp_empty))
+    res = change_graph(
+        fg,
+        add_blocks=[
+            {"block_id": "blocks_null_source", "instance_name": "s1", "params": {"type": "float"}},
+            {"block_id": "blocks_null_source", "instance_name": "s2", "params": {"type": "float"}},
+            {"block_id": "blocks_add_xx", "instance_name": "m1", "params": {"type": "float"}},
+            {"block_id": "blocks_add_xx", "instance_name": "m2", "params": {"type": "float"}},
+        ],
+        add_connections=["s1:0->m2:0", "s2:0->m1:0", "s2:0->m2:1"],
+        force=True,
+    )
+    assert res["ok"] is True
+
+    coords = {n: tuple(fg.get_block(n).states["coordinate"]) for n in ["s1", "s2", "m1", "m2"]}
+    # Barycenter pulls m2 toward s1/s2's shared column position: m2 above m1.
+    assert coords["m2"][1] < coords["m1"][1]
+    assert coords["s1"][1] < coords["s2"][1]
+    # No pair of edges crosses: sources share columns and sinks share columns,
+    # so two edges cross iff their y-order on the source side is the reverse
+    # of their y-order on the sink side.
+    pairs = [("s1", "m2"), ("s2", "m1"), ("s2", "m2")]
+    for i, (sa, da) in enumerate(pairs):
+        for sb, db in pairs[i + 1 :]:
+            if sa == sb or da == db:
+                continue  # shared endpoint: the wires converge, never cross
+            src_order = coords[sa][1] < coords[sb][1]
+            dst_order = coords[da][1] < coords[db][1]
+            assert src_order == dst_order, f"wires cross: {sa}->{da} vs {sb}->{db}"
+
+
+def test_layout_deterministic_across_runs(temp_empty):
+    # The same topology must produce byte-identical coordinates on every run
+    # (grandalf's internal set iteration is identity-hash ordered; the layout
+    # sorts components/layers alphabetically so the output never depends on
+    # it). Two independent flows through change_graph -> identical positions.
+    fg1 = load_flow_graph(str(temp_empty))
+    fg2 = load_flow_graph(str(temp_empty))
+    res = change_graph(
+        fg1,
+        add_blocks=[
+            {"block_id": "blocks_null_source", "instance_name": "src_a", "params": {"type": "float"}},
+            {"block_id": "blocks_null_sink", "instance_name": "sink_a", "params": {"type": "float"}},
+            {"block_id": "blocks_null_source", "instance_name": "src_b", "params": {"type": "float"}},
+            {"block_id": "blocks_null_sink", "instance_name": "sink_b", "params": {"type": "float"}},
+        ],
+        add_connections=["src_a:0->sink_a:0", "src_b:0->sink_b:0"],
+        force=True,
+    )
+    assert res["ok"] is True
+    same = change_graph(
+        fg2,
+        add_blocks=[
+            {"block_id": "blocks_null_source", "instance_name": "src_a", "params": {"type": "float"}},
+            {"block_id": "blocks_null_sink", "instance_name": "sink_a", "params": {"type": "float"}},
+            {"block_id": "blocks_null_source", "instance_name": "src_b", "params": {"type": "float"}},
+            {"block_id": "blocks_null_sink", "instance_name": "sink_b", "params": {"type": "float"}},
+        ],
+        add_connections=["src_a:0->sink_a:0", "src_b:0->sink_b:0"],
+        force=True,
+    )
+    assert same["ok"] is True
+    for n in ["src_a", "sink_a", "src_b", "sink_b"]:
+        assert tuple(fg1.get_block(n).states["coordinate"]) == tuple(
+            fg2.get_block(n).states["coordinate"]
+        )
 
 
 def test_change_graph_add_block_no_overlap_with_existing(temp_dial_tone):

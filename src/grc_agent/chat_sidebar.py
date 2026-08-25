@@ -706,6 +706,12 @@ class ChatSidebar(Gtk.Box):
         # listbox size-allocate connection.
         self._md: MarkdownView | None = None
         self._message_history: list[ModelMessage] = []
+        # Session-scoped shell prefix-allows ('Always allow <tok>' on a shell
+        # approval card): granted tokens plus the session they belong to. A
+        # different active session id makes the set inert — no reset wiring
+        # needed at the load/clear/switch sites.
+        self._shell_allowed_prefixes: set[str] = set()
+        self._shell_allowed_session: int | None = None
         self._active_session_id: int | None = None
         self._loading_session_id: int | None = None
         self._busy = False
@@ -3101,12 +3107,15 @@ class ChatSidebar(Gtk.Box):
     async def _request_approvals(
         self, ctx: _StreamCtx, output: DeferredToolRequests
     ) -> DeferredToolResults:
-        """Resolve a run's pending change_graph approval requests.
+        """Resolve a run's pending approval requests (any approval-gated
+        tool: change_graph, run_flowgraph, the shell exec tools).
 
         With the gate in 'ask' mode, renders one ApprovalCard per request into
         the streaming row and awaits the user's decision; with the gate in
-        'always' mode, auto-approves every request without UI. Returns the
-        native DeferredToolResults consumed by the resumed ``agent.iter``.
+        'always' mode, auto-approves every request without UI. Shell commands
+        whose first token was session-allowed earlier are auto-approved the
+        same way. Returns the native DeferredToolResults consumed by the
+        resumed ``agent.iter``.
         """
         approvals = [c for c in output.approvals]
         if not approvals:
@@ -3118,9 +3127,23 @@ class ChatSidebar(Gtk.Box):
 
         pending: dict[str, asyncio.Future] = {}
         cards: list[ApprovalCard] = []
+        auto: dict[str, Any] = {}
         for call in approvals:
+            if self._shell_prefix_allowed(call):
+                auto[call.tool_call_id] = ToolApproved()
+                continue
             fut: asyncio.Future = asyncio.get_running_loop().create_future()
             pending[call.tool_call_id] = fut
+            if call.tool_name in ("run_command", "start_command"):
+                # Shell cards: "Always allow" means allow this command's first
+                # token for the REST OF THIS SESSION (prefix-allow) — never the
+                # persisted global gate-off, which stays a deliberate Mode
+                # toggle away for something this powerful.
+                on_always = lambda call=call: self._always_allow_command(  # noqa: E731
+                    pending, cards, call
+                )
+            else:
+                on_always = lambda: self._always_approve_all(pending, cards)  # noqa: E731
             card = ApprovalCard(
                 self._md,
                 call,
@@ -3132,7 +3155,7 @@ class ChatSidebar(Gtk.Box):
                     cid,
                     ToolDenied(message="The user rejected the proposed change."),
                 ),
-                on_always_accept=lambda: self._always_approve_all(pending, cards),
+                on_always_accept=on_always,
             )
             cards.append(card)
             ctx.box.pack_start(card, False, False, 0)
@@ -3140,9 +3163,7 @@ class ChatSidebar(Gtk.Box):
         self._scroll_to_bottom()
 
         try:
-            return DeferredToolResults(
-                approvals={cid: await fut for cid, fut in pending.items()}
-            )
+            results = {cid: await fut for cid, fut in pending.items()}
         except asyncio.CancelledError:
             # Stop was pressed while waiting: remove the transient cards; the
             # CancelledError propagates to the turn's abort path, which keeps
@@ -3150,6 +3171,61 @@ class ChatSidebar(Gtk.Box):
             for card in cards:
                 card.destroy()
             raise
+        results.update(auto)
+        return DeferredToolResults(approvals=results)
+
+    def _shell_prefix_allowed(self, call: Any) -> bool:
+        """True when this shell call's first token was session-allowed.
+
+        The set is scoped to the session it was granted in (checked against
+        the active session id on every consult), so switching, loading, or
+        clearing a chat starts fresh without any reset wiring at those sites.
+        """
+        if call.tool_name not in ("run_command", "start_command"):
+            return False
+        if self._shell_allowed_session != self._active_session_id:
+            return False
+        token = self._shell_first_token(call)
+        return token is not None and token in self._shell_allowed_prefixes
+
+    @staticmethod
+    def _shell_first_token(call: Any) -> str | None:
+        args = call.args_as_dict() if call.args else {}
+        command = str(args.get("command") or "") if isinstance(args, dict) else ""
+        tokens = command.split()
+        return tokens[0] if tokens else None
+
+    def _always_allow_command(
+        self, pending: dict[str, asyncio.Future], cards: list[ApprovalCard], call: Any
+    ) -> None:
+        """'Always allow <tok>': remember the command's first token for this
+        session, approve it (and any other pending call on the same token),
+        and drop exactly those cards. The persisted gate is untouched."""
+        token = self._shell_first_token(call)
+        if token is None:
+            return
+        self._shell_allowed_prefixes.add(token)
+        self._shell_allowed_session = self._active_session_id
+        _log.info("Shell prefix-allow granted for %r in this session", token)
+
+        def _matches(card: ApprovalCard) -> bool:
+            other = getattr(card, "_call", None)
+            return (
+                other is not None
+                and getattr(other, "tool_name", "") in ("run_command", "start_command")
+                and self._shell_first_token(other) == token
+            )
+
+        for card in cards:
+            if not _matches(card):
+                continue
+            cid = getattr(getattr(card, "_call", None), "tool_call_id", None)
+            fut = pending.get(cid) if cid is not None else None
+            if fut is not None and not fut.done():
+                fut.set_result(ToolApproved())
+        # Deferred to idle so a card is never destroyed from inside its own
+        # click handler (same convention as _always_approve_all).
+        GLib.idle_add(lambda: [c.destroy() for c in cards if _matches(c)])
 
     @staticmethod
     def _resolve_approval(

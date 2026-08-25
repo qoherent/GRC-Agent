@@ -136,3 +136,68 @@ def test_build_app_shows_fatal_error_when_window_not_found(monkeypatch):
     fatal.assert_called_once()
     title, _message = fatal.call_args[0]
     assert "window" in title.lower()
+
+
+def test_untitled_save_dialog_seeded_to_project_dir(tmp_path, monkeypatch):
+    """An untitled graph's Save-As dialog must default to the configured
+    project directory (Ctrl+S on a new graph), while a named graph keeps GRC's
+    own file-folder behavior. Seeds GRC's native dialog class only for the
+    untitled case — native save flow untouched.
+
+    We assert on what set_current_folder is *called* with, not
+    get_current_folder(), because GTK realizes the chooser folder lazily
+    (get_current_folder can read None before the dialog is shown)."""
+    from grc_agent.adapter import graph as adapter_graph
+
+    # Bootstrap gnuradio.grc.gui in the same order the running app does
+    # (get_gui_platform/gui_application_cls set the PangoCairo version and
+    # import the package top-down), so FileDialogs imports without GRC's
+    # circular-import failure.
+    adapter_graph.get_gui_platform()
+    from gnuradio.grc.gui import FileDialogs
+
+    proj = tmp_path / "proj"
+    proj.mkdir()
+
+    monkeypatch.setattr(adapter_graph, "_UNTITLED_SAVE_INSTALLED", False)
+    adapter_graph.install_untitled_save_folder_provider(lambda: proj)
+
+    save_cls = FileDialogs.SaveFlowGraph  # the installed subclass
+    assert issubclass(save_cls, FileDialogs.SaveFlowGraph)
+    seed_calls = []
+    monkeypatch.setattr(
+        save_cls, "set_current_folder", lambda *args: seed_calls.append(args[-1])
+    )
+
+    # Untitled (empty path) -> seeds the project directory (on top of GRC's
+    # own dirname('') no-op call).
+    save_cls(None, "")
+    assert seed_calls[-1] == str(proj), "untitled save must seed the project dir"
+
+    # A named graph keeps GRC's own "start in the file's folder" behavior —
+    # the subclass must not re-seed it.
+    named = proj / "sub" / "x.grc"
+    named.parent.mkdir()
+    named.write_text("x")
+    save_cls(None, str(named))
+    assert seed_calls[-1] == str(named.parent), "named save must keep GRC's folder"
+
+
+def test_untitled_save_folder_ignores_unset_or_invalid_dir(monkeypatch):
+    """No project dir (or one that vanished) -> the dialog keeps GRC's native
+    default instead of being seeded somewhere invalid."""
+    from grc_agent.adapter import graph as adapter_graph
+
+    adapter_graph.get_gui_platform()
+    from gnuradio.grc.gui import FileDialogs
+
+    monkeypatch.setattr(adapter_graph, "_UNTITLED_SAVE_INSTALLED", False)
+    adapter_graph.install_untitled_save_folder_provider(lambda: None)
+
+    save_cls = FileDialogs.SaveFlowGraph
+    seed_calls = []
+    monkeypatch.setattr(save_cls, "set_current_folder", lambda *args: seed_calls.append(args[-1]))
+
+    save_cls(None, "")
+    # Only GRC's own dirname('') no-op call runs; the subclass must not seed.
+    assert seed_calls == [""]

@@ -153,6 +153,7 @@ def test_check_for_unsynced_edit_logs_and_rearms(monkeypatch, caplog):
     da._flow_graph = MagicMock()
     cm.window = MagicMock()
     cm.window.current_page.drawing_area = da
+    cm.window.current_page.file_path = ""
     cm.last_synced_export_hash = "X"
     # __new__ bypasses __init__, so the state-cache-version poll gate's
     # baseline must be set explicitly. None here means the cheap gate always
@@ -161,6 +162,7 @@ def test_check_for_unsynced_edit_logs_and_rearms(monkeypatch, caplog):
     # original intent of exercising the full-hash error path.
     cm._last_state_cache_version = None
     cm._poll_tick_count = 0
+    cm._baseline_path = ""  # matches page.file_path so the path gate stays closed
 
     def boom(_):
         raise RuntimeError("hash failed")
@@ -194,6 +196,8 @@ def test_check_for_unsynced_edit_skips_hash_when_state_cache_unchanged(monkeypat
     cm.last_synced_export_hash = "X"
     cm._last_state_cache_version = (3, 3, 0)  # matches page.state_cache exactly
     cm._poll_tick_count = 0  # ticks 1-2 below stay well short of the periodic backstop
+    page.file_path = ""
+    cm._baseline_path = ""  # matches page.file_path so the path gate stays closed
 
     call_count = 0
 
@@ -241,6 +245,8 @@ def test_check_for_unsynced_edit_periodic_backstop_catches_undo_then_edit_collis
     # would after the undo+edit collision — the cheap gate alone sees no change.
     cm._last_state_cache_version = (5, 5, 0)
     cm._poll_tick_count = 0
+    page.file_path = ""
+    cm._baseline_path = ""  # matches page.file_path so the path gate stays closed
 
     call_count = 0
 
@@ -267,6 +273,54 @@ def test_check_for_unsynced_edit_periodic_backstop_catches_undo_then_edit_collis
     assert synced == ["new-hash-after-the-collision"], (
         "the backstop must detect and sync the content the state_cache tuple alone missed"
     )
+
+
+def test_check_for_unsynced_edit_rebaselines_on_path_change(monkeypatch):
+    """Saving an untitled graph in place (or Save-As to a new path) changes
+    page.file_path without firing switch-page, so the safety-net poll must
+    detect the path change and re-baseline. Without this, last_disk_hash stays
+    None and sync_manual_edit's early return (native_canvas.py) would silently
+    stop auto-persisting every later manual edit on that tab."""
+    from unittest.mock import MagicMock
+
+    from grc_agent.native_canvas import NativeCanvasManager
+
+    cm = NativeCanvasManager.__new__(NativeCanvasManager)
+    da = MagicMock()
+    da._flow_graph = MagicMock()
+    page = MagicMock()
+    page.drawing_area = da
+    page.file_path = ""  # untitled
+    page.state_cache.current_state_index = 3
+    page.state_cache.num_prev_states = 3
+    page.state_cache.num_next_states = 0
+    cm.window = MagicMock()
+    cm.window.current_page = page
+    cm.last_synced_export_hash = "X"
+    cm._last_state_cache_version = (3, 3, 0)
+    cm._poll_tick_count = 0
+    cm._baseline_path = ""  # baselined against the untitled path
+
+    synced = []
+
+    def fake_sync_page_baselines():
+        synced.append(1)
+        cm._baseline_path = page.file_path  # mirror the real method's bookkeeping
+
+    monkeypatch.setattr(cm, "_sync_page_baselines", fake_sync_page_baselines)
+
+    # Untitled, path unchanged -> no re-baseline.
+    assert cm._check_for_unsynced_edit() is True
+    assert synced == []
+
+    # User saves untitled via native Ctrl+S -> file_path becomes real, same page.
+    page.file_path = "/proj/flow.grc"
+    assert cm._check_for_unsynced_edit() is True
+    assert len(synced) == 1, "a path change between ticks must re-baseline"
+
+    # Baseline updated to the new path -> no repeat re-baseline on the next tick.
+    assert cm._check_for_unsynced_edit() is True
+    assert len(synced) == 1, "re-baseline must not fire again for the same path"
 
 
 def test_sync_page_baselines_swallows_hash_error(monkeypatch):
@@ -461,20 +515,18 @@ def test_scroll_to_block():
     assert cm.scroll_to_block("missing") is False
 
 
-def test_scroll_to_relaid_out_graph():
-    """All three branches of _scroll_to_relaid_out_graph: the new blocks'
-    POST-relayout corner is the reframe target (compute_full_layout can move
-    every block — the new blocks' corner is where the action is, not the
-    whole-graph top-left which is often empty header-band space); the whole
-    bbox top-left when the new blocks carry no coordinates; and a no-op when
-    there are no new blocks at all (update_params/remove-only edits never
-    run the relayout)."""
+def test_fit_to_view():
+    """_fit_to_view computes a zoom that fits the whole graph's extents into
+    the viewport (with FIT_PAD padding), sets it through GRC's own
+    _set_zoom_factor, and scrolls so the graph's center lands mid-viewport —
+    with the adjustment upper raised to cover the new content size first. The
+    no-blocks branch is a strict no-op (never touches zoom or adjustments)."""
     from types import SimpleNamespace
     from unittest.mock import MagicMock
 
     from grc_agent.native_canvas import NativeCanvasManager
 
-    def _canvas(fg):
+    def _canvas(fg, da_zoom=1.0):
         adj_h = MagicMock()
         adj_h.get_upper.return_value = 500
         adj_h.get_lower.return_value = 0
@@ -486,40 +538,43 @@ def test_scroll_to_relaid_out_graph():
         sw = MagicMock()
         sw.get_hadjustment.return_value = adj_h
         sw.get_vadjustment.return_value = adj_v
-        da = SimpleNamespace(zoom_factor=1.0)
+        viewport = SimpleNamespace(
+            get_allocation=lambda: SimpleNamespace(width=1100, height=660)
+        )
+        da = SimpleNamespace(
+            zoom_factor=da_zoom,
+            _set_zoom_factor=MagicMock(),
+            get_parent=lambda: viewport,
+        )
         cm = NativeCanvasManager.__new__(NativeCanvasManager)
-        page = SimpleNamespace(flow_graph=fg, drawing_area=da)
-        cm.window = SimpleNamespace(current_page=page)
+        cm.window = SimpleNamespace(current_page=SimpleNamespace(flow_graph=fg, drawing_area=da))
         cm._get_scrolled_window = lambda *_a: sw
-        return cm, sw
+        return cm, da, sw
 
-    # Branch 1: new block carries post-relayout coords -> reframe to its corner.
-    old_block = SimpleNamespace(name="old_1", states={"coordinate": [900, 900]})
-    new_block = SimpleNamespace(name="new_1", states={"coordinate": [50, 50]})
-    fg = SimpleNamespace(blocks=[old_block, new_block], get_extents=lambda: (0, 0, 1000, 1000))
-    cm, _ = _canvas(fg)
-    cm._scroll_to_relaid_out_graph(fg, old_names={"old_1"})
-    sw = cm._get_scrolled_window()
-    adj_h, adj_v = sw.get_hadjustment(), sw.get_vadjustment()
-    # New block's post-relayout corner (50, 50) -- NOT the whole-graph top-left
-    # (0, 0), nor the old block's corner (900, 900).
-    adj_h.set_value.assert_called_once_with(50.0)
-    adj_v.set_value.assert_called_once_with(50.0)
-
-    # Branch 2: new blocks without coordinates -> whole-graph bbox top-left.
-    new_block = SimpleNamespace(name="new_1", states={})
-    fg = SimpleNamespace(blocks=[old_block, new_block], get_extents=lambda: (0, 0, 1000, 1000))
-    cm, _ = _canvas(fg)
-    cm._scroll_to_relaid_out_graph(fg, old_names={"old_1"})
-    sw = cm._get_scrolled_window()
-    sw.get_hadjustment().set_value.assert_called_once_with(0.0)
-    sw.get_vadjustment().set_value.assert_called_once_with(0.0)
-
-    # Branch 3: no new blocks -> strictly a no-op (no adjustment access).
-    block = SimpleNamespace(name="only_1", states={"coordinate": [50, 50]})
+    block = SimpleNamespace(name="b0", states={"coordinate": [0, 0]})
     fg = SimpleNamespace(blocks=[block], get_extents=lambda: (0, 0, 1000, 1000))
-    cm, _ = _canvas(fg)
-    cm._scroll_to_relaid_out_graph(fg, old_names={"only_1"})
-    sw = cm._get_scrolled_window()
-    sw.get_hadjustment.assert_not_called()
-    sw.get_vadjustment.assert_not_called()
+    cm, da, sw = _canvas(fg)
+    cm._fit_to_view(fg)
+    # fit zoom: min(1100/(1000*1.1), 660/(1000*1.1)) = min(1.0, 0.6) = 0.6
+    da._set_zoom_factor.assert_called_once_with(0.6)
+    adj_h, adj_v = sw.get_hadjustment(), sw.get_vadjustment()
+    # upper raised to content (1000*0.6 + 100 = 700) so the target is reachable
+    adj_h.set_upper.assert_called_once_with(700.0)
+    adj_v.set_upper.assert_called_once_with(700.0)
+    # graph center (500*0.6 = 300) minus half the viewport clamps to 0 on both
+    adj_h.set_value.assert_called_once_with(0.0)
+    adj_v.set_value.assert_called_once_with(0.0)
+
+    # Already at the fit zoom -> zoom untouched, still recentered.
+    cm2, da2, sw2 = _canvas(fg, da_zoom=0.6)
+    cm2._fit_to_view(fg)
+    da2._set_zoom_factor.assert_not_called()
+    sw2.get_hadjustment().set_value.assert_called_once()
+
+    # No blocks -> strict no-op.
+    empty = SimpleNamespace(blocks=[], get_extents=lambda: (0, 0, 1000, 1000))
+    cm3, da3, sw3 = _canvas(empty)
+    cm3._fit_to_view(empty)
+    da3._set_zoom_factor.assert_not_called()
+    sw3.get_hadjustment.assert_not_called()
+    sw3.get_vadjustment.assert_not_called()

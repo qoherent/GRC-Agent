@@ -654,14 +654,15 @@ async def change_graph_func(
     # Tell the live GTK canvas (if any) to redraw — the agent mutated the very
     # same in-memory FlowGraph the canvas renders (single-process, shared
     # object), so there is nothing to reload from disk; notify_edit just queues
-    # a draw, scrolls to new blocks, and refreshes the sync baseline. Its result
-    # is deliberately NOT reported to the model: NativeFlowgraphProxy.notify_edit
-    # returns {"ok": True} unconditionally and after_agent_edit logs GTK failures
-    # rather than signalling them, so a `canvas_synced` field could only ever say
-    # True — false assurance is worse than none. On a raw flowgraph deps (scenario
+    # a draw, fits the whole graph into view when this batch relaid out, and
+    # refreshes the sync baseline. Its result is deliberately NOT reported to
+    # the model: NativeFlowgraphProxy.notify_edit returns {"ok": True}
+    # unconditionally and after_agent_edit logs GTK failures rather than
+    # signalling them, so a `canvas_synced` field could only ever say True —
+    # false assurance is worse than none. On a raw flowgraph deps (scenario
     # harness) notify_edit is absent and this is skipped.
     if hasattr(ctx.deps, "notify_edit"):
-        await ctx.deps.notify_edit()
+        await ctx.deps.notify_edit(relayout=bool(res.get("relayout")))
     # The `reason` argument is consumed by the approval UI, not by the engine;
     # it is echoed into the result so the persisted transcript carries the
     # edit's intent next to its outcome.
@@ -750,6 +751,63 @@ async def save_block_func(
     return json.dumps(res)
 
 
+async def run_flowgraph_func(
+    ctx: RunContext[Any], wait: bool = True, timeout_seconds: float = 60.0
+) -> str:
+    """Run the active flowgraph using GRC's native Execute action (the same thing as the toolbar Run button).
+
+    The user watches the output live in GRC's console while the flowgraph runs;
+    this tool returns only the run status — read the full stdout/stderr with
+    get_run_log after the run completes. Running a flowgraph can transmit RF on
+    connected hardware, so it requires the user's approval before starting.
+
+    The probe-before-run strategy applies: wire native diagnostic blocks
+    (e.g. blocks_probe_rate -> blocks_message_debug) BEFORE running so the log
+    carries verifiable signal-processing evidence, not just an exit code.
+
+    Args:
+        wait: Block until the run finishes (right for command-line graphs that
+            terminate on their own). Use False for GUI flowgraphs (QT GUI
+            sinks) — they run until stopped, so start without waiting and call
+            stop_flowgraph when the user is done.
+        timeout_seconds: Max seconds to wait when wait=True; after that the
+            run keeps going and the result says still_running.
+    """
+    run_fn = getattr(ctx.deps, "run_flowgraph", None)
+    if run_fn is None or not callable(run_fn):
+        raise ModelRetry(
+            "Flowgraph execution is not available in this environment — this is a wiring "
+            "fault, not a fixable error. Do not retry; tell the user to use GRC's own "
+            "Execute button and continue without this tool."
+        )
+    try:
+        res = await run_fn(wait=wait, timeout_seconds=timeout_seconds)
+    except ValueError as exc:
+        raise ModelRetry(str(exc)) from exc
+    return json.dumps(res)
+
+
+async def stop_flowgraph_func(ctx: RunContext[Any]) -> str:
+    """Stop the active flowgraph's run using GRC's native Stop action (SIGTERM — a user-requested stop, not a failure).
+
+    Buffered output produced before the stop is still captured: read it with
+    get_run_log afterwards. No-op (reported as not_running) when nothing is
+    executing. Stopping is the safe direction, so this needs no approval.
+    """
+    stop_fn = getattr(ctx.deps, "stop_flowgraph", None)
+    if stop_fn is None or not callable(stop_fn):
+        raise ModelRetry(
+            "Flowgraph execution control is not available in this environment — this is a "
+            "wiring fault, not a fixable error. Do not retry; tell the user to use GRC's "
+            "own Stop button."
+        )
+    try:
+        res = await stop_fn()
+    except ValueError as exc:
+        raise ModelRetry(str(exc)) from exc
+    return json.dumps(res)
+
+
 def grc_tools() -> list[Tool[Any]]:
     inspect_tool = Tool(
         inspect_graph_func,
@@ -797,6 +855,25 @@ def grc_tools() -> list[Tool[Any]]:
         require_parameter_descriptions=True,
     )
 
+    # Running a flowgraph is a physical-world side effect (RF transmission,
+    # hardware claims) — same native deferred-approval mechanism as
+    # change_graph; stopping is the safe direction and needs no gate.
+    run_fg_tool = Tool(
+        run_flowgraph_func,
+        name="run_flowgraph",
+        requires_approval=True,
+        docstring_format="google",
+        require_parameter_descriptions=True,
+    )
+    run_fg_tool.max_retries = 3
+
+    stop_fg_tool = Tool(
+        stop_flowgraph_func,
+        name="stop_flowgraph",
+        docstring_format="google",
+        require_parameter_descriptions=True,
+    )
+
     save_block_tool = Tool(
         save_block_func,
         name="save_block",
@@ -811,6 +888,8 @@ def grc_tools() -> list[Tool[Any]]:
         generate_python_tool,
         change_tool,
         run_log_tool,
+        run_fg_tool,
+        stop_fg_tool,
         save_block_tool,
     ]
 

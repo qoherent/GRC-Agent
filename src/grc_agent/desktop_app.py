@@ -20,6 +20,7 @@ from grc_agent.adapter import (
     get_blocks_panel_visibility,
     get_gui_platform,
     gui_application_cls,
+    install_untitled_save_folder_provider,
     register_execution_messenger,
 )
 from grc_agent.agent_factory import (
@@ -266,6 +267,12 @@ def build_app() -> tuple[Gtk.Window, NativeCanvasManager, ChatSidebar, NativeFlo
         flow_graph_fn=lambda: canvas.current_flow_graph,
         project_dir_fn=lambda: sidebar.get_project_directory(),
     )
+
+    # Ctrl+S on a new untitled graph should propose the sidebar's configured
+    # work directory, not GRC's arbitrary default folder. One uniform rule
+    # ("untitled save dialog starts in the project directory"), enforced by
+    # seeding GRC's own Save-As dialog class — native save flow preserved.
+    install_untitled_save_folder_provider(lambda: sidebar.get_project_directory())
 
     _sync_sidebar(canvas, sidebar)
 

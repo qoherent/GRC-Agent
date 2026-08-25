@@ -13,8 +13,7 @@ Active feature requests, architectural improvements, and planned capabilities. C
   2. **Implementation**: Writing and editing block processing logic in Python or C++.
   3. **Block Descriptors**: Creating and updating companion block YAML configuration files (`.yml`).
   4. **Build & Install**: Orchestrating `cmake`, `make`, and installation workflows so GRC discovers the new block.
-* **Current State**: Confined to flowgraph layout/configuration and native hier-block library export via [`save_block`](../src/grc_agent/adapter/block_library.py). Direct compiler, shell, and `gr-modtool` orchestration is not yet supported — but the filesystem tools ([`fs_tools.py`](../src/grc_agent/fs_tools.py)) already let the agent scaffold and edit OOT source/config files (`.py`/`.yml`/CMake/C++ all pass the write-suffix allowlist) inside the flowgraph's folder; building/installing remains the user's job.
-* **Research note — shell access**: the harness ships a `Shell` capability/toolset, but it is general command access and conflicts with this app's no-shell/GUI-only security posture; if adopted it must be a narrowly-scoped build capability (`cmake`/`make` allowlist inside the project folder), not the general toolset. The existing `save_block` catalog-refresh machinery (`get_platform().build_library()` + block-tree repopulate) is the ready-made discovery hook once builds exist.
+* **Current State**: Confined to flowgraph layout/configuration and native hier-block library export via [`save_block`](../src/grc_agent/adapter/block_library.py). With the shell capability shipped (backlog item 6), the build half is now agent-reachable: `gr_modtool` scaffolding, `cmake`/`make`/`ctest` builds, and installation all run as approved shell commands inside the project folder, and `save_block`'s catalog-refresh machinery (`get_platform().build_library()` + block-tree repopulate) is the ready-made discovery hook after an install. Remaining gap: no structured orchestration of the OOT *lifecycle* (modtool newblock → edit → build → reload catalog in one taught flow) — currently left to the model composing shell + fs tools.
 
 ---
 
@@ -46,16 +45,14 @@ Active feature requests, architectural improvements, and planned capabilities. C
 ---
 
 ### 4. Autonomous Run / Debug / Screenshot Loop (multimodal context)
-* **Status**: 💡 Agreed direction
+* **Status**: 🔄 Partial — the TEXT half of the loop is shipped (`run_flowgraph`/`stop_flowgraph` + `get_run_log`, 2026-08-26); vision/multimodal input and artifact capture remain proposed.
 * **Scope**: Let the agent run flowgraphs itself, debug outputs, and take screenshots — then feed screenshots + run logs back into the model as multimodal input for richer context (pydantic-ai [`core-concepts/input`](https://pydantic.dev/docs/ai/core-concepts/input/)).
-* **Key Design Decisions**:
-  - Extends the existing `get_run_log`/`exec_monitor` machinery (return-code notification, full-log tool) rather than replacing it.
-  - Screenshots of QT GUI sinks (spectrograms, scopes, constellation plots) captured headlessly/offscreen; images returned as tool results via `BinaryContent` so the model *sees* the plot, not a text description of it.
-  - **V1 data-plane capture** (research-grounded): probe/file-sink block → `numpy.fromfile` → PIL PNG → `ToolReturn(content=[BinaryContent(..., media_type='image/png')])` — verified in installed pydantic-ai 2.31.0 that OpenAIChatModel (our Ollama `/v1` path) maps this to a base64 `image_url` user part, Codex/Anthropic map it natively, and session DB + `SqliteStepStore`'s 64 KiB media externalization round-trip it. V2 (literal X11 QT-window screenshots) is a separate spike with Wayland/PID uncertainties.
-  - **Prerequisite**: a live vision-model spike (all current default models are text-only; no uniform vision-capability probe exists) — pick/configure a vision-capable model first.
-  - **Companion**: adopt the harness `tool_output_limits` capability (`Spill`/`Truncate` with `read_tool_result` read-back) so large tool outputs — and any captured artifacts — park lossless handles out of context instead of flooding it (production-time complement to the compaction stack).
-  - **✅ Shipped**: wired in `agent_factory.py` — `Band(over=20_000)` spills oversized tool returns to `.grc_agent/tool_overflow` with `read_tool_result` read-back (see AGENTS.md Tool Surface).
-  - **Research note — large files**: the data-analyst pattern's answer to big files is *engine-side analysis*, not bigger context: park the object out-of-context and compute over it (DuckDB-style). For us that maps to a bounded, read-only `query_file` tool over big project `.csv/.json` (SQL SELECT gate, no write statements) rather than raising the 1000-line read cap — MAYBE, pending a real use case.
+* **Shipped (text loop)**: the agent triggers GRC's native Execute/Stop via approval-gated `run_flowgraph`/`stop_flowgraph` (native `Actions.FLOW_GRAPH_EXEC/KILL`, output streams to GRC's console for the user; `exec_monitor` gained a completion event + agent-initiated failure-notification suppression; `get_run_log` gained `run_in_progress`). The probe-verification strategy (probe_rate → message_debug → run → read log) is now fully in-turn.
+* **Remaining (future)**:
+  - **Vision-model probe** — `resolve_model_vision(provider, model)` in the shape of `resolve_model_context_length` (Ollama `/api/show` → `capabilities.vision`; OpenRouter `/v1/models` → `architecture.input_modalities`; cached, negative-TTL), surfaced as a Settings badge. Prerequisite for any image input: none of the default models are vision-capable.
+  - **V1 data-plane capture** (research-grounded): probe/file-sink block → `numpy.fromfile` → PIL PNG → `ToolReturn(content=[BinaryContent(..., media_type='image/png')])` — verified in installed pydantic-ai 2.31.0 that OpenAIChatModel (our Ollama `/v1` path) maps this to a base64 `image_url` user part, Codex/Anthropic map it natively, and session DB + `SqliteStepStore`'s 64 KiB media externalization round-trip it. Works headless and for text-only models (same data → numeric summary fallback when the model has no vision).
+  - **V2 literal window screenshots**: X11-only, cross-process window capture, Wayland-uncertain — a separate spike.
+  - **File-RAG tool** for large/binary project artifacts (PDF, Excel, big CSV/JSON): a SEPARATE bounded query tool in the `query_knowledge` shape (relevant extracts + citations over the fs-sandbox root), NOT a patch inside `read_file` — `read_file`'s contract is verbatim lines + hash; a RAG layer's contract is relevant extracts; merging them muddies both and couples injection-defender classification to two output shapes. Run-tool outputs need no changes: sink files land in the project dir and are discoverable from `inspect_graph` params, so consumption routes by file type (text → read_file; raw IQ/numeric → shell + numpy compute-over-data; documents → the future file-RAG tool).
 
 ---
 
@@ -74,14 +71,15 @@ Active feature requests, architectural improvements, and planned capabilities. C
 ---
 
 ### 6. Shell Tool Access & Sandboxed Execution
-* **Status**: 📥 Proposed / Research
-* **Scope**: Provide the agent with safe, structured shell execution capabilities to run build commands (e.g., `cmake`, `make`, `gr-modtool`), run standalone scripts, and inspect system environments.
-* **References**:
-  - [PydanticAI Harness Shell](https://pydantic.dev/docs/ai/harness/shell/)
-  - [PydanticAI Harness Modal Sandbox](https://pydantic.dev/docs/ai/harness/modal-sandbox/)
-* **Key Considerations & Investigation Points**:
-  - **Hardware & User Permission Investigation**: Investigate how shell execution interacts with host device permissions (e.g., SDR USB access, missing `udev` rules, `plugdev`/`usrp` group membership) to automatically detect or prevent permission errors without requiring the user to run full GUI IDEs or workflows with `sudo`.
-  - **Security & Sandboxing Boundaries**: Evaluate local directory-sandboxed allowlists vs. isolated execution (e.g. Modal sandboxes or local containers), balancing safety against the need to access host GNU Radio C++ bindings and physically connected SDR hardware.
+* **Status**: ✅ Shipped (2026-08-26) — full-shell sweet spot, NOT a build-tool allowlist
+* **Scope**: Give the executor agent general shell execution (builds, SDR CLIs, standalone scripts, data wrangling) with risk managed by CONSENT GRANULARITY instead of hand-picked command lists.
+* **Key Design Decisions** (grounded by two deepseek subagent rounds against harness 0.23.0 + GRC sources):
+  - **Denylist mode, never allowlist**: the harness's ten destructive defaults (`rm`, `mkfs`, `dd`, ...) stay denied; every engineering command (cmake/make/python3/uhd_*/SoapySDRUtil/rtl_*/project scripts/pipes) is available. Rationale: the GR engineer's command surface is not enumerable (12+ SDR vendor CLI families alone); an allowlist is a forecast of user tasks whose failure mode is a crippled agent, and AGENTS.md forbids hand-picked heuristics. `GRC_SHELL_DENIED_COMMANDS` in `.env` lets a user tighten or loosen.
+  - **Approval is the boundary**: `run_command`/`start_command` are re-registered with `requires_approval=True` → the same native `DeferredToolRequests` + `ApprovalCard` flow as `change_graph`, one uniform Manual/Auto gate (`GRC_AGENT_APPROVE_CHANGES`). Manual mode shows the FULL LITERAL COMMAND on the card. Shell cards get a session-scoped "Always allow `<first-token>`" (prefix-allow) instead of the persisted global gate-off — approve `cmake` once, the rest of the build flows. Auto mode (explicit user choice) approves everything, Claude-Code-style. `check_command`/`stop_command` need no approval (observation + cleanup of the agent's own background processes).
+  - **Blast-radius reducers that restrict nothing**: cwd resolves dynamically to the configured project dir per spawn (same providers as `fs_tools`; unset root gates with the same ModelRetry), env scrubbing DERIVED from the provider catalog (`PROVIDER_API_KEY` values + `OLLAMA_CLOUD_API_KEY` + harness `LLM_API_KEY_ENV_PATTERNS` — the harness list alone misses both Ollama keys and groq/mistral/cohere/xai), `allow_interactive=False` (sudo/ssh/vi are non-TTY-broken anyway), `default_timeout=600`, `persist_cwd=False`.
+  - **Flowgraphs stay on `change_graph`**: the structured tool is strictly better than `sed` on XML (transactional, rollback, relayout, structured approval diff); shell-side `.grc` edits are already handled as external-editor edits by the sync machinery (detected, not clobbered). Steered by prompt, never by regex-over-command gating (trivially bypassable, heuristic-pattern-forbidden).
+  - **Known upstream limitations (documented in known-issues.md)**: no_gui graphs may run in an external terminal on GNOME (empty console log; `>>> Done (0)` while the graph still runs); ExecFlowGraphThread spawn failures are success-shaped; the first-token denylist is accident-grade, not a security boundary — the human reading the literal command is.
+* **Hardware & User Permission Investigation** (original item, now agent-assisted): with shell access the agent can itself run `uhd_find_devices`/`SoapySDRUtil --probe`/`lsusb` to distinguish "no device" from "permission denied" before advising the documented no-sudo `usermod -aG plugdev,dialout,usrp` + `udevadm` fix — instead of guessing from a run log. Host device permissions are NOT sandboxed away: commands run as the user, so SDR USB access works exactly as it does for GRC itself.
 
 ---
 

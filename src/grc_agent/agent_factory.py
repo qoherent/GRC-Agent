@@ -53,6 +53,7 @@ from grc_agent.db import archive_transcript, get_db_path, get_step_store, init_d
 from grc_agent.fs_tools import GrcFileSystem
 from grc_agent.prompts import build_planner_prompt, build_system_prompt
 from grc_agent.settings import default_settings, get_env_value, load_settings
+from grc_agent.shell_tools import GrcShell
 
 # genai-prices registry errors documented in the harness compaction docs:
 # an OVER-recorded window means compaction never fires before the provider
@@ -832,6 +833,7 @@ def build_agents_from_cfg(cfg: dict) -> AgentBundle:
             web_search_cap,
             web_fetch_cap,
             GrcFileSystem(),
+            GrcShell(),
             prompt_injection_cap,
             _build_tool_output_limits(),
         ],

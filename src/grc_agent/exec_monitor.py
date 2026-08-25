@@ -12,6 +12,7 @@ The last completed run's log (success OR failure) is retained in
 can read it on demand — the agent is no longer blind to runtime output.
 """
 
+import asyncio
 import logging
 import re
 from collections import deque
@@ -55,6 +56,22 @@ class ExecutionErrorMonitor:
         self._evicted = False
         self._last_run_evicted = False
         self._tracking = False
+        # Completion signaling for run_flowgraph: cleared on the start marker,
+        # set on every terminal marker (Done / Generate Error). Safe to set
+        # from handle_message because every Messages.send_* caller in GRC's
+        # exec path runs on the GLib main-loop thread (Executor.py marshals
+        # via GLib.idle_add; send_start_exec fires synchronously inside the
+        # ExecFlowGraphThread constructor on the caller's thread), which under
+        # the unified asyncio+GLib loop IS the loop thread. Verified
+        # empirically under xvfb on the gbulb path.
+        self._run_end = asyncio.Event()
+        # True only between mark_run_agent_initiated() and the run's terminal
+        # marker, while that specific run was started by the agent's
+        # run_flowgraph tool (not the user's Execute button). Consumed (set
+        # back to False) at the terminal marker after use: the tool already
+        # reports failures to the model in-turn, so the follow-up
+        # notify_run_failure turn would be redundant.
+        self._agent_initiated = False
         # Set to True when a ":error:" runtime error is seen in the output
         # during tracking — even if the process exits cleanly (code 0).
         # GNU Radio's scheduler handles buffer/rate errors gracefully, so
@@ -93,7 +110,17 @@ class ExecutionErrorMonitor:
             "return_code": self._last_run_code,
             "log_text": self._last_run_log,
             "ran_successfully": self._last_run_code == 0 and not self._last_run_had_runtime_error,
+            # Always present, never a silent transformation: while a run is
+            # in flight this log belongs to the PREVIOUS run — the model must
+            # be able to tell the two states apart.
+            "run_in_progress": self._tracking,
         }
+        if self._tracking:
+            res["in_progress_note"] = (
+                "A flowgraph execution is currently running; this log is from the previous "
+                "completed run. Wait for the current run to finish (run_flowgraph reports "
+                "completion) before reading it as the current run's output."
+            )
         if self._last_run_evicted:
             res["log_truncated"] = True
             res["truncation_note"] = (
@@ -108,6 +135,45 @@ class ExecutionErrorMonitor:
             )
         return res
 
+    def mark_run_agent_initiated(self) -> None:
+        """Flag the NEXT terminal marker as belonging to an agent-initiated run.
+
+        Called by NativeFlowgraphProxy.run_flowgraph immediately BEFORE
+        triggering GRC's Execute action (the start marker fires synchronously
+        inside the action, so a post-action call would race it). Consumed at
+        the terminal marker: while set, _fail() suppresses the user-facing
+        notify_run_failure follow-up turn — the run_flowgraph tool result
+        already tells the model about the failure in the same turn.
+        """
+        self._agent_initiated = True
+
+    async def wait_for_run_end(self, timeout: float) -> str:
+        """Await the current run's terminal marker.
+
+        Returns "completed" when the run ended within `timeout` (or had
+        already ended before the call — GRC's spawn-failure path emits its
+        Done marker synchronously), "still_running" on timeout, and
+        "not_started" when no run has ever been observed (the Execute action
+        was a silent no-op — see the proxy's pre-gates).
+        """
+        if self._tracking:
+            try:
+                await asyncio.wait_for(self._run_end.wait(), timeout)
+                return "completed"
+            except TimeoutError:
+                return "still_running"
+        if self._last_run_log is not None:
+            # Not tracking, but a completed run exists: the run this caller
+            # just started already hit its terminal marker synchronously
+            # (ultra-fast exit or GRC's spawn-failure path).
+            return "completed"
+        return "not_started"
+
+    @property
+    def last_run_code(self) -> int | None:
+        """Return code of the last completed run, or None before any run."""
+        return self._last_run_code
+
     def handle_message(self, text: str) -> None:
         if _START_MARKER in text:
             if self._tracking:
@@ -116,6 +182,7 @@ class ExecutionErrorMonitor:
             self._tracking = True
             self._graph_modified_since_last_run = False
             self._reset()
+            self._run_end.clear()
             _log.info("exec_monitor: started tracking run: %r", text[:120])
 
         self._append(text)
@@ -146,6 +213,8 @@ class ExecutionErrorMonitor:
                 self._fail(code)
             else:
                 self._reset()
+            self._agent_initiated = False
+            self._run_end.set()
             return
 
         if _GENERATE_ERROR_MARKER in text:
@@ -156,6 +225,8 @@ class ExecutionErrorMonitor:
             self._last_run_code = 1
             self._last_run_evicted = self._evicted
             self._fail(1)
+            self._agent_initiated = False
+            self._run_end.set()
 
     def _append(self, text: str) -> None:
         self._chunks.append(text)
@@ -174,6 +245,16 @@ class ExecutionErrorMonitor:
 
     def _fail(self, code: int) -> None:
         log_text = self._last_run_log or ""
+        if self._agent_initiated:
+            # The run_flowgraph tool reports this failure to the model
+            # in-turn; the follow-up notify_run_failure turn would only be
+            # redundant (and cost another model request).
+            _log.info(
+                "exec_monitor: suppressing failure callback (agent-initiated run, code=%d)",
+                code,
+            )
+            self._reset()
+            return
         _log.info(
             "exec_monitor: reporting failure (code=%d, %d chars), invoking callback",
             code,

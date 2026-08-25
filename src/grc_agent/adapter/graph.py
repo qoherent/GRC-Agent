@@ -60,6 +60,26 @@ def get_gui_platform() -> Any:
     return platform
 
 
+def gui_actions() -> Any:
+    """Lazy accessor for GRC's gui Actions namespace (in-process).
+
+    Same self-contained gi setup as get_gui_platform. Platform is imported
+    first — the app's canonical import order — because importing Actions
+    directly into a fresh interpreter hits an upstream circular import
+    (Actions → Dialogs/Utils → Bars → partially-initialized Actions; verified
+    live: `from gnuradio.grc.gui import Actions` alone raises
+    `AttributeError: ... no attribute 'FLOW_GRAPH_NEW'` from Bars.py, while
+    Platform-first succeeds)."""
+    import gi
+
+    gi.require_version("Gtk", "3.0")
+    gi.require_version("PangoCairo", "1.0")
+    import gnuradio.grc.gui.Platform  # noqa: F401  (import-order anchor)
+    from gnuradio.grc.gui import Actions
+
+    return Actions
+
+
 def gui_application_cls() -> Any:
     """Lazy accessor for the GRC GUI Application class (in-process).
     Same self-contained gi setup as get_gui_platform."""
@@ -95,6 +115,61 @@ def get_blocks_panel_visibility() -> bool:
     from gnuradio.grc.gui import Actions
 
     return bool(Actions.TOGGLE_BLOCKS_WINDOW.get_active())
+
+
+_UNTITLED_SAVE_FOLDER_FN: Callable[[], str | Path | None] | None = None
+_UNTITLED_SAVE_INSTALLED = False
+
+
+def install_untitled_save_folder_provider(folder_fn: Callable[[], str | Path | None] | None) -> None:
+    """Point the flowgraph Save-As dialog at the configured project directory
+    when saving a NEW untitled graph, so Ctrl+S proposes the sidebar's work
+    directory instead of GRC's arbitrary default folder.
+
+    GRC's own SAVE/SAVE_AS handler (gnuradio.grc.gui.Application) resolves
+    ``FileDialogs.SaveFlowGraph`` as a module attribute at call time, so we
+    swap that class for a thin subclass that seeds the dialog's default folder
+    — and only that. Everything else (the dialog itself, the save, id rename,
+    recent-files bookkeeping, ``page.file_path``/``page.saved``) stays GRC's
+    native handler running end-to-end: one uniform rule ("the untitled save
+    dialog starts in the project directory"), no duplicated save logic, no key
+    interception, no new ``.run()`` in our code. A named path
+    (``current_file_path`` non-empty) keeps GRC's own "start in the file's
+    folder" behavior.
+
+    Idempotent: the class swap happens at most once per process; later calls
+    only update the folder provider. The seed is applied only when the provider
+    returns a real existing directory.
+    """
+    global _UNTITLED_SAVE_FOLDER_FN, _UNTITLED_SAVE_INSTALLED
+    import gi
+
+    gi.require_version("Gtk", "3.0")
+    gi.require_version("PangoCairo", "1.0")
+    from gnuradio.grc.gui import FileDialogs
+
+    _UNTITLED_SAVE_FOLDER_FN = folder_fn
+    if _UNTITLED_SAVE_INSTALLED:
+        return
+
+    class _ProjectSeededFolderDialog(FileDialogs.SaveFlowGraph):
+        def __init__(self, parent: Any, current_file_path: str = "") -> None:
+            super().__init__(parent, current_file_path)
+            if current_file_path:
+                return
+            fn = _UNTITLED_SAVE_FOLDER_FN
+            if fn is None:
+                return
+            raw = fn()
+            try:
+                proj = Path(raw).resolve() if raw else None
+            except (TypeError, OSError):
+                proj = None
+            if proj is not None and proj.is_dir():
+                self.set_current_folder(str(proj))
+
+    FileDialogs.SaveFlowGraph = _ProjectSeededFolderDialog
+    _UNTITLED_SAVE_INSTALLED = True
 
 
 def register_execution_messenger(callback: Callable[[str], None]) -> None:
@@ -812,11 +887,19 @@ def change_graph(  # noqa: C901
     remove_connections: list[str] | None = None,
     force: bool = False,
 ) -> dict[str, Any]:
-    from grc_agent.adapter.layout import _compute_ranks, compute_full_layout
+    from grc_agent.adapter.layout import _compute_layout_model, compute_full_layout
     from grc_agent.adapter.snapshots import _prune_old_backups, push_undo_snapshot
 
     add_blocks = _sanitize_data(add_blocks)
     update_params = _sanitize_data(update_params)
+
+    # Whether this batch will relayout the whole graph (the layout hook's
+    # gate, computed here from the same sanitized values so the success
+    # payload can tell the caller a rearrangement happened — the canvas uses
+    # it to fit the graph into view).
+    relayout = bool(
+        add_blocks or remove_blocks or add_connections or remove_connections
+    )
 
     if not any(
         [
@@ -933,13 +1016,13 @@ def change_graph(  # noqa: C901
             # Must never need agent or user input: the agent's own context
             # has block coordinates filtered out entirely, so positioning
             # has to be fully self-contained.
-            ranks = _compute_ranks(flow_graph, new_block_names, add_connections)
+            model = _compute_layout_model(flow_graph, new_block_names, add_connections)
 
             # Sort add_blocks topologically by rank so upstream blocks (sources)
             # are placed first, providing solid layout anchors for downstream blocks.
             add_blocks_sorted = sorted(
                 add_blocks,
-                key=lambda item: ranks.get(item["instance_name"], 0),
+                key=lambda item: model.ranks.get(item["instance_name"], 0),
             )
 
             for item in add_blocks_sorted:
@@ -1004,9 +1087,9 @@ def change_graph(  # noqa: C901
             # edit.
         if add_blocks or remove_blocks or add_connections or remove_connections:
             if not add_blocks:
-                ranks = _compute_ranks(flow_graph, set(), add_connections)
+                model = _compute_layout_model(flow_graph, set(), add_connections)
             full_positions = compute_full_layout(
-                flow_graph, new_block_names, add_connections, ranks=ranks
+                flow_graph, new_block_names, add_connections, model=model
             )
             for b in flow_graph.blocks:
                 pos = full_positions.get(b.name)
@@ -1266,7 +1349,7 @@ def change_graph(  # noqa: C901
     try:
         grc_file_path = getattr(flow_graph, "grc_file_path", "")
         if not grc_file_path or Path(grc_file_path).is_dir():
-            return {"ok": True}
+            return {"ok": True, "relayout": relayout}
         original = Path(grc_file_path)
         # resolve() follows symlinks, so the symlink check must run on the
         # unresolved path — checking it after resolve() is always False and
@@ -1318,7 +1401,7 @@ def change_graph(  # noqa: C901
             "errors": save_errors,
         }
 
-    return {"ok": True}
+    return {"ok": True, "relayout": relayout}
 
 
 def _check_codegen_preconditions(flow_graph: Any) -> None:

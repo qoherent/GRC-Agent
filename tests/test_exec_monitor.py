@@ -389,3 +389,122 @@ def test_log_truncation_flag_absent_for_a_small_run():
     assert "log_truncated" not in data
     assert "truncation_note" not in data
     assert data["ran_successfully"] is True
+
+
+# --- Completion signaling + agent-initiated suppression (run_flowgraph) ---
+
+
+def test_success_done_has_no_return_code_text():
+    """GRC's Messages.send_end_exec omits the '(return code N)' suffix for
+    code 0 — the retained log must still record return_code 0 without the
+    marker text having contained it (locks the Messages.py conditional)."""
+    monitor = ExecutionErrorMonitor(on_error=_noop)
+    _feed_run(monitor, "/tmp/flow.py", "hello\n", code=0)
+    res = monitor.get_last_run_log()
+    assert res is not None
+    assert res["return_code"] == 0
+    assert "(return code" not in res["log_text"].split(">>> Done")[-1]
+
+
+def test_wait_for_run_end_completed():
+    import asyncio
+
+    async def main():
+        monitor = ExecutionErrorMonitor(on_error=_noop)
+        monitor.handle_message("\nExecuting: /tmp/flow.py\n")
+        task = asyncio.ensure_future(monitor.wait_for_run_end(5.0))
+        await asyncio.sleep(0)  # let the waiter park on the event
+        assert not task.done()
+        monitor.handle_message("\n>>> Done (return code 0)\n")
+        return await task
+
+    assert asyncio.run(main()) == "completed"
+
+
+def test_wait_for_run_end_still_running_on_timeout():
+    import asyncio
+
+    async def main():
+        monitor = ExecutionErrorMonitor(on_error=_noop)
+        monitor.handle_message("\nExecuting: /tmp/flow.py\n")
+        return await monitor.wait_for_run_end(0.05)
+
+    assert asyncio.run(main()) == "still_running"
+
+
+def test_wait_for_run_end_not_started_when_never_ran():
+    import asyncio
+
+    async def main():
+        monitor = ExecutionErrorMonitor(on_error=_noop)
+        return await monitor.wait_for_run_end(0.05)
+
+    assert asyncio.run(main()) == "not_started"
+
+
+def test_wait_for_run_end_completes_after_synchronous_done():
+    """GRC's spawn-failure path emits its Done marker synchronously inside the
+    Execute action — before run_flowgraph ever awaits. A run that already
+    ended must report completed, not not_started."""
+    import asyncio
+
+    async def main():
+        monitor = ExecutionErrorMonitor(on_error=_noop)
+        monitor.handle_message("\nExecuting: /tmp/flow.py\n")
+        monitor.handle_message("\n>>> Done\n")  # synchronous completion
+        return await monitor.wait_for_run_end(5.0)
+
+    assert asyncio.run(main()) == "completed"
+
+
+def test_generate_error_completes_wait_and_records_code_1():
+    import asyncio
+
+    async def main():
+        calls = []
+        monitor = ExecutionErrorMonitor(on_error=lambda code, _log: calls.append(code))
+        monitor.handle_message("Generate Error: bad graph\n>>> Failure\n")
+        return await monitor.wait_for_run_end(5.0), monitor.last_run_code, list(calls)
+
+    outcome, code, calls = asyncio.run(main())
+    assert outcome == "completed"
+    assert code == 1
+    assert calls == [1]
+
+
+def test_agent_initiated_failure_suppresses_callback():
+    """The run_flowgraph tool reports failures in-turn; the follow-up
+    notify_run_failure turn must not also fire for agent-started runs."""
+    calls = []
+    monitor = ExecutionErrorMonitor(on_error=lambda code, _log: calls.append(code))
+
+    monitor.mark_run_agent_initiated()
+    _feed_run(monitor, "/tmp/flow.py", "RuntimeError: boom\n", code=1)
+    assert calls == []  # suppressed
+
+    # A subsequent user-initiated failed run still notifies.
+    _feed_run(monitor, "/tmp/flow.py", "RuntimeError: boom\n", code=1)
+    assert calls == [1]
+
+
+def test_agent_initiated_success_run_leaves_flag_consumed():
+    calls = []
+    monitor = ExecutionErrorMonitor(on_error=lambda code, _log: calls.append(code))
+    monitor.mark_run_agent_initiated()
+    _feed_run(monitor, "/tmp/flow.py", "ok\n", code=0)
+    # Flag consumed at the terminal marker: the next (user) failure notifies.
+    _feed_run(monitor, "/tmp/flow.py", "RuntimeError: boom\n", code=1)
+    assert calls == [1]
+
+
+def test_get_last_run_log_reports_run_in_progress():
+    monitor = ExecutionErrorMonitor(on_error=_noop)
+    _feed_run(monitor, "/tmp/flow.py", "previous\n", code=0)
+    res = monitor.get_last_run_log()
+    assert res["run_in_progress"] is False
+
+    monitor.handle_message("\nExecuting: /tmp/flow.py\n")
+    res = monitor.get_last_run_log()
+    assert res["run_in_progress"] is True
+    assert "previous completed run" in res["in_progress_note"]
+    assert "previous" in res["log_text"]  # still the previous run's log

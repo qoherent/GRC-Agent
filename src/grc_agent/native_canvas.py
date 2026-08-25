@@ -14,6 +14,15 @@ from gi.repository import Gdk, GLib, Gtk
 
 _log = logging.getLogger(__name__)
 
+# Fit-to-view constants for _fit_to_view. Zoom bounds match GRC's own
+# DrawingArea.zoom_in/zoom_out clamps (0.1..5.0) so a fit never sets a zoom
+# level the native zoom actions can't reach back to.
+_FIT_ZOOM_MIN = 0.1
+_FIT_ZOOM_MAX = 5.0
+# Multiplicative padding around the graph's bounding box when computing the
+# fit zoom, so blocks aren't glued to the viewport edges.
+_FIT_PAD = 1.1
+
 # GRC's own undo/redo state_cache (see NativeCanvasManager._state_cache_version)
 # is a necessary-but-not-sufficient signal: (a) block-library drag-and-drop
 # add, double-click add, and Variable Editor add/remove mutate the flowgraph
@@ -88,9 +97,154 @@ class NativeFlowgraphProxy:
             return None
         return monitor.get_last_run_log()
 
-    async def notify_edit(self) -> dict:
+    async def run_flowgraph(self, wait: bool = True, timeout_seconds: float = 60.0) -> dict:
+        """Run the active flowgraph through GRC's native Execute action.
+
+        Mirrors the toolbar Run button exactly: GRC generates from the live
+        in-memory graph, spawns the process, and streams its output to the
+        GRC console (where the user watches it live). This method returns
+        status only — the model reads the full output via get_run_log.
+
+        Pre-gates mirror GRC's own handler conditions because a disabled
+        Gio action is a SILENT no-op, and an unsaved/untitled page would
+        route GRC into a modal Save-As dialog that blocks the unified loop.
+        """
+        monitor = object.__getattribute__(self, "_exec_monitor")
+        if monitor is None:
+            raise ValueError(
+                "The run monitor is not wired, so flowgraphs cannot be run from here. "
+                "This is an environment fault — do not retry; tell the user to use "
+                "GRC's own Execute button."
+            )
         cm = object.__getattribute__(self, "_canvas_manager")
-        cm.after_agent_edit()
+        page = cm.current_page
+        if page is None:
+            raise ValueError(
+                "No flowgraph is open. Open or create a flowgraph in GRC before running it."
+            )
+        if getattr(page, "process", None) is not None:
+            raise ValueError(
+                "A flowgraph execution is already in progress. Stop it with stop_flowgraph "
+                "first, or wait for it to finish."
+            )
+        if not getattr(page, "file_path", None):
+            raise ValueError(
+                "The flowgraph has never been saved. Save it in GRC first (File > Save) — "
+                "execution generates from the saved file."
+            )
+        fg = page.flow_graph
+        # is_valid()/iter_error_messages() only read _error_messages, which is
+        # populated by an explicit validate() call (same convention as the
+        # turn-end output validator) — without it the check passes vacuously.
+        fg.validate()
+        if not fg.is_valid():
+            errors = "; ".join(list(fg.iter_error_messages())[:5])
+            raise ValueError(
+                f"The flowgraph is invalid, so GRC will refuse to execute it: {errors}. "
+                "Fix the graph with change_graph first."
+            )
+
+        from grc_agent.adapter import gui_actions
+
+        actions = gui_actions()
+        # Gio actions are silent no-ops when disabled, and GRC's enablement
+        # (update_exec_stop) only refreshes on GRC's own actions — agent-side
+        # edits can leave EXEC stale-disabled. The gates above re-establish
+        # exactly the enabled condition, so enabling here is truthful.
+        actions.FLOW_GRAPH_EXEC.set_enabled(True)
+        # Must be set BEFORE the action: the 'Executing:' start marker fires
+        # synchronously inside it, and the monitor consumes the flag at the
+        # run's terminal marker (suppressing the redundant follow-up failure
+        # turn — the tool result already reports the failure in-turn).
+        monitor.mark_run_agent_initiated()
+        actions.FLOW_GRAPH_EXEC()
+
+        if not wait:
+            return {
+                "status": "started",
+                "note": (
+                    "The flowgraph is running; output streams to GRC's console where the "
+                    "user can watch it. GUI flowgraphs run until stopped — call "
+                    "stop_flowgraph when it should end. Read output with get_run_log "
+                    "(its run_in_progress field tells you when the run has finished)."
+                ),
+            }
+
+        outcome = await monitor.wait_for_run_end(timeout_seconds)
+        if outcome == "completed":
+            code = monitor.last_run_code
+            return {
+                "status": "completed",
+                "return_code": code,
+                "ran_successfully": code == 0,
+                "note": (
+                    "Read the full console output with the get_run_log tool. An empty log "
+                    "with an immediate completion can mean the graph ran in an external "
+                    "terminal (no_gui graphs) or failed to spawn — check the log and ask "
+                    "the user if in doubt."
+                ),
+            }
+        if outcome == "still_running":
+            return {
+                "status": "still_running",
+                "note": (
+                    f"The run did not finish within {timeout_seconds}s. GUI flowgraphs run "
+                    "until stopped — call stop_flowgraph when done, then read get_run_log."
+                ),
+            }
+        return {
+            "status": "not_started",
+            "note": (
+                "GRC did not start an execution (no 'Executing:' marker observed). This "
+                "should not happen after the pre-checks — ask the user to check GRC's "
+                "console and try the toolbar Run button."
+            ),
+        }
+
+    async def stop_flowgraph(self) -> dict:
+        """Stop the active flowgraph's run through GRC's native Stop action
+        (SIGTERM to the process group — the same thing the toolbar Stop
+        button does)."""
+        cm = object.__getattribute__(self, "_canvas_manager")
+        page = cm.current_page
+        if page is None:
+            raise ValueError("No flowgraph is open, so nothing is running.")
+        if getattr(page, "process", None) is None:
+            return {
+                "status": "not_running",
+                "note": "No flowgraph execution is in progress.",
+            }
+
+        from grc_agent.adapter import gui_actions
+
+        actions = gui_actions()
+        # Truthful enable: page.process is set, exactly GRC's own condition.
+        actions.FLOW_GRAPH_KILL.set_enabled(True)
+        actions.FLOW_GRAPH_KILL()
+
+        monitor = object.__getattribute__(self, "_exec_monitor")
+        if monitor is None:
+            return {"status": "stop_requested"}
+        outcome = await monitor.wait_for_run_end(10.0)
+        if outcome == "completed":
+            return {
+                "status": "stopped",
+                "note": (
+                    "The run was stopped (SIGTERM — a user-requested stop, not a failure). "
+                    "Buffered output is still captured: read it with get_run_log."
+                ),
+            }
+        return {
+            "status": "stop_requested",
+            "note": (
+                "SIGTERM sent; the process is still shutting down. Check get_run_log "
+                "shortly (its run_in_progress field) to confirm it ended."
+            ),
+        }
+
+    async def notify_edit(self, relayout: bool = False) -> dict:
+        cm = object.__getattribute__(self, "_canvas_manager")
+        cm.after_agent_edit(relayout=relayout)
         monitor = object.__getattribute__(self, "_exec_monitor")
         if monitor is not None and hasattr(monitor, "notify_graph_modified"):
             monitor.notify_graph_modified()
@@ -132,7 +286,6 @@ class NativeCanvasManager:
         self.app: Any = None
         self.last_disk_hash: str | None = None
         self.last_synced_export_hash: str | None = None
-        self._last_block_names: set[str] = set()
         # Cheap gate for the 1.5s safety-net poll: GRC's own undo/redo ring
         # buffer (page.state_cache) moves on most interactive edit paths that
         # don't fire a trackable GTK signal (properties-dialog OK/Apply,
@@ -141,6 +294,13 @@ class NativeCanvasManager:
         # the current page has no state_cache. Not fully sufficient on its
         # own — see _POLL_FULL_CHECK_EVERY above — hence _poll_tick_count.
         self._last_state_cache_version: tuple[int, int, int] | None = None
+        # The page.file_path that the current baselines (last_disk_hash,
+        # last_synced_export_hash) were derived for. Saving an untitled graph
+        # in place — or Save-As-ing to a new path — changes page.file_path
+        # without firing switch-page, so the poll must notice the change and
+        # re-baseline, or sync_manual_edit's `last_disk_hash is None` early
+        # return (native_canvas.py) would silently stop auto-persisting edits.
+        self._baseline_path: str | None = None
         self._poll_tick_count = 0
         self._blocks_visible = get_blocks_panel_visibility()
         # Block name the chat sidebar wants outlined on canvas (set/cleared by
@@ -198,7 +358,7 @@ class NativeCanvasManager:
             parent = parent.get_parent()
         return parent
 
-    def after_agent_edit(self) -> None:
+    def after_agent_edit(self, relayout: bool = False) -> None:
         if not (self.drawing_area and hasattr(self.drawing_area, "_flow_graph")):
             return
         fg = self.drawing_area._flow_graph
@@ -215,14 +375,11 @@ class NativeCanvasManager:
         except Exception:
             _log.warning("flowgraph update() raised during after_agent_edit", exc_info=True)
 
-        old_names = self._last_block_names
         self.drawing_area._update_after_zoom = True
         self.drawing_area.queue_draw()
-        self._scroll_to_relaid_out_graph(fg, old_names)
+        if relayout:
+            self._fit_to_view(fg)
         self.last_synced_export_hash = flow_graph_content_hash(fg)
-        if self.path:
-            self.last_disk_hash = _sha256_file(self.path)
-        self._last_block_names = {b.name for b in fg.blocks}
 
         # Push to GRC's native undo cache and mark page as modified
         page = self.current_page
@@ -251,7 +408,6 @@ class NativeCanvasManager:
             # Unsaved/untitled graph: nothing to persist to disk, but re-arm the
             # poll baseline so the 1.5s safety-net doesn't keep firing forever.
             self.last_synced_export_hash = flow_graph_content_hash(fg)
-            self._last_block_names = {b.name for b in fg.blocks}
             return
         try:
             lock = self._lock_path
@@ -290,7 +446,6 @@ class NativeCanvasManager:
                     self.last_disk_hash = _sha256_file(self.path)
                     self.last_synced_export_hash = flow_graph_content_hash(fg)
                     push_undo_snapshot(fg, Path(self.path))
-                    self._last_block_names = {b.name for b in fg.blocks}
                 finally:
                     fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
         except Exception as e:
@@ -420,48 +575,67 @@ class NativeCanvasManager:
             _log.warning("Failed to draw block highlight overlay: %s", e)
         return False
 
-    def _scroll_to_relaid_out_graph(self, flow_graph: Any, old_names: set[str]) -> None:
-        """change_graph's add_blocks phase relays out the WHOLE graph, not
-        just the new blocks (see adapter/layout.py's compute_full_layout) —
-        so the scroll target is the new blocks' POST-relayout positions (the
-        actual "what changed" location), not a pre-relayout snapshot. Falls
-        back to the whole graph's bounding box only if the new blocks
-        somehow carry no coordinates. Same trigger gate as before (some
-        block name wasn't present before this edit) — that's exactly
-        "did Phase 3 run", which is exactly "did a relayout happen"."""
+    def _fit_to_view(self, flow_graph: Any) -> None:
+        """Zoom and scroll so every block fits in the visible viewport.
+        Called from after_agent_edit only when the batch actually relaid out
+        (change_graph reports relayout=True) — the relayout repositions every
+        block, so the only view that always shows "what changed" is the whole
+        graph. Param-only edits and manual/GUI edits never trigger it, so a
+        user's own zoom level is never touched except right after an
+        auto-arrange.
+
+        Computes the fit zoom from the graph's get_extents() bounding box and
+        the viewport's allocation (the DrawingArea's parent Viewport), clamps
+        it to GRC's native 0.1..5.0 zoom range, sets it via GRC's own
+        _set_zoom_factor (which queues the label/shape/size refresh), then
+        scrolls so the graph's center lands in the middle of the viewport —
+        with the adjustment upper raised to cover the new content size first,
+        so the target is reachable before the ScrolledWindow's own recalcu-
+        lation catches up."""
+        da = self.drawing_area
+        if da is None or not flow_graph.blocks:
+            return
+        scrolled_window = self._get_scrolled_window()
+        if scrolled_window is None:
+            return
         try:
-            new_names = {b.name for b in flow_graph.blocks} - old_names
-            if not new_names:
-                return
-            scrolled_window = self._get_scrolled_window()
-            if scrolled_window is None:
-                return
-            zoom = self.drawing_area.zoom_factor
             x_min, y_min, x_max, y_max = flow_graph.get_extents()
-            new_coords = [
-                tuple(b.states["coordinate"])
-                for b in flow_graph.blocks
-                if b.name in new_names and isinstance(b.states.get("coordinate"), (list, tuple))
-            ]
-            if new_coords:
-                min_x = min(c[0] for c in new_coords) * zoom
-                min_y = min(c[1] for c in new_coords) * zoom
-            else:
-                min_x = x_min * zoom
-                min_y = y_min * zoom
-            for adjustment, content_extent, target in (
-                (scrolled_window.get_hadjustment(), x_max * zoom + 100, min_x),
-                (scrolled_window.get_vadjustment(), y_max * zoom + 100, min_y),
+            w = max(x_max - x_min, 1.0)
+            h = max(y_max - y_min, 1.0)
+            viewport = da.get_parent()
+            alloc = (
+                viewport.get_allocation()
+                if viewport is not None
+                else scrolled_window.get_allocation()
+            )
+            vw = max(alloc.width, 1)
+            vh = max(alloc.height, 1)
+            zoom = min(vw / (w * _FIT_PAD), vh / (h * _FIT_PAD))
+            zoom = max(_FIT_ZOOM_MIN, min(zoom, _FIT_ZOOM_MAX))
+            if zoom != da.zoom_factor:
+                da._set_zoom_factor(zoom)
+            # Content size mirrors GRC's own DrawingArea._update_size()
+            # (extents corner * zoom + 100) so the manually-raised adjustment
+            # upper always covers what the canvas will actually request.
+            content_w = x_max * zoom + 100
+            content_h = y_max * zoom + 100
+            center_x = ((x_min + x_max) / 2.0) * zoom
+            center_y = ((y_min + y_max) / 2.0) * zoom
+            for adjustment, content, center, viewport_size in (
+                (scrolled_window.get_hadjustment(), content_w, center_x, vw),
+                (scrolled_window.get_vadjustment(), content_h, center_y, vh),
             ):
                 if adjustment is None:
                     continue
-                adjustment.set_upper(max(adjustment.get_upper(), content_extent))
+                adjustment.set_upper(max(adjustment.get_upper(), content))
+                target = center - viewport_size / 2.0
                 upper_bound = max(
-                    adjustment.get_lower(), adjustment.get_upper() - adjustment.get_page_size()
+                    adjustment.get_lower(),
+                    adjustment.get_upper() - adjustment.get_page_size(),
                 )
                 adjustment.set_value(max(adjustment.get_lower(), min(target, upper_bound)))
         except Exception as e:
-            _log.warning("Failed to reframe relaid-out graph: %s", e)
+            _log.warning("Failed to fit graph into view: %s", e)
 
     def setup_signal_handlers(self) -> None:
         notebook = self.window.notebook
@@ -520,7 +694,7 @@ class NativeCanvasManager:
                     fg.grc_file_path = page.file_path
                 self.last_synced_export_hash = flow_graph_content_hash(fg)
                 self.last_disk_hash = _sha256_file(self.path) if self.path else None
-                self._last_block_names = {b.name for b in fg.blocks}
+                self._baseline_path = self.path
                 self._last_state_cache_version = self._state_cache_version(page)
         except Exception as e:
             # Guard the only signal handlers touching disk hashing: if this
@@ -601,6 +775,14 @@ class NativeCanvasManager:
             try:
                 self._poll_tick_count += 1
                 page = self.current_page
+                # A path change with no tab switch (untitled->saved in place,
+                # or Save-As to a new file) must re-baseline the hashes —
+                # otherwise last_disk_hash stays None and sync_manual_edit
+                # would early-return on every later edit, silently killing
+                # auto-sync for that tab. One uniform rule: baselines follow
+                # the page's path. Cheap string compare per tick.
+                if page is not None and page.file_path != self._baseline_path:
+                    self._sync_page_baselines()
                 version = self._state_cache_version(page)
                 state_cache_unchanged = (
                     version is not None and version == self._last_state_cache_version

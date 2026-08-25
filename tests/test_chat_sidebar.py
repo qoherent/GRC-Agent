@@ -3117,3 +3117,161 @@ def test_markdown_nested_list_ordered_markers_and_loose_lists():
     assert "• Item 1, paragraph A\nItem 1, paragraph B\n• Item 2\n" in content
     # Verify clean list -> paragraph transition without double blank line
     assert "• Item 2\nFollow-up standalone paragraph.\n" in content
+
+
+def test_format_tool_summary_dispatch():
+    """The approval card's per-tool summary renderer: change_graph keeps its
+    dedicated formatter; run/shell tools get literal renderings; unknown
+    tools fall back to one uniform bullet per argument."""
+    from grc_agent.ui.approval_card import format_tool_summary
+
+    # change_graph unchanged
+    assert "**Add blocks:**" in format_tool_summary(
+        "change_graph", {"add_blocks": [{"name": "lpf_0", "block_id": "x"}]}
+    )
+    # shell: the literal command in a fence (the command IS the reason)
+    assert "cmake --build build" in format_tool_summary("run_command", {"command": "cmake --build build"})
+    assert "background" in format_tool_summary("start_command", {"command": "uhd_usrp_probe"})
+    # run_flowgraph: intent lines
+    text = format_tool_summary("run_flowgraph", {"wait": True, "timeout_seconds": 30})
+    assert "native Execute" in text and "30" in text
+    text = format_tool_summary("run_flowgraph", {"wait": False})
+    assert "until stopped" in text
+    # uniform fallback for any other approval-gated tool
+    assert "`key`: `value`" in format_tool_summary("some_future_tool", {"key": "value"})
+    assert format_tool_summary("some_future_tool", {}) == "_No arguments._"
+
+
+def test_approval_card_titles_and_summary_per_tool():
+    """Widget construction of ApprovalCard for non-change_graph tools: the
+    title and summary must describe the actual proposed action, not the
+    change_graph fallback text."""
+    from pydantic_ai.messages import ToolCallPart
+
+    from grc_agent.ui.approval_card import ApprovalCard
+
+    fired = []
+    call = ToolCallPart(
+        tool_name="run_command",
+        args='{"command": "cmake --build build"}',
+        tool_call_id="c1",
+    )
+    card = ApprovalCard(
+        None,
+        call,
+        on_approve=lambda: fired.append("approve"),
+        on_deny=lambda: fired.append("deny"),
+        on_always_accept=lambda: fired.append("always"),
+    )
+    title = card.get_children()[0]
+    assert "Proposed command" in title.get_text()
+    # The command appears verbatim in the card's widget tree.
+    import gi
+
+    gi.require_version("Gtk", "3.0")
+    from gi.repository import Gtk
+
+    found = []
+
+    def _walk(widget):
+        if isinstance(widget, Gtk.Label):
+            if "cmake --build build" in (widget.get_text() or ""):
+                found.append(True)
+        elif hasattr(widget, "get_children"):
+            for child in widget.get_children():
+                _walk(child)
+
+    _walk(card)
+    assert found, "literal command not rendered anywhere in the card"
+
+    # Buttons fire their callbacks.
+    buttons = card.get_children()[-1]
+    for button in buttons.get_children():
+        button.emit("clicked")
+    assert sorted(fired) == ["always", "approve", "deny"]
+
+
+def test_shell_prefix_allow_is_session_scoped():
+    """'Always allow <tok>' on a shell approval card approves that command's
+    first token for the CURRENT session only — a different session id makes
+    the granted set inert, without any reset wiring."""
+    from pydantic_ai.messages import ToolCallPart
+
+    from grc_agent.chat_sidebar import ChatSidebar
+
+    sidebar = ChatSidebar()
+    call = ToolCallPart(
+        tool_name="run_command",
+        args='{"command": "cmake --build build"}',
+        tool_call_id="c1",
+    )
+
+    # Not granted yet.
+    assert sidebar._shell_prefix_allowed(call) is False
+
+    # Grant with session 7 active.
+    sidebar._active_session_id = 7
+    sidebar._always_allow_command({}, [], call)
+    assert "cmake" in sidebar._shell_allowed_prefixes
+    assert sidebar._shell_prefix_allowed(call) is True
+    # A different command on the same token is covered; another token is not.
+    same_token = ToolCallPart(
+        tool_name="run_command", args='{"command": "cmake --install build"}', tool_call_id="c2"
+    )
+    other_token = ToolCallPart(
+        tool_name="run_command", args='{"command": "make -j4"}', tool_call_id="c3"
+    )
+    assert sidebar._shell_prefix_allowed(same_token) is True
+    assert sidebar._shell_prefix_allowed(other_token) is False
+    # Background commands share the mechanism.
+    bg = ToolCallPart(
+        tool_name="start_command", args='{"command": "cmake --watch build"}', tool_call_id="c4"
+    )
+    assert sidebar._shell_prefix_allowed(bg) is True
+
+    # Switching sessions (load/new/clear) makes the set inert.
+    sidebar._active_session_id = 8
+    assert sidebar._shell_prefix_allowed(call) is False
+
+    # Non-shell tools are never prefix-allowed through this path.
+    sidebar._active_session_id = 7
+    graph_call = ToolCallPart(
+        tool_name="change_graph", args='{"reason": "x"}', tool_call_id="c5"
+    )
+    assert sidebar._shell_prefix_allowed(graph_call) is False
+
+
+def test_always_allow_command_resolves_matching_pending_futures():
+    """The prefix-allow click approves the pending future(s) whose command
+    shares the token and destroys exactly those cards."""
+    import asyncio
+
+    from pydantic_ai.messages import ToolCallPart
+
+    from grc_agent.chat_sidebar import ChatSidebar
+    from grc_agent.ui.approval_card import ApprovalCard
+
+    sidebar = ChatSidebar()
+    sidebar._active_session_id = 3
+    cmake_call = ToolCallPart(
+        tool_name="run_command", args='{"command": "cmake --build build"}', tool_call_id="c1"
+    )
+    make_call = ToolCallPart(
+        tool_name="run_command", args='{"command": "make -j4"}', tool_call_id="c2"
+    )
+    pending = {
+        "c1": asyncio.new_event_loop().create_future(),
+        "c2": asyncio.new_event_loop().create_future(),
+    }
+    # Build real cards so the destroy path runs against real widgets.
+    cards = [
+        ApprovalCard(None, cmake_call, on_approve=lambda: None, on_deny=lambda: None, on_always_accept=lambda: None),
+        ApprovalCard(None, make_call, on_approve=lambda: None, on_deny=lambda: None, on_always_accept=lambda: None),
+    ]
+    sidebar._always_allow_command(pending, cards, cmake_call)
+    assert pending["c1"].done()  # same token: approved
+    assert not pending["c2"].done()  # other token: still waiting
+    # The persisted global gate is untouched.
+    from grc_agent.settings import get_approval_mode
+
+    assert get_approval_mode() in ("ask", "always")  # unchanged by this click

@@ -54,11 +54,18 @@ flowchart LR
   / Always accept). The composer's **Mode toggle** switches to "Auto" to apply
   changes without asking, and back any time. The canvas redraws immediately,
   GRC's native undo/redo keeps working — what it changed is what you see.
+- **Run and stop flowgraphs itself** — the agent triggers GRC's native
+  Execute/Stop (the same path as the toolbar Run button): output streams to
+  the GRC console where you watch it live, and the agent reads the results
+  back. Running requires your approval first (it may transmit RF on connected
+  hardware); stopping never does.
 - **Plan before you implement** — a separate read-only Planner mode researches
   and drafts a durable step-by-step plan; nothing changes until you click
   "Implement the Plan" to hand it to the executor.
 - **Diagnose failed runs** — when a run fails, the agent gets the return code,
-  reads the full console log itself, and proposes the fix.
+  reads the full console log itself, and proposes the fix — and with the run
+  tools above, the whole probe → run → read-log verification loop happens in
+  one turn.
 - **Preview generated code** — renders the exact Python GNU Radio would
   generate from the current graph, read-only, nothing written to disk.
 - **Save reusable blocks** — exports a working Embedded Python Block into
@@ -75,6 +82,23 @@ flowchart LR
   name.
 - **Flowgraphs are read-only to it on purpose** — graphs are only ever edited
   through the validated graph tools, never by writing the `.grc` file.
+
+### Builds, SDR tools & the shell
+
+- **Approved shell commands in your project folder** — build toolchains
+  (`cmake`/`make`/`ctest`/`gr_modtool`), SDR utilities (`uhd_find_devices`,
+  `SoapySDRUtil`, `rtl_*`, …), standalone scripts, and data analysis all run
+  through the agent — every command shows you the **full literal command** on
+  an approval card first. Approve once, or "Always allow `cmake`" for the rest
+  of the session; the composer's Mode toggle switches to Auto to approve
+  everything.
+- **Long jobs run in the background** — start/check/stop tools manage captures
+  and servers, cleaned up automatically when the turn ends.
+- **Scoped and scrubbed** — commands run in the project directory, destructive
+  commands (`rm`, `mkfs`, `dd`, …) are denied by default, and your provider
+  API keys are stripped from every spawned command's environment.
+- **Flowgraphs stay on the structured tools** — `.grc` files are still only
+  ever edited through the validated graph tools, never by shell scripts.
 
 ### Grounded answers
 
