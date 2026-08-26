@@ -12,9 +12,9 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
-from pydantic_ai.exceptions import ModelRetry
+from pydantic_ai.exceptions import ApprovalRequired, ModelRetry
 
-from grc_agent.agent import run_flowgraph_func, stop_flowgraph_func
+from grc_agent.agent import run_flowgraph_func
 from grc_agent.native_canvas import NativeCanvasManager, NativeFlowgraphProxy
 
 
@@ -101,7 +101,7 @@ def test_run_gates_no_monitor():
     with pytest.raises(ValueError, match="run monitor is not wired"):
         import asyncio
 
-        asyncio.run(proxy.run_flowgraph())
+        asyncio.run(proxy.run_flowgraph(action="start"))
 
 
 def test_run_gates_no_page():
@@ -109,7 +109,7 @@ def test_run_gates_no_page():
     with pytest.raises(ValueError, match="No flowgraph is open"):
         import asyncio
 
-        asyncio.run(proxy.run_flowgraph())
+        asyncio.run(proxy.run_flowgraph(action="start"))
 
 
 def test_run_gates_already_running(fake_actions):
@@ -117,7 +117,7 @@ def test_run_gates_already_running(fake_actions):
     with pytest.raises(ValueError, match="already in progress"):
         import asyncio
 
-        asyncio.run(proxy.run_flowgraph())
+        asyncio.run(proxy.run_flowgraph(action="start"))
     fake_actions.exec_action.assert_not_called()
 
 
@@ -126,7 +126,7 @@ def test_run_gates_unsaved_page(fake_actions):
     with pytest.raises(ValueError, match="never been saved"):
         import asyncio
 
-        asyncio.run(proxy.run_flowgraph())
+        asyncio.run(proxy.run_flowgraph(action="start"))
     fake_actions.exec_action.assert_not_called()
 
 
@@ -140,7 +140,7 @@ def test_run_gates_invalid_graph(fake_actions):
     with pytest.raises(ValueError, match="Port is not connected"):
         import asyncio
 
-        asyncio.run(proxy.run_flowgraph())
+        asyncio.run(proxy.run_flowgraph(action="start"))
     # validate() must run before is_valid() is trusted (Elements only populate
     # _error_messages on an explicit validate call).
     page.flow_graph.validate.assert_called_once()
@@ -155,7 +155,7 @@ def test_run_no_wait_returns_started_and_marks_agent_initiated(fake_actions):
 
     import asyncio
 
-    res = asyncio.run(proxy.run_flowgraph(wait=False))
+    res = asyncio.run(proxy.run_flowgraph(action="start", wait=False))
 
     assert res["status"] == "started"
     assert "get_run_log" in res["note"]
@@ -170,7 +170,7 @@ def test_run_wait_completed():
 
     import asyncio
 
-    res = asyncio.run(proxy.run_flowgraph(wait=True, timeout_seconds=5))
+    res = asyncio.run(proxy.run_flowgraph(action="start", wait=True, timeout_seconds=5))
 
     assert res["status"] == "completed"
     assert res["return_code"] == 0
@@ -184,10 +184,86 @@ def test_run_wait_still_running():
 
     import asyncio
 
-    res = asyncio.run(proxy.run_flowgraph(wait=True, timeout_seconds=1))
+    res = asyncio.run(proxy.run_flowgraph(action="start", wait=True, timeout_seconds=1))
 
     assert res["status"] == "still_running"
-    assert "stop_flowgraph" in res["note"]
+    assert "run_flowgraph" in res["note"]
+
+
+class _BoundedRunMonitor(_FakeExecMonitor):
+    """Serves the killer path: the run is still going at the deadline, then its
+    terminal marker lands (after the auto-stop's SIGTERM). On the first wait the
+    page's process is set (spawn=True), simulating GRC spawning the run; with
+    spawn=False it stays None, simulating a run that finished on its own at the
+    deadline."""
+
+    def __init__(self, page, code=-15, spawn=True):
+        super().__init__(outcome="completed", code=code, tracking=True)
+        self._page = page
+        self._spawn = spawn
+        self._first = True
+
+    async def wait_for_run_end(self, timeout, *, epoch=None):  # noqa: ARG002
+        if self._first:
+            self._first = False
+            if self._spawn:
+                self._page.process = object()
+            return "still_running"
+        return "completed"
+
+
+def test_run_stop_after_requires_wait_true():
+    """stop_after_seconds is a bounded-run intent: with wait=False the call
+    returns before anything could enforce the deadline, so it is rejected
+    up front (uniform rule, no background task machinery)."""
+    import asyncio
+
+    proxy, _ = _make_proxy(_valid_page())
+    with pytest.raises(ValueError, match="requires wait=True"):
+        asyncio.run(proxy.run_flowgraph(action="start", wait=False, stop_after_seconds=10))
+
+
+def test_run_stop_after_requires_positive():
+    import asyncio
+
+    proxy, _ = _make_proxy(_valid_page())
+    with pytest.raises(ValueError, match="positive"):
+        asyncio.run(proxy.run_flowgraph(action="start", wait=True, stop_after_seconds=0))
+
+
+@pytest.mark.usefixtures("fake_actions")
+def test_run_bounded_run_auto_stops_at_deadline(fake_actions):
+    """The run exceeds stop_after_seconds: the auto-stop fires the same native
+    KILL action the toolbar Stop button takes, and the result reports the
+    deliberate stop with the SIGTERM return code."""
+    import asyncio
+
+    page = _valid_page()
+    proxy, monitor = _make_proxy(page, monitor=_BoundedRunMonitor(page, code=-15))
+    res = asyncio.run(proxy.run_flowgraph(action="start", wait=True, stop_after_seconds=5))
+
+    assert res["status"] == "stopped_after_timeout"
+    assert res["return_code"] == -15
+    assert monitor.marked_agent_initiated == 1
+    fake_actions.kill_action.assert_called_once()
+
+
+@pytest.mark.usefixtures("fake_actions")
+def test_run_bounded_run_finished_at_deadline_reports_completed(fake_actions):
+    """The run ends on its own right at the deadline (page.process is already
+    None), so no stop is performed — the real outcome wins over a stop we never
+    made."""
+    import asyncio
+
+    page = _valid_page()
+    proxy, _ = _make_proxy(page, monitor=_BoundedRunMonitor(page, code=0, spawn=False))
+    res = asyncio.run(proxy.run_flowgraph(action="start", wait=True, stop_after_seconds=5))
+
+    assert res["status"] == "completed"
+    assert res["return_code"] == 0
+    assert res["ran_successfully"] is True
+    fake_actions.kill_action.assert_not_called()
+
 
 
 @pytest.mark.usefixtures("fake_actions")
@@ -196,7 +272,7 @@ def test_run_wait_not_started():
 
     import asyncio
 
-    res = asyncio.run(proxy.run_flowgraph(wait=True))
+    res = asyncio.run(proxy.run_flowgraph(action="start", wait=True))
 
     assert res["status"] == "not_started"
 
@@ -210,7 +286,7 @@ def test_run_silent_noop_cancels_agent_initiated_flag():
     proxy, monitor = _make_proxy(
         _valid_page(), outcome="not_started", tracking=False
     )
-    res = asyncio.run(proxy.run_flowgraph(wait=True))
+    res = asyncio.run(proxy.run_flowgraph(action="start", wait=True))
     assert res["status"] == "not_started"
     assert monitor.marked_agent_initiated == 1
     assert monitor.cancelled_agent_initiated == 1
@@ -235,9 +311,20 @@ def test_run_exception_after_mark_cancels_flag(monkeypatch):
     monkeypatch.setattr(actions, "FLOW_GRAPH_EXEC", _Boom(), raising=False)
     proxy, monitor = _make_proxy(_valid_page(), outcome="completed", tracking=True)
     with pytest.raises(RuntimeError):
-        asyncio.run(proxy.run_flowgraph(wait=True))
+        asyncio.run(proxy.run_flowgraph(action="start", wait=True))
     assert monitor.marked_agent_initiated == 1
     assert monitor.cancelled_agent_initiated == 1
+
+
+def test_proxy_run_flowgraph_action_stop(fake_actions):
+    proxy, _ = _make_proxy(_valid_page(process=None))
+
+    import asyncio
+
+    res = asyncio.run(proxy.run_flowgraph(action="stop"))
+
+    assert res["status"] == "not_running"
+    fake_actions.kill_action.assert_not_called()
 
 
 def test_stop_no_process_is_clean_noop(fake_actions):
@@ -281,15 +368,30 @@ class _FakeDeps:
     def __init__(self, proxy):
         self._proxy = proxy
 
-    async def run_flowgraph(self, wait=True, timeout_seconds=60.0):
-        return await self._proxy.run_flowgraph(wait=wait, timeout_seconds=timeout_seconds)
+    async def run_flowgraph(self, action="start", wait=True, timeout_seconds=60.0, stop_after_seconds=None):
+        return await self._proxy.run_flowgraph(
+            action=action,
+            wait=wait,
+            timeout_seconds=timeout_seconds,
+            stop_after_seconds=stop_after_seconds,
+        )
 
     async def stop_flowgraph(self):
         return await self._proxy.stop_flowgraph()
 
 
-def _ctx(deps):
-    return SimpleNamespace(deps=deps)
+def _ctx(deps, tool_call_approved=True):
+    return SimpleNamespace(deps=deps, tool_call_approved=tool_call_approved)
+
+
+def test_tool_run_flowgraph_requires_approval_on_start():
+    import asyncio
+
+    ctx = _ctx(SimpleNamespace(), tool_call_approved=False)
+    with pytest.raises(ApprovalRequired):
+        asyncio.run(
+            run_flowgraph_func(ctx, action="start", wait=True, timeout_seconds=1)
+        )
 
 
 def test_tool_run_flowgraph_requires_wired_deps():
@@ -297,7 +399,16 @@ def test_tool_run_flowgraph_requires_wired_deps():
 
     with pytest.raises(ModelRetry, match="wiring"):
         asyncio.run(
-            run_flowgraph_func(_ctx(SimpleNamespace()), wait=True, timeout_seconds=1)
+            run_flowgraph_func(_ctx(SimpleNamespace(), tool_call_approved=True), action="start", wait=True, timeout_seconds=1)
+        )
+
+
+def test_tool_run_flowgraph_invalid_action():
+    import asyncio
+
+    with pytest.raises(ModelRetry, match="Invalid action"):
+        asyncio.run(
+            run_flowgraph_func(_ctx(SimpleNamespace()), action="invalid")  # type: ignore[arg-type]
         )
 
 
@@ -307,7 +418,7 @@ def test_tool_run_flowgraph_wraps_gate_errors_as_modelretry():
 
     proxy, _ = _make_proxy(_valid_page(file_path=""))
     with pytest.raises(ModelRetry, match="never been saved"):
-        asyncio.run(run_flowgraph_func(_ctx(_FakeDeps(proxy)), wait=True, timeout_seconds=1))
+        asyncio.run(run_flowgraph_func(_ctx(_FakeDeps(proxy), tool_call_approved=True), action="start", wait=True, timeout_seconds=1))
 
 
 @pytest.mark.usefixtures("fake_actions")
@@ -317,23 +428,40 @@ def test_tool_run_flowgraph_returns_json():
 
     proxy, _ = _make_proxy(_valid_page(), outcome="completed", code=0)
     res = json.loads(
-        asyncio.run(run_flowgraph_func(_ctx(_FakeDeps(proxy)), wait=True, timeout_seconds=1))
+        asyncio.run(run_flowgraph_func(_ctx(_FakeDeps(proxy), tool_call_approved=True), action="start", wait=True, timeout_seconds=1))
     )
     assert res["status"] == "completed"
 
 
-def test_tool_stop_flowgraph_requires_wired_deps():
-    import asyncio
-
-    with pytest.raises(ModelRetry, match="wiring"):
-        asyncio.run(stop_flowgraph_func(_ctx(SimpleNamespace())))
-
-
 @pytest.mark.usefixtures("fake_actions")
-def test_tool_stop_flowgraph_returns_json():
+def test_tool_run_flowgraph_bounded_stop_after():
+    """stop_after_seconds flows through the tool to the proxy and the killer
+    path reports stopped_after_timeout (bounded run in one call)."""
+    import asyncio
+    import json
+
+    page = _valid_page()
+    proxy, _ = _make_proxy(page, monitor=_BoundedRunMonitor(page, code=-15))
+    res = json.loads(
+        asyncio.run(
+            run_flowgraph_func(
+                _ctx(_FakeDeps(proxy), tool_call_approved=True),
+                action="start",
+                wait=True,
+                stop_after_seconds=5,
+            )
+        )
+    )
+    assert res["status"] == "stopped_after_timeout"
+    assert res["return_code"] == -15
+
+
+def test_tool_run_flowgraph_stop_requires_no_approval_and_stops():
     import asyncio
     import json
 
     proxy, _ = _make_proxy(_valid_page(process=None))
-    res = json.loads(asyncio.run(stop_flowgraph_func(_ctx(_FakeDeps(proxy)))))
+    # tool_call_approved is False, but action='stop' needs no approval!
+    ctx = _ctx(_FakeDeps(proxy), tool_call_approved=False)
+    res = json.loads(asyncio.run(run_flowgraph_func(ctx, action="stop")))
     assert res["status"] == "not_running"

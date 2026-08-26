@@ -37,6 +37,7 @@ from gi.repository import Gdk, GLib, Gtk, Pango
 
 from .block_badge import BlockBadge, build_badge_regex
 from .code_block import CodeBlock
+from .css import is_dark_theme
 from .table_block import TableBlock, parse_table
 
 _log = logging.getLogger(__name__)
@@ -93,10 +94,28 @@ class MarkdownView:
         self._badge_regex_cache = (key, pattern)
         return pattern
 
-    def _make_block_badge_widget(self, name: str) -> Gtk.EventBox:
-        # anchored=True: prose child-anchor embedding — the padded inner box
-        # aligns the pill's text with the sentence baseline (see BlockBadge).
-        return BlockBadge(name, self._get_cm, anchored=True)
+    def _get_or_create_block_tag(self, buffer: Gtk.TextBuffer, name: str) -> Gtk.TextTag:
+        tag_name = f"block_badge_{name}"
+        tag = buffer.get_tag_table().lookup(tag_name)
+        if tag is None:
+            tag = buffer.create_tag(
+                tag_name,
+                family="monospace",
+                weight=Pango.Weight.BOLD,
+                background="rgba(255, 255, 255, 0.12)" if is_dark_theme() else "rgba(0, 0, 0, 0.08)",
+            )
+            tag.grc_block_name = name
+            tag.connect("event", self._on_block_tag_event)
+        return tag
+
+    def _on_block_tag_event(self, tag: Any, _widget: Any, event: Any, _iter: Any) -> bool:
+        if event.type == Gdk.EventType.BUTTON_PRESS and getattr(event, "button", 1) == 1:
+            cm = self._get_cm()
+            name = getattr(tag, "grc_block_name", "")
+            if cm is not None and name:
+                cm.scroll_to_block(name)
+            return True
+        return False
 
     # -- table cell renderer (badge-aware) ---------------------------------
     def render_inline(self, text: str, bold: bool = False) -> Gtk.Box:
@@ -142,7 +161,6 @@ class MarkdownView:
                 "code",
                 family="monospace",
                 weight=Pango.Weight.BOLD,
-                scale=0.95,
             )
         if tag_table.lookup("heading") is None:
             buffer.create_tag(
@@ -193,7 +211,7 @@ class MarkdownView:
                     buffer.apply_tag(t, start, end)
 
     def _insert_prose_text_with_badges(
-        self, buffer: Gtk.TextBuffer, text: str, tags: list, tv: Gtk.TextView
+        self, buffer: Gtk.TextBuffer, text: str, tags: list, _tv: Gtk.TextView
     ) -> None:
         rx = self.compile_badge_regex()
         if rx is None:
@@ -205,19 +223,8 @@ class MarkdownView:
             self._insert_plain_tagged(buffer, text[last_end : m.start()], tags)
 
             name = m.group(1)
-            anchor_start = buffer.get_end_iter().get_offset()
-            anchor = buffer.create_child_anchor(buffer.get_end_iter())
-            if tags:
-                s_it = buffer.get_iter_at_offset(anchor_start)
-                e_it = buffer.get_end_iter()
-                for t in tags:
-                    if isinstance(t, str):
-                        buffer.apply_tag_by_name(t, s_it, e_it)
-                    else:
-                        buffer.apply_tag(t, s_it, e_it)
-            pill = self._make_block_badge_widget(name)
-            tv.add_child_at_anchor(pill, anchor)
-            pill.show_all()
+            block_tag = self._get_or_create_block_tag(buffer, name)
+            self._insert_plain_tagged(buffer, name, tags + [block_tag])
 
             last_end = m.end()
 
@@ -242,16 +249,44 @@ class MarkdownView:
         return False
 
     def _on_prose_motion_notify(self, tv: Gtk.TextView, event: Any) -> bool:
-        """Pointer cursor over link text; reset once it leaves the link."""
+        """Pointer cursor over links and block badges; canvas highlight on badge hover."""
         bx, by = tv.window_to_buffer_coords(Gtk.TextWindowType.TEXT, int(event.x), int(event.y))
         _found, it = tv.get_iter_at_location(bx, by)
-        hovering_link = any(getattr(t, "grc_href", None) for t in it.get_tags())
+        tags = it.get_tags()
+        hovering_link = any(getattr(t, "grc_href", None) for t in tags)
+        block_tag = next((t for t in tags if hasattr(t, "grc_block_name")), None)
+        hovered_name = getattr(block_tag, "grc_block_name", None)
+
+        prev_hovered = getattr(tv, "_grc_hovered_block", None)
+        if hovered_name != prev_hovered:
+            tv._grc_hovered_block = hovered_name
+            cm = self._get_cm()
+            if cm is not None:
+                if hovered_name:
+                    cm.set_highlight_block(hovered_name)
+                else:
+                    cm.clear_highlight()
+
         window = tv.get_window(Gtk.TextWindowType.TEXT)
         if window is not None:
             cursor = (
-                Gdk.Cursor.new_from_name(window.get_display(), "pointer") if hovering_link else None
+                Gdk.Cursor.new_from_name(window.get_display(), "pointer")
+                if (hovering_link or hovered_name)
+                else None
             )
             window.set_cursor(cursor)
+        return False
+
+    def _on_prose_leave_notify(self, tv: Gtk.TextView, _event: Any) -> bool:
+        """Clear canvas highlight and pointer cursor when mouse leaves TextView."""
+        if getattr(tv, "_grc_hovered_block", None):
+            tv._grc_hovered_block = None
+            cm = self._get_cm()
+            if cm is not None:
+                cm.clear_highlight()
+        window = tv.get_window(Gtk.TextWindowType.TEXT)
+        if window is not None:
+            window.set_cursor(None)
         return False
 
     def _render_node(  # noqa: C901
@@ -393,8 +428,9 @@ class MarkdownView:
         tv.set_pixels_inside_wrap(2)
         tv.set_hexpand(True)
         tv.set_halign(Gtk.Align.FILL)
-        tv.add_events(Gdk.EventMask.POINTER_MOTION_MASK)
+        tv.add_events(Gdk.EventMask.POINTER_MOTION_MASK | Gdk.EventMask.LEAVE_NOTIFY_MASK)
         tv.connect("motion-notify-event", self._on_prose_motion_notify)
+        tv.connect("leave-notify-event", self._on_prose_leave_notify)
         return tv
 
     @staticmethod

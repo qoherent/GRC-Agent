@@ -384,7 +384,7 @@ class SettingsDialog(Gtk.Dialog):
         saved config, so the list matches what Save would apply — otherwise
         switching provider and hitting Load would query the previous backend.
         """
-        provider, _model, _kv, key_val, base_url, _embed = self._collect()
+        provider, _model, _kv, key_val, base_url, *_ = self._collect()
         current = self.model_entry.get_text().strip()
         try:
             names = await list_models({"provider": provider}, api_key=key_val, base_url=base_url)

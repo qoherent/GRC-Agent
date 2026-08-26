@@ -359,10 +359,10 @@ def resolve_auto(  # noqa: C901
     block_name: str,
     param_key: str,
     add_connections: list[str] | None = None,
-    new_block_names: set[str] = None,
+    new_block_names: set[str] | None = None,
     is_add_phase: bool = True,
-    add_blocks: list[dict] = None,
-    update_params: list[dict] = None,
+    add_blocks: list[dict] | None = None,
+    update_params: list[dict] | None = None,
 ) -> str | None:
     try:
         block = flow_graph.get_block(block_name)
@@ -433,7 +433,7 @@ def resolve_auto(  # noqa: C901
                 other_type_val = None
                 if add_blocks:
                     for ab in add_blocks:
-                        if ab.get("instance_name") == other:
+                        if ab.get("instance_name") == other and ab.get("block_id"):
                             ctrls = type_controlling_params(ab["block_id"])
                             for cp in ctrls:
                                 val = (ab.get("params") or {}).get(cp)
@@ -874,6 +874,16 @@ def _revert_flow_graph(flow_graph: Any, initial_data: Any) -> str | None:
         flow_graph.rewrite()
         return None
     except Exception as exc:
+        grc_file_path = getattr(flow_graph, "grc_file_path", "")
+        if grc_file_path and Path(grc_file_path).is_file():
+            try:
+                platform = get_platform()
+                disk_data = platform.parse_flow_graph(str(grc_file_path))
+                flow_graph.import_data(disk_data)
+                flow_graph.rewrite()
+                return None
+            except Exception:
+                pass
         return f"rollback failed, flowgraph may be left mutated: {exc}"
 
 
@@ -1303,13 +1313,23 @@ def change_graph(  # noqa: C901
         revert_error = _revert_flow_graph(flow_graph, initial_data)
         if revert_error:
             mutation_errors.append({"code": "rollback_failed", "message": revert_error})
-        return {"ok": False, "error_type": "mutation_failed", "errors": mutation_errors}
+        return {
+            "ok": False,
+            "error_type": "mutation_failed",
+            "errors": mutation_errors,
+            "rollback_failed": bool(revert_error),
+        }
 
     if errors:
         revert_error = _revert_flow_graph(flow_graph, initial_data)
         if revert_error:
             errors.append({"code": "rollback_failed", "message": revert_error})
-        return {"ok": False, "error_type": "batch_failed", "errors": errors}
+        return {
+            "ok": False,
+            "error_type": "batch_failed",
+            "errors": errors,
+            "rollback_failed": bool(revert_error),
+        }
 
     # See inspect_graph's identical call for why this is required: without
     # it, is_valid() reports "valid" regardless of actual state (confirmed
@@ -1341,6 +1361,7 @@ def change_graph(  # noqa: C901
                 "ok": False,
                 "error_type": "validation_failed",
                 "errors": validation_errors,
+                "rollback_failed": bool(revert_error),
             }
     except Exception as exc:
         # The validation gate itself raised (rather than populating an error
@@ -1351,7 +1372,12 @@ def change_graph(  # noqa: C901
         revert_error = _revert_flow_graph(flow_graph, initial_data)
         if revert_error:
             gate_errors.append({"code": "rollback_failed", "message": revert_error})
-        return {"ok": False, "error_type": "mutation_failed", "errors": gate_errors}
+        return {
+            "ok": False,
+            "error_type": "mutation_failed",
+            "errors": gate_errors,
+            "rollback_failed": bool(revert_error),
+        }
 
     # Write atomically with lock and backup
     try:
@@ -1407,6 +1433,7 @@ def change_graph(  # noqa: C901
             "ok": False,
             "error_type": "save_failed",
             "errors": save_errors,
+            "rollback_failed": bool(revert_error),
         }
 
     return {"ok": True, "relayout": relayout}

@@ -255,6 +255,7 @@ def build_app() -> tuple[Gtk.Window, NativeCanvasManager, ChatSidebar, NativeFlo
     sidebar.set_blocks_expanded(canvas._blocks_visible)
     canvas.on_graphs_changed = lambda: _sync_sidebar(canvas, sidebar)
     canvas.on_sync_failed = lambda msg: sidebar.set_status(msg, error=True)
+    canvas.on_graph_modified = exec_monitor.notify_graph_modified
     canvas.setup_signal_handlers()
     proxy = NativeFlowgraphProxy(canvas, exec_monitor=exec_monitor)
     sidebar.set_flowgraph_proxy(proxy)
@@ -327,10 +328,11 @@ async def _startup_preflight(sidebar: ChatSidebar) -> None:
 
             key_var = PROVIDER_API_KEY.get(cfg.get("provider", ""), "")
             key = (get_env_value(key_var) or "") if key_var else ""
+            base_url = cfg.get("ollama_base_url") or cfg.get("openai_compatible_base_url") or ""
             return probe_backend(
                 cfg.get("provider", ""),
                 key,
-                "",
+                base_url,
                 cfg.get("model", ""),
             )
 

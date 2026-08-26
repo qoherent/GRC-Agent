@@ -188,7 +188,12 @@ class CodeBlock(Gtk.Box):
         if isinstance(image, Gtk.Image):
             image.set_from_icon_name("object-select-symbolic", Gtk.IconSize.MENU)
 
+        if hasattr(btn, "_copy_timeout_id") and btn._copy_timeout_id is not None:
+            GLib.source_remove(btn._copy_timeout_id)
+            btn._copy_timeout_id = None
+
         def _reset() -> bool:
+            btn._copy_timeout_id = None
             try:
                 img = btn.get_image()
                 if isinstance(img, Gtk.Image):
@@ -198,8 +203,15 @@ class CodeBlock(Gtk.Box):
                 pass
             return False
 
-        tid = GLib.timeout_add_seconds(2, _reset)
-        btn.connect("destroy", lambda *_: GLib.source_remove(tid))
+        btn._copy_timeout_id = GLib.timeout_add_seconds(2, _reset)
+        if not getattr(btn, "_destroy_handler_set", False):
+            btn._destroy_handler_set = True
+            btn.connect(
+                "destroy",
+                lambda b: GLib.source_remove(b._copy_timeout_id)
+                if getattr(b, "_copy_timeout_id", None)
+                else None,
+            )
 
     def _highlight(self, buffer: Gtk.TextBuffer, lang: str, code: str) -> None:
         try:

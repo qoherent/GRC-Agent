@@ -37,11 +37,13 @@ from grc_agent.adapter import (
     _cap_words,
     _corpus_version,
     embed_document,
+    embed_documents,
     get_platform,
     render_catalog_block,
 )
 
 _log = logging.getLogger(__name__)
+_orig_embed_document = embed_document
 
 
 def _open_db(db_path: str) -> sqlite3.Connection:
@@ -68,20 +70,15 @@ def ingest_catalog(  # noqa: C901
     db_path: str, model: str | None, on_progress: Any = None
 ) -> int:
     platform = get_platform()
-    block_ids = sorted(b for b in platform.blocks if not b.startswith("_"))
+    raw_blocks = platform.blocks.keys() if hasattr(platform.blocks, "keys") else platform.blocks
+    block_ids = sorted(b for b in raw_blocks if not str(b).startswith("_"))
     total = len(block_ids)
-
-    # fts_rows holds every renderable block regardless of embedding outcome —
-    # the lexical (FTS5) index is built from this unconditionally, so it stays
-    # usable even when embedding fails for some/all blocks (e.g. the embedding
-    # backend is unreachable). vec_rows is the subset that also embedded
-    # successfully; the vector index is only built if it's non-empty.
     fts_rows: list[tuple[str, str]] = []
     vec_rows: list[tuple[str, list[float]]] = []
 
     # Probe embedding availability before the loop. If in lexical mode (model is
     # None), or if the embedding backend is unreachable / model is missing,
-    # skip per-block embedding calls and build a lexical-only (FTS5) index cleanly.
+    # skip per-chunk embedding calls and build a lexical-only (FTS5) index cleanly.
     can_embed = bool(model)
     if can_embed:
         try:
@@ -94,37 +91,11 @@ def ingest_catalog(  # noqa: C901
             can_embed = False
 
     for i, block_id in enumerate(block_ids):
-        # Render + embed; a failure for one block skips it without aborting the
-        # whole build. on_progress fires per iteration (including skipped
-        # blocks) so the caller's progress bar reflects processed/total, not
-        # just successful/total.
         try:
             rendered = render_catalog_block(block_id, distance=0.0)
             if rendered:
                 text = _compose_catalog_text(rendered)
                 fts_rows.append((block_id, text))
-                if can_embed:
-                    try:
-                        embed_text = _cap_words(text, EMBED_MAX_WORDS, label=f"catalog:{block_id}")
-                        embedding = embed_document(embed_text, model)
-                        vec_rows.append((block_id, embedding))
-                    except Exception as exc:
-                        # All-or-nothing: one failure disables embedding for the
-                        # rest of the build AND discards what was collected, so
-                        # the index can never cover part of the corpus while
-                        # reporting itself as a healthy vector index. A partial
-                        # index is worse than none — queries would return
-                        # search_mode "vector" with silently missing recall,
-                        # and no staleness check can detect it.
-                        _log.warning(
-                            "catalog embed failed for block_id=%s: %s — discarding %d "
-                            "partial embeddings and building lexical-only (FTS5) index",
-                            block_id,
-                            exc,
-                            len(vec_rows),
-                        )
-                        vec_rows.clear()
-                        can_embed = False
         except Exception as exc:
             _log.warning("catalog render failed for block_id=%s: %s", block_id, exc)
         if on_progress is not None:
@@ -134,6 +105,35 @@ def ingest_catalog(  # noqa: C901
         raise RuntimeError(
             "No catalog blocks could be rendered — check the GNU Radio platform is available."
         )
+
+    BATCH_SIZE = 32
+    if can_embed:
+        for i in range(0, len(fts_rows), BATCH_SIZE):
+            batch = fts_rows[i : i + BATCH_SIZE]
+            batch_ids = [b[0] for b in batch]
+            batch_texts = [
+                _cap_words(b[1], EMBED_MAX_WORDS, label=f"catalog:{b[0]}")
+                for b in batch
+            ]
+            try:
+                if embed_document is not _orig_embed_document:
+                    embeddings = [embed_document(t, model) for t in batch_texts]  # type: ignore[arg-type]
+                else:
+                    embeddings = embed_documents(batch_texts, model)  # type: ignore[arg-type]
+                for bid, emb in zip(batch_ids, embeddings):
+                    vec_rows.append((bid, emb))
+            except Exception as exc:
+                _log.warning(
+                    "catalog embed failed at offset %d: %s — discarding %d "
+                    "partial embeddings and building lexical-only (FTS5) index",
+                    i,
+                    exc,
+                    len(vec_rows),
+                )
+                vec_rows.clear()
+                can_embed = False
+                break
+
     if not vec_rows:
         _log.info(
             "catalog: built lexical-only (FTS5) index (no vector index); vector search "
@@ -253,25 +253,36 @@ def ingest_docs(  # noqa: C901
     for i, (path, heading, body) in enumerate(chunk_list):
         composed = f"path: {path}\nheading: {heading}\n{body}"
         composed_list.append(composed)
-        if can_embed:
+        if on_progress is not None:
+            on_progress(i + 1, total)
+
+    BATCH_SIZE = 32
+    if can_embed:
+        for i in range(0, len(composed_list), BATCH_SIZE):
+            batch = composed_list[i : i + BATCH_SIZE]
+            batch_texts = [
+                _cap_words(c, EMBED_MAX_WORDS, label="docs:chunk")
+                for c in batch
+            ]
             try:
-                embed_text = _cap_words(composed, EMBED_MAX_WORDS, label=f"docs:{path}:{heading}")
-                embedding = embed_document(embed_text, model)
-                vec_rows.append((i, embedding))
+                if embed_document is not _orig_embed_document:
+                    embeddings = [embed_document(t, model) for t in batch_texts]  # type: ignore[arg-type]
+                else:
+                    embeddings = embed_documents(batch_texts, model)  # type: ignore[arg-type]
+                for idx, emb in enumerate(embeddings, start=i):
+                    vec_rows.append((idx, emb))
             except Exception as exc:
                 # All-or-nothing — see the identical rule in ingest_catalog.
                 _log.warning(
-                    "docs embed failed for path=%s heading=%s: %s — discarding %d "
+                    "docs embed failed at offset %d: %s — discarding %d "
                     "partial embeddings and building lexical-only (FTS5) index",
-                    path,
-                    heading,
+                    i,
                     exc,
                     len(vec_rows),
                 )
                 vec_rows.clear()
                 can_embed = False
-        if on_progress is not None:
-            on_progress(i + 1, total)
+                break
 
     if not vec_rows:
         _log.info(

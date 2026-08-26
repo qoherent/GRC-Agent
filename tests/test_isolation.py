@@ -819,7 +819,6 @@ def test_grc_tools_includes_generate_python():
         "change_graph",
         "get_run_log",
         "run_flowgraph",
-        "stop_flowgraph",
         "save_block",
     }
 

@@ -55,20 +55,8 @@ def badge_click(cm, event, name: str) -> bool:
 
 
 class BlockBadge(Gtk.EventBox):
-    """A single clickable block-name pill. ``cm_getter`` resolves the live
-    canvas manager on each event (it can change across tab switches).
-
-    ``anchored`` selects the prose-TextView embedding mode: the label is
-    wrapped in a vertically-padded ``Gtk.Box`` so its text aligns with the
-    surrounding sentence's baseline. GTK3 child-anchor widgets are top-aligned
-    and STRETCH to the full line box (verified by measurement: a 23px badge
-    sits at line_y=0 with its bottom 5px below the baseline), and the label
-    text is centered inside that stretched box — so without the padding the
-    badge text rides ~4px above the surrounding text and reads as a
-    superscript. CSS padding on the EventBox itself does nothing (GtkBin
-    ignores padding for child allocation), and a Pango ``rise`` tag on the
-    anchor character does not move child-anchor widgets at all — both
-    measured. Table cells (``anchored=False``) keep the plain centered label.
+    """A single clickable block-name pill for table cells and container widgets.
+    ``cm_getter`` resolves the live canvas manager on each event.
     """
 
     def __init__(self, name: str, cm_getter, anchored: bool = False) -> None:
@@ -85,15 +73,7 @@ class BlockBadge(Gtk.EventBox):
 
         lbl = Gtk.Label(label=name)
         lbl.set_selectable(False)
-        if anchored:
-            # GtkBox respects CSS padding (GtkBin does not): padding-top: 4px
-            # on this box lowers the label text onto the prose baseline.
-            box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-            box.get_style_context().add_class("chat-block-badge-anchored")
-            box.pack_start(lbl, False, False, 0)
-            self.add(box)
-        else:
-            self.add(lbl)
+        self.add(lbl)
 
         self.connect("enter-notify-event", self._on_enter)
         self.connect("leave-notify-event", self._on_leave)

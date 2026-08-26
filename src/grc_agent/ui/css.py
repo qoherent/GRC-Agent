@@ -250,18 +250,11 @@ textview.chat-thinking-textview text {
     background: alpha(@theme_selected_bg_color, 0.18);
 }
 
-/* Block-name pill badge */
+/* Block-name pill badge (for table cells and container widgets) */
 .chat-block-badge {
     border: 1px solid @STRONG@;
     border-radius: 10px;
-}
-
-/* Prose-embedded (child-anchor) badges: the inner box's top padding lowers
-   the label text onto the sentence baseline. GTK3 anchors stretch the widget
-   to the full line box and center its child, so without this the pill text
-   rides ~4px above the surrounding text (measured; see block_badge.py). */
-.chat-block-badge-anchored {
-    padding-top: 4px;
+    padding: 1px 6px;
 }
 
 /* Send button: primary action — the theme's accent (selected bg) so it reads

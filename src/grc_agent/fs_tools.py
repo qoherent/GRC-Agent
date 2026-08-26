@@ -255,11 +255,12 @@ class GrcFileSystemToolset(FileSystemToolset[AgentDepsT]):
         for name in names:
             if _is_grc_name(name):
                 raise ValueError(_WRITE_GRC_MSG)
-        suffix = Path(path).suffix.lower()
-        if suffix not in self._write_suffixes:
-            what = f"{suffix!r} files" if suffix else "files without an extension"
-            allowed = ", ".join(sorted(self._write_suffixes))
-            raise ValueError(f"Writing {what} is not allowed. Allowed extensions: {allowed}.")
+        suffixes = [Path(path).suffix.lower()] + ([resolved.suffix.lower()] if resolved is not None else [])
+        for suffix in suffixes:
+            if suffix not in self._write_suffixes:
+                what = f"{suffix!r} files" if suffix else "files without an extension"
+                allowed = ", ".join(sorted(self._write_suffixes))
+                raise ValueError(f"Writing {what} is not allowed. Allowed extensions: {allowed}.")
 
     # -- read_file with .grc routing ---------------------------------------
 

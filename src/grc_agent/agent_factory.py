@@ -17,7 +17,6 @@ from pydantic_ai.providers.openai import OpenAIProvider
 from pydantic_ai.providers.openrouter import OpenRouterProvider
 from pydantic_ai.retries import AsyncTenacityTransport, RetryConfig
 from pydantic_ai.tools import DeferredToolRequests, ToolDefinition
-from pydantic_ai_harness import ToolOutputLimits
 from pydantic_ai_harness.compaction import (
     ClampOversizedMessages,
     ClearToolResults,
@@ -26,7 +25,6 @@ from pydantic_ai_harness.compaction import (
     SummarizingCompaction,
     TieredCompaction,
 )
-from pydantic_ai_harness.conversation_search import ConversationSearch, SnapshotHistorySource
 from pydantic_ai_harness.filesystem import READ_ONLY_TOOL_NAMES
 from pydantic_ai_harness.planning import (
     InMemoryPlanStore,
@@ -37,7 +35,6 @@ from pydantic_ai_harness.planning import (
 )
 from pydantic_ai_harness.step_persistence import StepPersistence
 from pydantic_ai_harness.system_reminders import SystemReminders
-from pydantic_ai_harness.tool_output_limits import Band, LocalFileStore, Spill, Truncate
 from tenacity import retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from grc_agent.agent import (
@@ -96,8 +93,6 @@ _PLANNER_FUNCTION_TOOLS = frozenset(
         "query_knowledge",
         "generate_python",
         "get_run_log",
-        "read_tool_result",
-        "search_conversation_history",
         "duckduckgo_search",
         "web_search",  # defensive: native tools bypass PrepareTools today
         "web_fetch",
@@ -159,6 +154,18 @@ def _provider_base_url(cfg: dict) -> str:
         return "https://openrouter.ai/api/v1"
     if provider == "openai":
         return "https://api.openai.com/v1"
+    if provider == "anthropic":
+        return "https://api.anthropic.com"
+    if provider == "google":
+        return "https://generativelanguage.googleapis.com"
+    if provider == "groq":
+        return "https://api.groq.com/openai/v1"
+    if provider == "mistral":
+        return "https://api.mistral.ai/v1"
+    if provider == "cohere":
+        return "https://api.cohere.com/v2"
+    if provider == "xai":
+        return "https://api.x.ai/v1"
     if provider == "ollama_local":
         return cfg.get("ollama_base_url", "") or ""
     return cfg.get("openai_compatible_base_url", "") or ""
@@ -418,13 +425,17 @@ def _ollama_context_length(model: str) -> int | None:
     """
     import httpx
 
-    from grc_agent.settings import get_env_value, load_settings
+    from grc_agent.settings import get_env_value, load_settings, resolve_key
 
     cfg = load_settings()
-    base_url = (cfg.get("ollama_base_url") or "http://localhost:11434").rstrip("/")
-    api_key = ""
-    if "ollama.com" in base_url:
-        api_key = get_env_value("OLLAMA_API_KEY") or get_env_value("OLLAMA_CLOUD_API_KEY") or ""
+    if cfg.get("provider") == "ollama_cloud":
+        base_url = "https://ollama.com"
+        api_key = resolve_key("OLLAMA_API_KEY") or resolve_key("OLLAMA_CLOUD_API_KEY") or ""
+    else:
+        base_url = (cfg.get("ollama_base_url") or "http://localhost:11434").rstrip("/")
+        api_key = ""
+        if "ollama.com" in base_url:
+            api_key = resolve_key("OLLAMA_API_KEY") or resolve_key("OLLAMA_CLOUD_API_KEY") or ""
     headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
     with httpx.Client(timeout=3.0) as client:
         r = client.post(f"{base_url}/api/show", json={"name": model}, headers=headers)
@@ -453,12 +464,13 @@ def _openai_shaped_context_length(provider: str, model: str) -> int | None:
     spec (the compaction target is now probe-driven)."""
     import httpx
 
-    from grc_agent.settings import get_env_value, load_settings
+    from grc_agent.settings import get_env_value, load_settings, resolve_key
 
     if provider in _OPENAI_SHAPED_PROVIDER_IDS:
-        url_t, key_var, _headers = _PREFLIGHT_ENDPOINTS[provider]
-        api_key = get_env_value(key_var) or ""
-        url = url_t.format(key=api_key)  # only google carries {key}; no-ops elsewhere
+        url_t, key_var, header_fn = _PREFLIGHT_ENDPOINTS[provider]
+        api_key = resolve_key(key_var) if key_var else None
+        url = url_t.format(key=api_key or "")
+        headers = header_fn(api_key) if (header_fn and api_key) else ({"Authorization": f"Bearer {api_key}"} if api_key else {})
     else:  # openai_compatible — the user's own endpoint
         base = (
             load_settings().get("openai_compatible_base_url")
@@ -466,8 +478,8 @@ def _openai_shaped_context_length(provider: str, model: str) -> int | None:
             or "http://localhost:8080/v1"
         ).rstrip("/")
         url = _models_url(base)
-        api_key = get_env_value("OPENAI_COMPATIBLE_API_KEY") or ""
-    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+        api_key = resolve_key("OPENAI_COMPATIBLE_API_KEY")
+        headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
     with httpx.Client(timeout=3.0) as client:
         r = client.get(url, headers=headers)
     if r.status_code != 200:
@@ -611,30 +623,7 @@ class TranscriptPreservingTieredCompaction(TieredCompaction):
         return processed
 
 
-def _build_tool_output_limits() -> ToolOutputLimits:
-    """Spill oversized tool returns losslessly instead of flooding context.
 
-    Default band (one uniform rule, no per-tool folklore): any return over
-    20k characters is persisted whole and replaced with a handle + preview;
-    the model reads slices back on demand via the registered
-    ``read_tool_result`` tool. ``then=Truncate()`` covers the case where the
-    spill store itself errors (bounded, never a hard failure).
-
-    The spill store is rooted next to the chat DB under ``.grc_agent/``
-    (0700, same per-user data area as the DB itself) rather than the
-    library default under /tmp — spills must survive restarts to be
-    readable from a later session, and a shared tmpfs is the wrong place
-    for agent data. ``cleanup_after`` is deliberately unset: the whole
-    point is that a handle stays readable for as long as the session lives.
-    """
-    return ToolOutputLimits(
-        # One uniform band, sized by measured tool outputs: a 23-block graph
-        # inspection is ~20k chars, so 10k (the library default) would spill
-        # routine inspections; 20k chars (~5k tokens, ~2% of a 262k window)
-        # keeps typical results inline and still bounds the 100KB flood case.
-        bands=[Band(over=20_000, action=Spill(then=Truncate()))],
-        store=LocalFileStore(base_dir=get_db_path().parent / "tool_overflow"),
-    )
 
 
 def _build_compaction_capability(
@@ -814,10 +803,6 @@ def build_agents_from_cfg(cfg: dict) -> AgentBundle:
                 agent_name="grc_executor",
                 metadata=persistence_metadata,
             ),
-            ConversationSearch(
-                SnapshotHistorySource(get_step_store()),
-                scope="conversation",
-            ),
             SystemReminders(dynamic_reminders=[_execution_plan_reminder]),
             _build_compaction_capability(cfg, agent_name="grc_executor"),
             web_search_cap,
@@ -825,7 +810,6 @@ def build_agents_from_cfg(cfg: dict) -> AgentBundle:
             GrcFileSystem(),
             GrcShell(),
             prompt_injection_cap,
-            _build_tool_output_limits(),
         ],
         model_settings=model_settings,
         retries={"tools": 3, "output": 3},
@@ -845,10 +829,6 @@ def build_agents_from_cfg(cfg: dict) -> AgentBundle:
                 store=get_step_store(),
                 agent_name="grc_planner",
                 metadata=persistence_metadata,
-            ),
-            ConversationSearch(
-                SnapshotHistorySource(get_step_store()),
-                scope="conversation",
             ),
             Planning(
                 store_resolver=_plan_store_resolver,
@@ -870,7 +850,6 @@ def build_agents_from_cfg(cfg: dict) -> AgentBundle:
             web_fetch_cap,
             GrcFileSystem(),
             prompt_injection_cap,
-            _build_tool_output_limits(),
             PrepareTools(_prepare_planner_tools),
         ],
         model_settings=model_settings,

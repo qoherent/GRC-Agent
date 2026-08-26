@@ -40,6 +40,7 @@ denylist, not by forecasting command names. ``GRC_SHELL_DENIED_COMMANDS``
 from __future__ import annotations
 
 import logging
+import asyncio
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -49,7 +50,7 @@ from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.tools import AgentDepsT
 from pydantic_ai_harness.shell import LLM_API_KEY_ENV_PATTERNS
 from pydantic_ai_harness.shell._capability import _DEFAULT_DENIED_COMMANDS
-from pydantic_ai_harness.shell._toolset import ShellToolset
+from pydantic_ai_harness.shell._toolset import ShellToolset, _recoverable
 
 from grc_agent.fs_tools import (
     _NO_ACTIVE_GRAPH_MSG,
@@ -158,9 +159,11 @@ class GrcShellToolset(ShellToolset[AgentDepsT]):
         allow_interactive: bool = False,
         env: dict[str, str] | None = None,
         denied_env_patterns: Sequence[str] = (),
+        timeout_tasks: dict[str, asyncio.Task[None]] | None = None,
     ) -> None:
         if denied_commands is None:
             denied_commands = list(_DEFAULT_DENIED_COMMANDS)
+        self._timeout_tasks = timeout_tasks if timeout_tasks is not None else {}
         super().__init__(
             cwd=cwd if cwd is not None else _UNSAVED_CWD,
             allowed_commands=list(allowed_commands),
@@ -181,22 +184,58 @@ class GrcShellToolset(ShellToolset[AgentDepsT]):
         # instance, which flows through this same constructor.
         self._apply_exec_approval()
 
+    @_recoverable
+    async def start_command(
+        self,
+        command: str,
+        timeout_seconds: float | None = None,
+    ) -> str:
+        """Start a long-running command in the background (e.g. captures, servers).
+
+        Do not use this to run the active flowgraph — use run_flowgraph instead.
+
+        Args:
+            command: The shell command to run in the background.
+            timeout_seconds: Optional maximum seconds to keep running before auto-stopping.
+        """
+        res = await super().start_command(command)
+        if timeout_seconds is not None and timeout_seconds > 0 and "ID: " in res:
+            cmd_id = res.split("ID: ")[1].strip().splitlines()[0]
+
+            async def _auto_stop() -> None:
+                try:
+                    await asyncio.sleep(timeout_seconds)
+                    if cmd_id in self._background:
+                        await self.stop_command(cmd_id)
+                except asyncio.CancelledError:
+                    pass
+                finally:
+                    self._timeout_tasks.pop(cmd_id, None)
+
+            task = asyncio.create_task(_auto_stop())
+            self._timeout_tasks[cmd_id] = task
+        return res
+
+    @_recoverable
+    async def stop_command(self, command_id: str) -> str:
+        """Stop a running background command started with start_command by its command ID."""
+        task = self._timeout_tasks.pop(command_id, None)
+        if task and not task.done():
+            task.cancel()
+        return await super().stop_command(command_id)
+
     def _apply_exec_approval(self) -> None:
-        for name in _EXEC_TOOL_NAMES:
+        for name in ("run_command", "start_command", "check_command", "stop_command"):
             tool = self.tools.get(name)
             if tool is not None:
-                tool.requires_approval = True
+                if name in _EXEC_TOOL_NAMES:
+                    tool.requires_approval = True
                 if name == "run_command":
                     tool.description = (
                         "Execute a shell command in the project directory (e.g. build toolchains, "
                         "SDR utilities, standalone scripts, data analysis). Do not use this to run the "
                         "active flowgraph — use run_flowgraph so GRC generates the latest code."
                     )
-                    # The harness docstring hardcodes "(default: 30)"; the app's real
-                    # default is GRC_SHELL_TIMEOUT -> 600 (shell_tools.default_timeout).
-                    # Parameter descriptions live in function_schema.json_schema — the
-                    # same dict every tool_def read sees (verified) — so mutating it in
-                    # place corrects what the model is told without touching the schema.
                     props = tool.function_schema.json_schema.setdefault("properties", {})
                     td = props.get("timeout_seconds")
                     if isinstance(td, dict) and "description" in td:
@@ -207,6 +246,19 @@ class GrcShellToolset(ShellToolset[AgentDepsT]):
                     tool.description = (
                         "Start a long-running command in the background (e.g. captures, servers). "
                         "Do not use this to run the active flowgraph — use run_flowgraph instead."
+                    )
+                    props = tool.function_schema.json_schema.setdefault("properties", {})
+                    props["timeout_seconds"] = {
+                        "type": "number",
+                        "description": "Optional maximum duration in seconds before the background process is automatically stopped.",
+                    }
+                elif name == "check_command":
+                    tool.description = (
+                        "Check the status and recent output of a running background command started with start_command."
+                    )
+                elif name == "stop_command":
+                    tool.description = (
+                        "Stop a running background command started with start_command by its command ID."
                     )
 
     # -- dynamic project root (fs_tools._root pattern) ----------------------
@@ -233,6 +285,7 @@ class GrcShellToolset(ShellToolset[AgentDepsT]):
             allow_interactive=self._allow_interactive,
             env=self._env,
             denied_env_patterns=self._denied_env_patterns,
+            timeout_tasks=self._timeout_tasks,
         )
 
     def _check_command(self, command: str) -> None:

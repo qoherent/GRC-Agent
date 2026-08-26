@@ -294,17 +294,17 @@ _DEFAULT_APPROVAL_MODE = "ask"
 
 
 def get_approval_mode() -> str:
-    """Get the persisted flowgraph-change gate ('ask' or 'always').
+    """Get the persisted action approval gate ('ask' or 'always').
 
-    'ask' (default) requires the user to approve every change_graph call;
-    'always' auto-approves without showing the approval card.
+    'ask' (default) requires user approval for physical side effects (change_graph,
+    run_flowgraph, run_command, start_command); 'always' auto-approves all actions.
     """
-    val = get_env_value("GRC_AGENT_APPROVE_CHANGES")
+    val = get_env_value("GRC_AGENT_APPROVE_CHANGES") or os.environ.get("GRC_AGENT_APPROVE_CHANGES")
     return val if val in _VALID_APPROVAL_MODES else _DEFAULT_APPROVAL_MODE
 
 
 def set_approval_mode(mode: str) -> None:
-    """Persist the flowgraph-change gate mode into the `.env` file."""
+    """Persist the action approval gate mode into the `.env` file."""
     if mode in _VALID_APPROVAL_MODES:
         upsert_env_key("GRC_AGENT_APPROVE_CHANGES", mode)
 

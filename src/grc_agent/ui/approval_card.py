@@ -117,8 +117,11 @@ def format_tool_summary(tool_name: str, args: dict[str, Any]) -> str:
     if tool_name == "change_graph":
         return format_change_summary(args)
     if tool_name == "run_flowgraph":
+        action = args.get("action", "start")
+        if action == "stop":
+            return "- Stop the active flowgraph execution (SIGTERM)."
         lines = ["- Run the active flowgraph with GRC's native Execute action."]
-        if args.get("wait"):
+        if args.get("wait", True):
             lines.append(
                 f"- Wait up to `{args.get('timeout_seconds', 60)}s` for completion."
             )

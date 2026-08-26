@@ -44,6 +44,7 @@ def test_approval_mode_settings_helpers(tmp_path, monkeypatch):
     env_file = tmp_path / ".env"
     env_file.write_text("")
     monkeypatch.setenv("GRC_AGENT_ENV", str(env_file))
+    monkeypatch.delenv("GRC_AGENT_APPROVE_CHANGES", raising=False)
     assert get_approval_mode() == "ask"  # default: gate on
     set_approval_mode("always")
     assert get_approval_mode() == "always"
@@ -1489,17 +1490,105 @@ def test_effective_path_unsaved_tab_fallback():
     assert sidebar._get_effective_path() == "untitled:MyUnsavedTab"
 
 
-def test_tool_expander_disables_auto_scroll():
-    """Toggling a tool expander pauses _auto_scroll to prevent jump-scrolling."""
+def test_tool_expander_toggle_keeps_auto_scroll_intent():
+    """Toggling a tool expander must not permanently disable auto-scroll
+    follow. Scroll compensation (see the anchor test below) prevents the
+    jump, and the value-changed tracker is the only authority on
+    stickiness — an expand in an older message must not silently kill
+    follow for the rest of the conversation."""
     from grc_agent.chat_sidebar import ChatSidebar
 
     sidebar = ChatSidebar()
     sidebar._auto_scroll = True
     exp = sidebar._make_tool_expander("inspect_graph")
 
-    # Simulate GTK notify::expanded signal
+    # Simulate GTK notify::expanded signal (unmapped sidebar: no value
+    # changes fire, so the intent flag must be untouched).
     exp.set_expanded(True)
+    assert sidebar._auto_scroll is True
+    exp.set_expanded(False)
+    assert sidebar._auto_scroll is True
+
+
+def test_expander_toggle_anchor_compensation():
+    """Expanding a container above the viewport must not move the visible
+    content: the vadjustment value is compensated by the row's height delta
+    (the same anchoring Polari applies to prepended log entries)."""
+    from gi.repository import Gtk
+
+    from grc_agent.chat_sidebar import ChatSidebar
+
+    sidebar = ChatSidebar()
+    win = Gtk.Window()
+    win.set_default_size(400, 300)
+    win.add(sidebar)
+    # A couple of filler rows, then the expander row ABOVE the parked
+    # viewport position, then bulk content below it.
+    for i in range(2):
+        sidebar._add_message_row(Gtk.Label(label=f"filler {i}\n" * 4))
+    exp = sidebar._make_tool_expander("inspect_graph")
+    sidebar._set_tool_result(exp, "line of tool output\n" * 80)
+    sidebar._add_message_row(exp)
+    for i in range(16):
+        sidebar._add_message_row(Gtk.Label(label=f"below {i}\n" * 4))
+    win.show_all()
+    while Gtk.events_pending():
+        Gtk.main_iteration()
+
+    adj = sidebar._scrolled.get_vadjustment()
+    row = exp.get_ancestor(Gtk.ListBoxRow)
+    assert row is not None and row.get_allocated_height() > 0
+
+    # Park mid-view, well away from the bottom, with the row above the fold.
+    adj.set_value(300.0)
+    value_before = adj.get_value()
+    before = row.get_allocation()
+    assert before.y + before.height <= value_before
+
+    exp.set_expanded(True)
+    while Gtk.events_pending():
+        Gtk.main_iteration()
+
+    after = row.get_allocation()
+    delta = (after.y + after.height) - (before.y + before.height)
+    assert delta > 0  # the row actually grew
+    # The same visible content stays in view: value shifted by the delta.
+    assert abs(adj.get_value() - (value_before + delta)) <= 1.0
+
+
+def test_auto_scroll_intent_tracks_adjustment_value():
+    """_auto_scroll follows the vadjustment value (wheel, drag, keyboard —
+    all sources), not scroll-event delivery."""
+    from gi.repository import Gtk
+
+    from grc_agent.chat_sidebar import ChatSidebar
+
+    sidebar = ChatSidebar()
+    win = Gtk.Window()
+    win.set_default_size(400, 300)
+    win.add(sidebar)
+    for i in range(10):
+        sidebar._add_message_row(Gtk.Label(label=f"msg {i}\n" * 5))
+    win.show_all()
+    while Gtk.events_pending():
+        Gtk.main_iteration()
+
+    adj = sidebar._scrolled.get_vadjustment()
+    assert adj.get_upper() - adj.get_page_size() > 200  # actually scrollable
+
+    # Simulate a scrollbar drag / keyboard scroll: direct value change,
+    # no scroll-event is emitted for these.
+    adj.set_value((adj.get_upper() - adj.get_page_size()) / 2)
     assert sidebar._auto_scroll is False
+    # Content growth alone (upper change, value unchanged) never flips the
+    # intent: streaming appends cannot yank a reader back to the bottom.
+    sidebar._add_message_row(Gtk.Label(label="appended\n" * 10))
+    while Gtk.events_pending():
+        Gtk.main_iteration()
+    assert sidebar._auto_scroll is False
+    # Scrolling back to the bottom re-engages follow.
+    adj.set_value(adj.get_upper() - adj.get_page_size())
+    assert sidebar._auto_scroll is True
 
 
 def test_save_history_deletes_session_resurrected_by_concurrent_clear(monkeypatch):
@@ -1739,6 +1828,7 @@ def test_notify_run_failure_does_not_send_when_busy(monkeypatch):
     # _chat_task is done — verify it was captured but not yet run
     assert "coro" in captured
     sidebar.send_message.assert_not_called()
+    captured["coro"].close()
 
 
 def test_send_fix_when_free_waits_for_in_flight_turn():
@@ -1998,21 +2088,11 @@ def test_badge_render_prose_textview():
     tv = textviews[0]
 
     buffer = tv.get_buffer()
-    # get_text() excludes the child-anchor placeholder entirely — get_slice()
-    # is the one that includes it.
+    tag = buffer.get_tag_table().lookup("block_badge_test_block_x")
+    assert tag is not None
+    assert getattr(tag, "grc_block_name", "") == "test_block_x"
     slice_text = buffer.get_slice(buffer.get_start_iter(), buffer.get_end_iter(), True)
-    assert "￼" in slice_text
-
-    start, end = buffer.get_start_iter(), buffer.get_end_iter()
-    it = start.copy()
-    anchors = []
-    while it.compare(end) < 0:
-        anchor = it.get_child_anchor()
-        if anchor:
-            anchors.append(anchor)
-        if not it.forward_char():
-            break
-    assert len(anchors) == 1
+    assert "test_block_x" in slice_text
 
 
 def test_badge_only_paragraph_not_dropped():
@@ -3041,7 +3121,7 @@ def test_markdown_list_hanging_indent_and_anchor_coverage():
     content = buf.get_slice(buf.get_start_iter(), buf.get_end_iter(), True)
     expected = (
         "Sinks\n"
-        "• \ufffc (qtgui_time_sink_x, 2 connections) — shows the input carrier and output.\n"
+        "• time_sink (qtgui_time_sink_x, 2 connections) — shows the input carrier and output.\n"
         "• const_sink — constellation display.\n"
         "Notes\n"
         "• The PLL's lock range comfortably brackets the carrier, so it should lock cleanly.\n"
@@ -3277,56 +3357,141 @@ def test_always_allow_command_resolves_matching_pending_futures():
     assert get_approval_mode() in ("ask", "always")  # unchanged by this click
 
 
-def test_block_badge_anchored_text_aligns_with_prose_baseline():
-    """GTK3 child-anchor widgets stretch to the full line box and center
-    their child, so an un-padded badge's label text rides ~4px above the
-    sentence baseline — the 'superscript' look. The anchored badge's padded
-    inner box must bring the label text onto the baseline; the table-cell
-    badge (anchored=False) keeps the old centered look. Numeric regression
-    test, not an eyeball check: the label center is measured against the
-    TextView's own font baseline."""
+def test_block_badge_prose_text_aligns_with_baseline():
+    """Prose block badges rendered with native TextTags are perfectly aligned
+    with the surrounding sentence baseline (0px vertical offset). Table cells
+    use BlockBadge pills for interactive box containers."""
+    from unittest.mock import MagicMock
     from gi.repository import Gtk
 
     from grc_agent.ui.block_badge import BlockBadge
     from grc_agent.ui.css import apply_css
+    from grc_agent.ui.markdown_view import MarkdownView
 
-    apply_css()  # the app's real rules (incl. .chat-block-badge-anchored)
+    apply_css()
 
-    def measure(anchored):
-        win = Gtk.Window()
-        tv = Gtk.TextView()
-        buf = tv.get_buffer()
-        buf.set_text("The ")
-        anchor = buf.create_child_anchor(buf.get_end_iter())
-        buf.insert(buf.get_end_iter(), " variable")
-        pill = BlockBadge("data_source", lambda: None, anchored=anchored)
-        tv.add_child_at_anchor(pill, anchor)
-        pill.show_all()
-        win.add(tv)
-        win.set_default_size(420, 90)
-        win.show_all()
-        win.realize()
-        for _ in range(20):
-            Gtk.main_iteration_do(False)
-        rect = tv.get_iter_location(buf.get_iter_at_offset(4))
-        pctx = tv.get_pango_context()
-        font = tv.get_style_context().get_font(Gtk.StateFlags.NORMAL)
-        metrics = pctx.get_metrics(font)
-        baseline = rect.y + metrics.get_ascent() / 1024.0
-        lbl = pill.get_child().get_children()[0] if anchored else pill.get_child()
-        la = lbl.get_allocation()
-        center = la.y + la.height / 2.0
-        font_size = font.get_size() / 1024.0
-        text_center = baseline - font_size * 0.25  # ~x-height/2 above baseline
-        win.destroy()
-        return center - text_center
+    mock_cm = MagicMock()
+    mock_fg = MagicMock()
+    mock_block = MagicMock()
+    mock_block.name = "data_source"
+    mock_fg.blocks = [mock_block]
+    mock_cm.current_flow_graph = mock_fg
 
-    anchored_delta = measure(True)
-    plain_delta = measure(False)
-    assert abs(anchored_delta) <= 2.0, (
-        f"anchored badge text off the prose baseline by {anchored_delta:+.1f}px"
+    listbox = Gtk.ListBox()
+    md = MarkdownView(listbox, lambda: mock_cm)
+    box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+    md.render(box, "The `data_source` block generates samples.")
+
+    textviews = [
+        c.get_child()
+        for c in box.get_children()
+        if isinstance(c, Gtk.ScrolledWindow) and isinstance(c.get_child(), Gtk.TextView)
+    ]
+    assert len(textviews) == 1
+    tv = textviews[0]
+    buf = tv.get_buffer()
+
+    # Verify block tag was created and applied to data_source
+    tag = buf.get_tag_table().lookup("block_badge_data_source")
+    assert tag is not None
+    assert getattr(tag, "grc_block_name", "") == "data_source"
+
+    win = Gtk.Window()
+    win.add(box)
+    win.set_default_size(420, 90)
+    win.show_all()
+    win.realize()
+    for _ in range(20):
+        Gtk.main_iteration_do(False)
+
+    rect_the = tv.get_iter_location(buf.get_iter_at_offset(0))
+    rect_badge = tv.get_iter_location(buf.get_iter_at_offset(5))
+    rect_block = tv.get_iter_location(buf.get_iter_at_offset(18))
+
+    win.destroy()
+
+    assert rect_the.y == rect_badge.y == rect_block.y, (
+        f"Badge text y={rect_badge.y} not on sentence y={rect_the.y}"
     )
-    assert plain_delta <= -2.0, (
-        f"plain badge no longer superscript ({plain_delta:+.1f}px) — "
-        "the anchor-stretch mechanism changed?"
+
+    # Verify BlockBadge widget for table cells
+    pill = BlockBadge("data_source", lambda: mock_cm)
+    assert pill.name == "data_source"
+
+
+def test_request_approvals_always_mode(tmp_path, monkeypatch):
+    """In 'always' approval mode, _request_approvals auto-approves immediately without UI."""
+    import asyncio
+    from unittest.mock import MagicMock
+    from pydantic_ai.messages import ToolCallPart
+    from pydantic_ai.tools import DeferredToolRequests, ToolApproved
+    from grc_agent.chat_sidebar import ChatSidebar
+
+    monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
+    monkeypatch.setenv("GRC_AGENT_APPROVE_CHANGES", "always")
+
+    async def _test():
+        sidebar = ChatSidebar()
+        call = ToolCallPart("change_graph", {"reason": "test edit"}, tool_call_id="call_123")
+        output = DeferredToolRequests(approvals=[call])
+
+        ctx = MagicMock()
+        results = await sidebar._request_approvals(ctx, output)
+        assert "call_123" in results.approvals
+        assert isinstance(results.approvals["call_123"], ToolApproved)
+
+    asyncio.run(_test())
+
+
+def test_confirm_yes_no_non_blocking(tmp_path, monkeypatch):
+    """_confirm_yes_no must use non-blocking signals and fire callback on response."""
+    from gi.repository import Gtk
+    from grc_agent.chat_sidebar import ChatSidebar
+
+    monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
+    sidebar = ChatSidebar()
+
+    cb_results = []
+    sidebar._confirm_yes_no(
+        None,
+        title="Test Title",
+        body="Test Body",
+        on_response=lambda res: cb_results.append(res),
     )
+    assert sidebar._open_dialog is not None
+    # Simulate user clicking YES
+    sidebar._open_dialog.response(Gtk.ResponseType.YES)
+    assert cb_results == [True]
+    assert sidebar._open_dialog is None
+
+
+def test_send_fix_when_free_waits_for_idle(tmp_path, monkeypatch):
+    """_send_fix_when_free must wait for _idle_event before dispatching fix."""
+    import asyncio
+    from unittest.mock import MagicMock
+    from grc_agent.chat_sidebar import ChatSidebar
+
+    monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
+
+    async def _test_flow():
+        sidebar = ChatSidebar()
+        proxy = MagicMock()
+        proxy._canvas_manager.current_page = "page1"
+        sidebar.set_flowgraph_proxy(proxy)
+        dispatched = []
+        sidebar.send_message = lambda text: dispatched.append(text) or True
+
+        # Mark sidebar busy
+        sidebar._set_busy(True)
+        assert not sidebar._idle_event.is_set()
+
+        task = asyncio.create_task(sidebar._send_fix_when_free("Fix prompt", "page1"))
+        # Yield control so task runs up to await _idle_event.wait()
+        for _ in range(5):
+            await asyncio.sleep(0.01)
+        assert len(dispatched) == 0  # not yet dispatched while busy
+        sidebar._set_busy(False)  # set idle
+        await task
+        assert dispatched == ["Fix prompt"]
+
+    asyncio.run(_test_flow())

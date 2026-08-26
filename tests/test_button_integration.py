@@ -17,6 +17,7 @@ from typing import Any
 import pytest
 from dotenv import load_dotenv
 from pydantic_ai import Agent, ModelSettings
+from pydantic_ai.tools import DeferredToolRequests, DeferredToolResults, ToolApproved
 
 from grc_agent.settings import env_path
 
@@ -60,7 +61,7 @@ def _build_cloud_agent(fixture: str):
     agent = Agent(
         model,
         deps_type=Any,
-        output_type=[GrcAgentResponse, str],
+        output_type=[GrcAgentResponse, str, DeferredToolRequests],
         name="grc_button_integration_test",
         instructions=build_system_prompt("pai-button-test"),
         tools=grc_tools(),
@@ -201,6 +202,14 @@ def test_agent_modifies_graph_via_chat():
             "Add a variable block named 'center_freq' with value 2400000000.",
             deps=fg,
         )
+        if isinstance(res.output, DeferredToolRequests):
+            res = agent.run_sync(
+                message_history=res.all_messages(),
+                deferred_tool_results=DeferredToolResults(
+                    approvals={c.tool_call_id: ToolApproved() for c in res.output.approvals}
+                ),
+                deps=fg,
+            )
         assert res.output is not None
         names = {b.name for b in fg.blocks}
         assert "center_freq" in names, f"center_freq not in graph. Blocks: {names}"

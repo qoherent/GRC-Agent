@@ -121,9 +121,11 @@ from .ui.welcome_view import WelcomeView
 
 _log = logging.getLogger(__name__)
 
-# When auto-scrolling incrementally (streaming / appended rows), only stick to
-# the bottom if the user is already within this many pixels of it — so a user
-# scrolled up to read earlier messages isn't yanked back down on every token.
+# Stick-to-bottom re-engagement distance: once the user scrolls back to
+# within this many pixels of the bottom, following resumes. Computed on every
+# vadjustment value-changed (wheel, scrollbar drag, keyboard, touch — every
+# scroll source changes the value), so a user scrolled up to read earlier
+# messages is never yanked back down on new content.
 _SCROLL_STICK_THRESHOLD = 80
 
 # Minimum interval between visible-text UI flushes. Stream chunks accumulate
@@ -692,13 +694,12 @@ class ChatSidebar(Gtk.Box):
         # Model-wait elapsed indicator state (status bar right edge).
         self._wait_timer_id: int | None = None
         self._wait_started: float = 0.0
-        # Auto-scroll tracking: True by default (follow new content). Cleared
-        # by a user-initiated scroll-up (scroll-event signal), re-enabled when
-        # the user scrolls back near the bottom or sends a new message. Replaces
-        # the old position-based stickiness check which death-spiraled during
-        # streaming: once a scroll was skipped (>80px from bottom), the gap
-        # only grew as more content arrived, so ALL subsequent scrolls were
-        # skipped until the agent finished.
+        # Auto-scroll tracking: True by default (follow new content). The only
+        # authority on this flag is _on_scroll_value_changed, recomputed from
+        # the scroll position on every vadjustment value-changed — every user
+        # scroll source (wheel, scrollbar drag, keyboard, touch) changes the
+        # value, while content growth does not (value-changed only fires for
+        # the value property), so streaming appends cannot corrupt the intent.
         self._auto_scroll: bool = True
         self._flowgraph_proxy: object | None = None
         # MarkdownView (created in __init__ after the message list exists) owns
@@ -715,6 +716,8 @@ class ChatSidebar(Gtk.Box):
         self._active_session_id: int | None = None
         self._loading_session_id: int | None = None
         self._busy = False
+        self._idle_event = asyncio.Event()
+        self._idle_event.set()
         # Bumped on every global Clear History. _save_history captures it before
         # dispatching its (uncancellable) worker-thread save; if a clear lands
         # while that save is in flight, the saved row is removed so a cleared
@@ -846,12 +849,18 @@ class ChatSidebar(Gtk.Box):
         if self._project_directory and self._project_directory.is_dir():
             dialog.set_current_folder(str(self._project_directory))
 
-        response = dialog.run()
-        if response == Gtk.ResponseType.OK:
-            selected = dialog.get_filename()
-            if selected:
-                self.set_project_directory(selected)
-        dialog.destroy()
+        self._open_dialog = dialog
+
+        def _on_response(_dlg: Gtk.Dialog, response: int) -> None:
+            self._open_dialog = None
+            if response == Gtk.ResponseType.OK:
+                selected = dialog.get_filename()
+                if selected:
+                    self.set_project_directory(selected)
+            dialog.destroy()
+
+        dialog.connect("response", _on_response)
+        dialog.show()
 
     def get_project_directory(self) -> Path | None:
         """The currently selected project directory."""
@@ -949,12 +958,16 @@ class ChatSidebar(Gtk.Box):
         self._scrolled.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
         self._scrolled.set_vexpand(True)
         self._scrolled.add(self._listbox)
-        # Track user scroll intent: if the user scrolls UP to read, stop
-        # auto-scrolling so they're not yanked back down. When they scroll
-        # back near the bottom, resume auto-scroll. This is the standard
-        # terminal/chat-scroll pattern and replaces the position-based
-        # stickiness check that death-spiraled during streaming.
-        self._scrolled.connect("scroll-event", self._on_user_scroll)
+        # Track user scroll intent on the vadjustment itself: every scroll
+        # source (wheel, scrollbar drag, keyboard, kinetic/touch) changes the
+        # adjustment value, while content growth only touches upper/page-size
+        # (the `changed` signal). The old `scroll-event` handler covered wheel
+        # events only — dragging the scrollbar or scrolling with the keyboard
+        # left _auto_scroll stale, so reading upstream content got yanked back
+        # to the bottom on the next streaming flush.
+        self._scrolled.get_vadjustment().connect(
+            "value-changed", self._on_scroll_value_changed
+        )
 
         content.pack_start(self._scrolled, True, True, 0)
 
@@ -1793,6 +1806,8 @@ class ChatSidebar(Gtk.Box):
                 box = self._start_agent_message()
                 self._render_last_message_rich(box, message)
         self._update_context_label()
+        self._scrolled.check_resize()
+        self._scroll_to_bottom()
 
     def _render_welcome_screen(self) -> None:
         """Delegates to WelcomeView (welcome card + recent sessions)."""
@@ -2191,6 +2206,7 @@ class ChatSidebar(Gtk.Box):
         ctx.think_expander = None
         ctx.think_acc.clear()
         ctx.think_dirty = False
+        self._scrolled.check_resize()
 
     def _ensure_text(self, ctx: _StreamCtx) -> Gtk.TextView:
         if ctx.text_lbl is None:
@@ -2248,12 +2264,7 @@ class ChatSidebar(Gtk.Box):
         exp.get_style_context().add_class("chat-thinking-expander")
         exp.set_hexpand(True)
         exp.set_halign(Gtk.Align.FILL)
-
-        def _on_expander_toggled(expander: Gtk.Expander, _pspec: Any) -> None:
-            if expander.get_expanded():
-                self._auto_scroll = False
-
-        exp.connect("notify::expanded", _on_expander_toggled)
+        exp.connect("notify::expanded", self._on_expander_toggled)
 
         sw = Gtk.ScrolledWindow()
         sw.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
@@ -2275,7 +2286,7 @@ class ChatSidebar(Gtk.Box):
     def _ensure_thinking(self, ctx: _StreamCtx) -> Any:
         if ctx.think_body is None:
             exp, tv = self._make_thinking_widget(label="Thinking...")
-            ctx.box.pack_start(exp, True, True, 0)
+            ctx.box.pack_start(exp, False, False, 0)
             exp.show_all()
             ctx.think_expander = exp
             ctx.think_body = tv
@@ -2305,7 +2316,12 @@ class ChatSidebar(Gtk.Box):
             if btn.get_label():
                 btn.set_label("Copied")
 
+            if hasattr(btn, "_copy_timeout_id") and btn._copy_timeout_id is not None:
+                GLib.source_remove(btn._copy_timeout_id)
+                btn._copy_timeout_id = None
+
             def _revert() -> bool:
+                btn._copy_timeout_id = None
                 try:
                     img = btn.get_image()
                     if isinstance(img, Gtk.Image):
@@ -2317,8 +2333,15 @@ class ChatSidebar(Gtk.Box):
                     pass
                 return False
 
-            tid = GLib.timeout_add(1500, _revert)
-            btn.connect("destroy", lambda *_: GLib.source_remove(tid))
+            btn._copy_timeout_id = GLib.timeout_add(1500, _revert)
+            if not getattr(btn, "_destroy_handler_set", False):
+                btn._destroy_handler_set = True
+                btn.connect(
+                    "destroy",
+                    lambda b: GLib.source_remove(b._copy_timeout_id)
+                    if getattr(b, "_copy_timeout_id", None)
+                    else None,
+                )
 
     def _update_copy_text(self, box: Gtk.Box, text: Any) -> None:
         btn = getattr(box, "_grc_copy_btn", None)
@@ -2498,7 +2521,7 @@ class ChatSidebar(Gtk.Box):
                 full_text += part.content
             elif isinstance(part, ThinkingPart):
                 exp, _tv = self._make_thinking_widget(part.content, label="Thought")
-                box.pack_start(exp, True, True, 0)
+                box.pack_start(exp, False, False, 0)
                 exp.show_all()
                 full_text += f"<Thinking>\n{part.content}\n</Thinking>\n"
             elif isinstance(part, ToolCallPart | NativeToolCallPart):
@@ -2543,27 +2566,10 @@ class ChatSidebar(Gtk.Box):
                 box.pack_start(exp, False, False, 0)
                 exp.show_all()
 
-        action_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=2)
-        action_row.set_halign(Gtk.Align.END)
-        action_row.get_style_context().add_class("chat-msg-actions")
-
-        copy_btn = Gtk.Button()
-        copy_icon = Gtk.Image.new_from_icon_name("edit-copy-symbolic", Gtk.IconSize.MENU)
-        copy_btn.set_image(copy_icon)
-        copy_btn.set_always_show_image(True)
-        copy_btn.set_focus_on_click(False)
-        copy_btn.set_tooltip_text("Copy message")
-        copy_btn.get_accessible().set_name("Copy message")
-        copy_btn.get_style_context().add_class("chat-copy-btn")
-        copy_btn._grc_copy_text = full_text
-        copy_btn.connect(
-            "clicked", lambda b: self._copy_to_clipboard(getattr(b, "_grc_copy_text", ""), b)
-        )
-        action_row.pack_start(copy_btn, False, False, 0)
-        box.pack_end(action_row, False, False, 0)
-        box._grc_copy_btn = copy_btn
-        box._grc_action_row = action_row
+        if hasattr(box, "_grc_copy_btn") and box._grc_copy_btn is not None:
+            box._grc_copy_btn._grc_copy_text = full_text
         box.show_all()
+        self._scrolled.check_resize()
 
         parent = box.get_parent()
         if parent and hasattr(parent, "_grc_copy_btn"):
@@ -2684,11 +2690,13 @@ class ChatSidebar(Gtk.Box):
         row.set_margin_bottom(2)
         self._listbox.add(row)
         row.show_all()
-        # Force scroll on every new row (user message, agent bubble) so the
-        # user always sees what was just added.
-        # The _auto_scroll flag handles the "user scrolled up to read" case
-        # during streaming — but for a new row, we always want to show it.
-        self._scroll_to_bottom(force=True)
+        self._scrolled.check_resize()
+        # New rows follow only when the user is pinned to the bottom — the
+        # same stickiness rule as streaming. Forcing a scroll here yanked a
+        # user reading earlier content to the bottom on every tool expander
+        # and error label appended mid-turn. Sending a message re-engages
+        # _auto_scroll explicitly in send_message() before the row is added.
+        self._scroll_to_bottom()
         return row
 
     def _make_final_summary_widget(self, actions: list[str], explanation: str) -> Gtk.Box:
@@ -2734,11 +2742,7 @@ class ChatSidebar(Gtk.Box):
         exp.get_style_context().add_class("chat-tool-expander")
         exp.set_hexpand(True)
         exp.set_halign(Gtk.Align.FILL)
-
-        def _on_tool_expander_toggled(_exp: Gtk.Expander, _pspec: Any) -> None:
-            self._auto_scroll = False
-
-        exp.connect("notify::expanded", _on_tool_expander_toggled)
+        exp.connect("notify::expanded", self._on_expander_toggled)
 
         body = Gtk.Label(label="")
         body.set_line_wrap(True)
@@ -2813,15 +2817,17 @@ class ChatSidebar(Gtk.Box):
         on the wrong target — same one-rule shape as _run_agent_turn's
         ``origin_page`` guard.
         """
-        if self._chat_task and not self._chat_task.done():
-            await asyncio.gather(self._chat_task, return_exceptions=True)
+        while self._busy:
+            await self._idle_event.wait()
         if self.current_page is not origin_page:
             self.set_status(
                 "Auto-fix cancelled \u2014 you switched flowgraphs. Re-open the failed flowgraph and try again.",
                 error=True,
             )
             return
-        self.send_message(text)
+        if not self.send_message(text):
+            _log.warning("Failed to dispatch auto-fix message despite idle event")
+            self.set_status("Flowgraph run failed. Check console or send message to diagnose.", error=True)
 
     def _on_entry_key_press(self, _widget: Any, event: Gdk.EventKey) -> bool:
         if event.keyval == Gdk.KEY_Escape:
@@ -3270,6 +3276,11 @@ class ChatSidebar(Gtk.Box):
 
     def _set_busy(self, busy: bool) -> None:
         self._busy = busy
+        if hasattr(self, "_idle_event"):
+            if busy:
+                self._idle_event.clear()
+            else:
+                self._idle_event.set()
         can_type = self._flowgraph_proxy is not None
         self._gear_btn.set_sensitive(not busy)
         self._new_session_btn.set_sensitive(not busy)
@@ -3304,34 +3315,59 @@ class ChatSidebar(Gtk.Box):
                 if focus in (None, self._entry.tv, self._send_btn):
                     self._entry.grab_focus()
 
-    def _on_user_scroll(self, _sw: Gtk.ScrolledWindow, event: Gdk.EventScroll) -> bool:
-        """Track user scroll intent. If the user scrolls UP, stop auto-scrolling
-        so they can read without being yanked. If they scroll back DOWN to near
-        the bottom, resume auto-scroll. Returns False so the scroll event
-        propagates normally."""
-        direction = event.direction
-        if direction == Gdk.ScrollDirection.UP:
-            self._auto_scroll = False
-        elif direction == Gdk.ScrollDirection.DOWN:
-            adj = self._scrolled.get_vadjustment()
-            near_bottom = (
-                adj.get_upper() - adj.get_page_size() - adj.get_value()
-            ) <= _SCROLL_STICK_THRESHOLD
-            if near_bottom:
-                self._auto_scroll = True
-        elif direction == Gdk.ScrollDirection.SMOOTH:
-            # Touchpad smooth-scroll: delta_y < 0 = up, > 0 = down
-            _, _, delta_y = event.get_scroll_deltas()
-            if delta_y < 0:
-                self._auto_scroll = False
-            elif delta_y > 0:
-                adj = self._scrolled.get_vadjustment()
-                near_bottom = (
-                    adj.get_upper() - adj.get_page_size() - adj.get_value()
-                ) <= _SCROLL_STICK_THRESHOLD
-                if near_bottom:
-                    self._auto_scroll = True
-        return False
+    def _on_scroll_value_changed(self, adj: Gtk.Adjustment) -> None:
+        """Recompute stick-to-bottom intent from the scroll position.
+
+        The single authority on ``_auto_scroll``. Connected to the
+        vadjustment's ``value-changed`` so every user-driven scroll source
+        (wheel, scrollbar drag, keyboard, touch/kinetic) is handled by one
+        uniform rule — the previous ``scroll-event`` handler missed scrollbar
+        drags and keyboard scrolling entirely, so a user reading upstream
+        content was yanked back to the bottom on the next streaming flush.
+        Content growth never fires ``value-changed`` (only ``changed``), so
+        streaming appends cannot corrupt the intent flag.
+        """
+        near_bottom = (
+            adj.get_upper() - adj.get_page_size() - adj.get_value()
+        ) <= _SCROLL_STICK_THRESHOLD
+        self._auto_scroll = near_bottom
+
+    def _on_expander_toggled(self, exp: Gtk.Expander, _pspec: Any) -> None:
+        """Shared ``notify::expanded`` handler for thinking/tool expanders.
+
+        GTK keeps the viewport anchored to the adjustment *value*, so a row
+        growing above the fold pushes all visible content down and the view
+        jumps ("expands and the chat scrolls somewhere else"). Compensate by
+        shifting the value by the row's bottom-edge delta so the visible
+        content stays anchored — the same compensation Polari applies when
+        older log entries are prepended above the viewport. Growth at/below
+        the fold extends downward and needs no compensation.
+
+        The re-layout must come from the ScrolledWindow: the ListBox's own
+        ``check_resize`` compares requisition vs its (viewport-fixed)
+        allocation and only queues a resize, so rows never re-allocate there;
+        ``self._scrolled.check_resize()`` re-allocates the scrollable child
+        synchronously, which is also what makes the post-toggle allocation
+        read below valid.
+        """
+        row = exp.get_ancestor(Gtk.ListBoxRow)
+        adj = self._scrolled.get_vadjustment() if self._scrolled is not None else None
+        if row is not None and adj is not None and row.get_allocated_height() > 0:
+            before = row.get_allocation()
+            value_before = adj.get_value()
+            self._scrolled.check_resize()
+            after = row.get_allocation()
+            delta = (after.y + after.height) - (before.y + before.height)
+            # A row ending at/above the viewport top shifts the visible
+            # content when it grows; anything at/below it extends downward.
+            if delta != 0 and before.y + before.height <= value_before:
+                adj.set_value(value_before + delta)
+        else:
+            self._scrolled.check_resize()
+        if exp.get_expanded():
+            # Reveal the expanded content for users pinned to the bottom;
+            # everyone else keeps their position (gated by _auto_scroll).
+            self._scroll_to_bottom()
 
     def _scroll_to_bottom(self, *, force: bool = False) -> None:
         def _do_scroll():
@@ -3341,8 +3377,9 @@ class ChatSidebar(Gtk.Box):
             adj = sw.get_vadjustment()
             # Skip if the user scrolled up to read (unless explicitly forced,
             # e.g. after a full rebuild or message send). The _auto_scroll flag
-            # is set by _on_user_scroll's scroll-event handler — not inferred
-            # from the adjustment position, which death-spiraled during
+            # is recomputed by _on_scroll_value_changed on every vadjustment
+            # value-changed — not inferred here from the adjustment position,
+            # which death-spiraled during
             # streaming (content grew >80px between flushes → every subsequent
             # scroll was skipped → gap only grew).
             if not force and not self._auto_scroll:
@@ -3426,58 +3463,69 @@ class ChatSidebar(Gtk.Box):
         #    save proceeds, and the live-swap still happens.
         self.set_status(f"Checking {provider_label}\u2026")
         reach_err, model_warn = probe_backend(provider, key_val, base_url, model)
-        if reach_err and not self._confirm_unreachable(
-            provider, reach_err, toplevel, base_url=base_url
-        ):
-            self.set_status("Settings not saved — provider unreachable.", error=True)
-            return
-        if model_warn:
-            self.set_status(model_warn, error=True)
 
-        # 2. Persist to .env synchronously — tests assert on load_settings()
-        #    immediately after emitting the response signal.
-        try:
-            self._persist_settings(
-                provider, model, key_var, key_val, base_url, embed_backend, theme=theme
+        def _finish_save() -> None:
+            if model_warn:
+                self.set_status(model_warn, error=True)
+
+            # 2. Persist to .env synchronously — tests assert on load_settings()
+            #    immediately after emitting the response signal.
+            try:
+                self._persist_settings(
+                    provider, model, key_var, key_val, base_url, embed_backend, theme=theme
+                )
+                apply_theme(theme)
+                self._render_history()
+            except Exception as e:
+                _log.exception("Failed to save settings")
+                self.set_status(f"Settings not saved ({e}).", error=True)
+                return
+
+            # 3. Live-swap the running Agent in-place. Dispatched async so the
+            #    gbulb loop stays responsive during model construction (which
+            #    spins up an httpx client and pydantic-ai Agent). The history is
+            #    kept verbatim — ModelMessage objects are provider-agnostic.
+            warn_suffix = f" ⚠ {model_warn}" if model_warn else ""
+            if self._rebuild_agent is None:
+                self.set_status(
+                    f"Settings saved. Restart to apply.{warn_suffix}", error=bool(model_warn)
+                )
+                return
+            try:
+                agents = self._rebuild_agent()
+            except Exception as e:
+                _log.exception("Live-swap rebuild failed")
+                self.set_status(f"Settings saved but live-swap failed: {e}", error=True)
+                return
+            self.set_agents(
+                agents.executor,
+                agents.planner,
+                model_error=agents.model_build_error,
             )
-            apply_theme(theme)
-            self._render_history()
-        except Exception as e:
-            _log.exception("Failed to save settings")
-            self.set_status(f"Settings not saved ({e}).", error=True)
+            if agents.model_build_error:
+                self.set_status(
+                    f"Switched with warning ({agents.model_build_error}). Running on defaults.",
+                    error=True,
+                )
+            else:
+                self.set_status(
+                    f"Switched to {provider_label} \u00b7 {model}.{warn_suffix}",
+                    error=bool(model_warn),
+                )
+
+        if reach_err:
+            def _on_confirm(save_anyway: bool) -> None:
+                if not save_anyway:
+                    self.set_status("Settings not saved — provider unreachable.", error=True)
+                    return
+                _finish_save()
+
+            self._confirm_unreachable(
+                provider, reach_err, toplevel, base_url=base_url, on_confirm=_on_confirm
+            )
             return
 
-        # 3. Live-swap the running Agent in-place. Dispatched async so the
-        #    gbulb loop stays responsive during model construction (which
-        #    spins up an httpx client and pydantic-ai Agent). The history is
-        #    kept verbatim — ModelMessage objects are provider-agnostic.
-        warn_suffix = f" ⚠ {model_warn}" if model_warn else ""
-        if self._rebuild_agent is None:
-            self.set_status(
-                f"Settings saved. Restart to apply.{warn_suffix}", error=bool(model_warn)
-            )
-            return
-        try:
-            agents = self._rebuild_agent()
-        except Exception as e:
-            _log.exception("Live-swap rebuild failed")
-            self.set_status(f"Settings saved but live-swap failed: {e}", error=True)
-            return
-        self.set_agents(
-            agents.executor,
-            agents.planner,
-            model_error=agents.model_build_error,
-        )
-        if agents.model_build_error:
-            self.set_status(
-                f"Switched with warning ({agents.model_build_error}). Running on defaults.",
-                error=True,
-            )
-        else:
-            self.set_status(
-                f"Switched to {provider_label} \u00b7 {model}.{warn_suffix}",
-                error=bool(model_warn),
-            )
+        _finish_save()
 
     def _confirm_unreachable(
         self,
@@ -3486,10 +3534,9 @@ class ChatSidebar(Gtk.Box):
         toplevel: Gtk.Window | None,
         *,
         base_url: str = "http://localhost:11434",
-    ) -> bool:
-        """Modal Yes/No confirm when the preflight ping fails. Returns True
-        if the user wants to save anyway. Anchors the dialog on `self` so
-        PyGObject doesn't GC it mid-`.run()`."""
+        on_confirm: Callable[[bool], None] | None = None,
+    ) -> None:
+        """Non-blocking Yes/No confirm when the preflight ping fails."""
         provider_label = _PROVIDER_LABELS.get(provider, provider)
         if provider == "openai_codex":
             hint = "• Click 'Sign in with ChatGPT' in Preferences.\n• Codex requires an active ChatGPT Plus or Pro subscription."
@@ -3501,7 +3548,7 @@ class ChatSidebar(Gtk.Box):
             hint = f"• Verify your API key for {provider}.\n• Check reachability of {base_url}."
         else:
             hint = f"• Ensure your OpenAI-compatible server is running.\n• Verify endpoint is reachable at {base_url}."
-        return self._confirm_yes_no(
+        self._confirm_yes_no(
             toplevel,
             title=f"Cannot reach {provider_label}",
             body=(
@@ -3509,11 +3556,18 @@ class ChatSidebar(Gtk.Box):
                 f"Actionable hints:\n{hint}\n\n"
                 f"Save anyway? The agent will retry when you send a message."
             ),
+            on_response=on_confirm,
         )
 
-    def _confirm_yes_no(self, toplevel: Gtk.Window | None, *, title: str, body: str) -> bool:
-        """Modal Yes/No warning dialog. Returns the user's answer. Anchored
-        on `self` so PyGObject doesn't GC it mid-`.run()`."""
+    def _confirm_yes_no(
+        self,
+        toplevel: Gtk.Window | None,
+        *,
+        title: str,
+        body: str,
+        on_response: Callable[[bool], None] | None = None,
+    ) -> None:
+        """Non-blocking Yes/No warning dialog using connect("response")."""
         confirm = Gtk.MessageDialog(
             transient_for=toplevel,
             modal=True,
@@ -3523,7 +3577,12 @@ class ChatSidebar(Gtk.Box):
         )
         confirm.format_secondary_text(body)
         self._open_dialog = confirm
-        keep = confirm.run() == Gtk.ResponseType.YES
-        self._open_dialog = None
-        confirm.destroy()
-        return keep
+
+        def _on_dlg_response(_dlg: Gtk.Dialog, response: int) -> None:
+            self._open_dialog = None
+            confirm.destroy()
+            if on_response is not None:
+                on_response(response == Gtk.ResponseType.YES)
+
+        confirm.connect("response", _on_dlg_response)
+        confirm.show()

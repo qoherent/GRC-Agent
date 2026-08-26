@@ -79,10 +79,10 @@ def test_run_and_shell_tools_never_reach_the_planner():
     agents = _bundle()
     planner_tools = _function_tools(agents.planner)
     assert not (
-        {"run_flowgraph", "stop_flowgraph", "run_command", "start_command"} & planner_tools
+        {"run_flowgraph", "run_command", "start_command"} & planner_tools
     )
-    # The executor, meanwhile, does get the run tools.
-    assert {"run_flowgraph", "stop_flowgraph"} <= _function_tools(agents.executor)
+    # The executor, meanwhile, does get the run tool.
+    assert {"run_flowgraph"} <= _function_tools(agents.executor)
 
 
 def test_planner_writes_plan_and_preserves_prior_history(tmp_path):

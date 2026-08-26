@@ -258,6 +258,7 @@ class ExecutionErrorMonitor:
             if self._tracking:
                 return
             _log.info("exec_monitor: generate error detected")
+            self._run_epoch += 1
             self._last_run_log = "".join(self._chunks)
             self._last_run_code = 1
             self._last_run_evicted = self._evicted

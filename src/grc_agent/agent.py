@@ -10,6 +10,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 from pydantic_ai import (
+    ApprovalRequired,
     ModelRequest,
     ModelRequestNode,
     ModelRetry,
@@ -27,8 +28,10 @@ from pydantic_ai.capabilities import (
 from pydantic_ai.common_tools.duckduckgo import duckduckgo_search_tool
 from pydantic_ai.models.ollama import OllamaModel
 from pydantic_ai.models.openai import OpenAIChatModel
+from pydantic_ai.models.openrouter import OpenRouterModel
 from pydantic_ai.providers.ollama import OllamaProvider
 from pydantic_ai.providers.openai import OpenAIProvider
+from pydantic_ai.providers.openrouter import OpenRouterProvider
 from pydantic_ai.result import FinalResult
 from pydantic_ai_harness import PromptInjectionDefender
 from pydantic_graph import End
@@ -43,41 +46,36 @@ from grc_agent.adapter import (
     query_docs,
     save_block_to_library,
 )
-from grc_agent.prompts import build_system_prompt
+from grc_agent.prompts import build_planner_prompt, build_system_prompt
 
 _log = logging.getLogger(__name__)
 
+# Fixed model name for reproducible benchmarking — never read from env
 MODEL = "qwen3.6:35b-a3b-q4_K_M"
 OLLAMA_V1 = "http://localhost:11434/v1"
 
 
 def build_scenario_model(provider: str, model_name: str | None = None) -> Any:
-    """Build a model instance for the scenario/integration harness.
+    """Construct a model for the scenario harness based on the provider string.
 
-    The app has its own _build_model() that respects user settings; this
-    helper is for the reproducible scenario harness and tests, which may run
-    against either Ollama (local/cloud) or OpenAI-compatible (OpenRouter/llama.cpp/vLLM/etc.)
+    Scenarios can run against different backends (Ollama, OpenRouter, etc.)
     depending on the environment.
     """
-    if provider in ("openai_compatible", "openrouter"):
-        key = (
-            os.environ.get("OPENAI_COMPATIBLE_API_KEY")
-            or os.environ.get("OPENROUTER_API_KEY")
-            or "not-required"
+    if provider == "openrouter":
+        key = os.environ.get("OPENROUTER_API_KEY") or "not-required"
+        return OpenRouterModel(
+            model_name or os.environ.get("OPENROUTER_MODEL", "deepseek/deepseek-v4-flash"),
+            provider=OpenRouterProvider(api_key=key),
         )
+    if provider == "openai_compatible":
+        key = os.environ.get("OPENAI_COMPATIBLE_API_KEY") or "not-required"
         raw_url = (
-            os.environ.get("OPENAI_COMPATIBLE_BASE_URL")
-            or (
-                "https://openrouter.ai/api/v1"
-                if provider == "openrouter"
-                else "http://localhost:8080/v1"
-            )
+            os.environ.get("OPENAI_COMPATIBLE_BASE_URL") or "http://localhost:8080/v1"
         ).rstrip("/")
         base_url = raw_url if raw_url.endswith("/v1") else f"{raw_url}/v1"
         return OpenAIChatModel(
             model_name
-            or os.environ.get("OPENAI_COMPATIBLE_MODEL")
-            or os.environ.get("OPENROUTER_MODEL", "deepseek/deepseek-v4-flash"),
+            or os.environ.get("OPENAI_COMPATIBLE_MODEL", "deepseek/deepseek-v4-flash"),
             provider=OpenAIProvider(base_url=base_url, api_key=key),
         )
     if provider == "ollama_cloud":
@@ -637,6 +635,8 @@ async def change_graph_func(
         # regardless of force, so suggesting it there is actively misleading
         # and can waste one of the model's limited retries chasing something
         # that can never succeed.
+        if res.get("rollback_failed") and hasattr(ctx.deps, "notify_edit"):
+            await ctx.deps.notify_edit(relayout=False)
         hint = (
             "Set force=True to bypass GNU Radio's own validation opinion and retry."
             if res.get("error_type") == "validation_failed"
@@ -746,14 +746,25 @@ async def save_block_func(
 
 
 async def run_flowgraph_func(
-    ctx: RunContext[Any], wait: bool = True, timeout_seconds: float = 60.0
+    ctx: RunContext[Any],
+    action: Literal["start", "stop"] = "start",
+    wait: bool = True,
+    timeout_seconds: float = 60.0,
+    stop_after_seconds: float | None = None,
 ) -> str:
-    """Run the active flowgraph using GRC's native Execute action, generating the latest Python code from the in-memory graph.
+    """Control execution of the active GNU Radio flowgraph (start or stop).
 
     The user watches the output live in GRC's console while the flowgraph runs;
     this tool returns only the run status — read the full stdout/stderr with
-    get_run_log after the run completes. Running a flowgraph can transmit RF on
-    connected hardware, so it requires the user's approval before starting.
+    get_run_log after the run completes. Starting a flowgraph can transmit RF on
+    connected hardware, so action='start' requires the user's approval before
+    starting. Stopping a running flowgraph (action='stop') is safe and executes
+    immediately without approval.
+
+    A bounded run is one call: set stop_after_seconds (with wait=True) and the
+    flowgraph is stopped automatically once it has run that long without
+    finishing on its own — the result says stopped_after_timeout. Leave it
+    unset to run until the graph finishes or you stop it.
 
     The system prompt teaches the probe-before-run verification strategy
     (wire native diagnostic blocks so the log carries evidence, not just an
@@ -761,43 +772,43 @@ async def run_flowgraph_func(
     needed.
 
     Args:
-        wait: Block until the run finishes (right for command-line graphs that
-            terminate on their own). Use False for GUI flowgraphs (QT GUI
-            sinks) — they run until stopped, so start without waiting and call
-            stop_flowgraph when the user is done.
-        timeout_seconds: Max seconds to wait when wait=True; after that the
-            run keeps going and the result says still_running.
+        action: 'start' to run the active flowgraph, or 'stop' to terminate the
+            currently running flowgraph (SIGTERM).
+        wait: For action='start', block until the run finishes (right for
+            command-line graphs that terminate on their own). Use False for GUI
+            flowgraphs (QT GUI sinks) — they run until stopped, so start
+            without waiting and call with action='stop' when done.
+        timeout_seconds: Max seconds to wait when action='start' and wait=True;
+            after that the run keeps going and the result says still_running.
+            Ignored when stop_after_seconds is set.
+        stop_after_seconds: Optional runtime budget for a bounded run: when set
+            with action='start' and wait=True, the flowgraph is stopped
+            automatically after this many seconds of runtime if it has not
+            finished on its own (one call instead of start-then-stop). The stop
+            is the same SIGTERM the toolbar Stop button sends; the result says
+            stopped_after_timeout. Requires wait=True — with wait=False the call
+            returns before anything could enforce the deadline. Leave unset to
+            run until the graph finishes or you stop it.
     """
+    if action not in ("start", "stop"):
+        raise ModelRetry(f"Invalid action {action!r}: must be 'start' or 'stop'.")
+    if action == "start" and not getattr(ctx, "tool_call_approved", False):
+        raise ApprovalRequired()
+
     run_fn = getattr(ctx.deps, "run_flowgraph", None)
     if run_fn is None or not callable(run_fn):
         raise ModelRetry(
             "Flowgraph execution is not available in this environment — this is a wiring "
             "fault, not a fixable error. Do not retry; tell the user to use GRC's own "
-            "Execute button and continue without this tool."
+            "Execute/Stop button and continue without this tool."
         )
     try:
-        res = await run_fn(wait=wait, timeout_seconds=timeout_seconds)
-    except ValueError as exc:
-        raise ModelRetry(str(exc)) from exc
-    return json.dumps(res)
-
-
-async def stop_flowgraph_func(ctx: RunContext[Any]) -> str:
-    """Stop the active flowgraph's run using GRC's native Stop action (SIGTERM — a user-requested stop, not a failure).
-
-    Buffered output produced before the stop is still captured: read it with
-    get_run_log afterwards. No-op (reported as not_running) when nothing is
-    executing. Stopping is the safe direction, so this needs no approval.
-    """
-    stop_fn = getattr(ctx.deps, "stop_flowgraph", None)
-    if stop_fn is None or not callable(stop_fn):
-        raise ModelRetry(
-            "Flowgraph execution control is not available in this environment — this is a "
-            "wiring fault, not a fixable error. Do not retry; tell the user to use GRC's "
-            "own Stop button."
+        res = await run_fn(
+            action=action,
+            wait=wait,
+            timeout_seconds=timeout_seconds,
+            stop_after_seconds=stop_after_seconds,
         )
-    try:
-        res = await stop_fn()
     except ValueError as exc:
         raise ModelRetry(str(exc)) from exc
     return json.dumps(res)
@@ -850,24 +861,15 @@ def grc_tools() -> list[Tool[Any]]:
         require_parameter_descriptions=True,
     )
 
-    # Running a flowgraph is a physical-world side effect (RF transmission,
-    # hardware claims) — same native deferred-approval mechanism as
-    # change_graph; stopping is the safe direction and needs no gate.
+    # Execution control: starting a flowgraph raises ApprovalRequired() conditionally
+    # inside run_flowgraph_func; stopping is safe and executes immediately.
     run_fg_tool = Tool(
         run_flowgraph_func,
         name="run_flowgraph",
-        requires_approval=True,
         docstring_format="google",
         require_parameter_descriptions=True,
     )
     run_fg_tool.max_retries = 3
-
-    stop_fg_tool = Tool(
-        stop_flowgraph_func,
-        name="stop_flowgraph",
-        docstring_format="google",
-        require_parameter_descriptions=True,
-    )
 
     save_block_tool = Tool(
         save_block_func,
@@ -884,29 +886,38 @@ def grc_tools() -> list[Tool[Any]]:
         change_tool,
         run_log_tool,
         run_fg_tool,
-        stop_fg_tool,
         save_block_tool,
     ]
 
 
-async def validate_flowgraph_state(ctx: RunContext[Any], output: str) -> str:
+async def validate_flowgraph_state(ctx: RunContext[Any], output: Any) -> Any:
     # A change_graph call only mutates the graph when it EXECUTED successfully:
     # denied calls (approval card) never run their body, and failed/rolled-back
     # calls leave the graph as it was before the call — validating the live
     # graph against either would blame the agent for pre-existing user state.
-    # outcome is set on ToolReturnPart ('success'|'failed'|'denied'|'interrupted');
-    # a retried call leaves a RetryPromptPart with no outcome attribute. The one
-    # exception: a rollback_failed double-fault (adapter/graph._revert_flow_graph)
-    # CAN leave a mutated graph behind a failed part — its retry text carries the
-    # exact marker, so match that and validate then too.
+    # We restrict the scan to the current user turn (from the last UserPromptPart
+    # onwards) so past turns' mutations do not falsely trigger validation here.
+    messages = list(ctx.messages)
+    start_idx = 0
+    for idx, msg in enumerate(reversed(messages)):
+        if hasattr(msg, "parts") and any(
+            getattr(part, "part_kind", None) == "user-prompt"
+            or part.__class__.__name__ == "UserPromptPart"
+            for part in msg.parts
+        ):
+            start_idx = len(messages) - 1 - idx
+            break
+
+    current_turn_messages = messages[start_idx:]
+
     has_mutated = any(
         getattr(part, "tool_name", None) == "change_graph"
         and (
             getattr(part, "outcome", None) == "success"
-            or "rollback failed, flowgraph may be left mutated"
-            in str(getattr(part, "content", ""))
+            or "rollback_failed" in str(getattr(part, "content", ""))
+            or "rollback failed" in str(getattr(part, "content", ""))
         )
-        for msg in ctx.messages
+        for msg in current_turn_messages
         if hasattr(msg, "parts")
         for part in msg.parts
     )

@@ -119,7 +119,8 @@ def _embed(model: str, input_text: str | list[str]) -> list[float] | list[list[f
         hint = f"HTTP {exc.status_code}: {exc.message}"
         raise RuntimeError(f"Embeddings request failed at {_EMBED_BASE_URL}. {hint}") from exc
     if isinstance(input_text, list):
-        return [d.embedding for d in response.data]
+        sorted_data = sorted(response.data, key=lambda d: getattr(d, "index", 0))
+        return [d.embedding for d in sorted_data]
     return response.data[0].embedding
 
 
@@ -168,6 +169,18 @@ def embed_document(text: str, model: str) -> list[float]:
     body = _DOCUMENT_PREFIX + text if _uses_gemma_prefix(model) else text
     result = _embed(model, body)
     if not isinstance(result, list) or (result and not isinstance(result[0], float)):
+        raise TypeError(f"Unexpected embedding response shape from _embed: {type(result)}")
+    return result  # type: ignore[return-value]
+
+
+def embed_documents(texts: list[str], model: str) -> list[list[float]]:
+    """Batch embed a list of document texts."""
+    if not texts:
+        return []
+    prefix = _DOCUMENT_PREFIX if _uses_gemma_prefix(model) else ""
+    prefixed_texts = [prefix + t for t in texts] if prefix else texts
+    result = _embed(model, prefixed_texts)
+    if not isinstance(result, list) or (result and not isinstance(result[0], list)):
         raise TypeError(f"Unexpected embedding response shape from _embed: {type(result)}")
     return result  # type: ignore[return-value]
 

@@ -4,7 +4,7 @@ import hashlib
 import logging
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import gi
 
@@ -94,18 +94,38 @@ class NativeFlowgraphProxy:
             return None
         return monitor.get_last_run_log()
 
-    async def run_flowgraph(self, wait: bool = True, timeout_seconds: float = 60.0) -> dict:
-        """Run the active flowgraph through GRC's native Execute action.
+    async def run_flowgraph(
+        self,
+        action: Literal["start", "stop"] = "start",
+        wait: bool = True,
+        timeout_seconds: float = 60.0,
+        stop_after_seconds: float | None = None,
+    ) -> dict:
+        """Control execution of the active flowgraph (start or stop).
 
-        Mirrors the toolbar Run button exactly: GRC generates from the live
-        in-memory graph, spawns the process, and streams its output to the
-        GRC console (where the user watches it live). This method returns
+        When action='stop', sends SIGTERM to the running process (same as the
+        toolbar Stop button).
+        When action='start', mirrors the GUI toolbar Run button: GRC generates from
+        the live in-memory graph, spawns the process, and streams its output to
+        the GRC console (where the user watches it live). This method returns
         status only — the model reads the full output via get_run_log.
+
+        With stop_after_seconds set (and wait=True), the run is stopped
+        automatically once it has run that long without finishing on its own —
+        one bounded run instead of a start-then-stop pair. The auto-stop sends
+        the same SIGTERM the toolbar Stop button does and reports
+        status='stopped_after_timeout'.
 
         Pre-gates mirror GRC's own handler conditions because a disabled
         Gio action is a SILENT no-op, and an unsaved/untitled page would
         route GRC into a modal Save-As dialog that blocks the unified loop.
         """
+        if action == "stop":
+            return await self.stop_flowgraph()
+        if action != "start":
+            raise ValueError(f"Invalid action {action!r}: must be 'start' or 'stop'")
+        self._validate_bounded_run(wait, stop_after_seconds)
+
         monitor = object.__getattribute__(self, "_exec_monitor")
         if monitor is None:
             raise ValueError(
@@ -121,7 +141,7 @@ class NativeFlowgraphProxy:
             )
         if getattr(page, "process", None) is not None:
             raise ValueError(
-                "A flowgraph execution is already in progress. Stop it with stop_flowgraph "
+                "A flowgraph execution is already in progress. Stop it with run_flowgraph(action='stop') "
                 "first, or wait for it to finish."
             )
         if not getattr(page, "file_path", None):
@@ -157,12 +177,27 @@ class NativeFlowgraphProxy:
                 "note": (
                     "The flowgraph is running; output streams to GRC's console where the "
                     "user can watch it. GUI flowgraphs run until stopped — call "
-                    "stop_flowgraph when it should end. Read output with get_run_log "
+                    "run_flowgraph(action='stop') when it should end. Read output with get_run_log "
                     "(its run_in_progress field tells you when the run has finished)."
                 ),
             }
 
-        outcome = await monitor.wait_for_run_end(timeout_seconds, epoch=epoch)
+        # With stop_after_seconds the wait bound IS the runtime budget — the run
+        # cannot exceed it — so timeout_seconds is moot in that mode.
+        deadline = stop_after_seconds if stop_after_seconds is not None else timeout_seconds
+        outcome = await monitor.wait_for_run_end(deadline, epoch=epoch)
+        return await self._build_run_result(
+            monitor, outcome, timeout_seconds, stop_after_seconds
+        )
+
+    async def _build_run_result(
+        self,
+        monitor,
+        outcome: str,
+        timeout_seconds: float,
+        stop_after_seconds: float | None,
+    ) -> dict:
+        """Map the monitor's run outcome to the tool result payload."""
         if outcome == "completed":
             code = monitor.last_run_code
             return {
@@ -177,11 +212,15 @@ class NativeFlowgraphProxy:
                 ),
             }
         if outcome == "still_running":
+            if stop_after_seconds is not None:
+                # Bounded run exhausted its budget: stop it through the same
+                # native Stop path the toolbar button takes — no extra machinery.
+                return await self._finish_bounded_run(monitor, stop_after_seconds)
             return {
                 "status": "still_running",
                 "note": (
                     f"The run did not finish within {timeout_seconds}s. GUI flowgraphs run "
-                    "until stopped — call stop_flowgraph when done, then read get_run_log."
+                    "until stopped — call run_flowgraph(action='stop') when done, then read get_run_log."
                 ),
             }
         return {
@@ -190,6 +229,52 @@ class NativeFlowgraphProxy:
                 "GRC did not start an execution (no 'Executing:' marker observed). This "
                 "should not happen after the pre-checks — ask the user to check GRC's "
                 "console and try the toolbar Run button."
+            ),
+        }
+
+    @staticmethod
+    def _validate_bounded_run(wait: bool, stop_after_seconds: float | None) -> None:
+        """Reject a stop_after_seconds request the engine cannot honor."""
+        if stop_after_seconds is None:
+            return
+        if not wait:
+            raise ValueError(
+                "stop_after_seconds requires wait=True: with wait=False the call "
+                "returns immediately and nothing would enforce the deadline. Use "
+                "wait=True for a bounded run, or stop the run later with action='stop'."
+            )
+        if stop_after_seconds <= 0:
+            raise ValueError(
+                f"Invalid stop_after_seconds {stop_after_seconds!r}: must be a "
+                "positive number of seconds of runtime."
+            )
+
+    async def _finish_bounded_run(
+        self, monitor, stop_after_seconds: float
+    ) -> dict:
+        """Stop a bounded run whose budget is exhausted, via the same native
+        Stop path the toolbar button takes (SIGTERM). If the run finished on
+        its own right at the deadline (nothing left to stop), report the real
+        outcome instead of a stop that never happened."""
+        stop_res = await self.stop_flowgraph()
+        if stop_res.get("status") == "not_running":
+            code = monitor.last_run_code
+            return {
+                "status": "completed",
+                "return_code": code,
+                "ran_successfully": code == 0,
+                "note": (
+                    f"The run finished on its own right at the {stop_after_seconds}s "
+                    "auto-stop deadline. Read the full output with get_run_log."
+                ),
+            }
+        return {
+            "status": "stopped_after_timeout",
+            "return_code": monitor.last_run_code,
+            "note": (
+                f"Auto-stopped after {stop_after_seconds}s of runtime (SIGTERM — the "
+                "same Stop the toolbar button sends; a deliberate stop, not a failure). "
+                "Read the full output with get_run_log."
             ),
         }
 
@@ -332,6 +417,7 @@ class NativeCanvasManager:
         # and re-binds the sidebar to the new current page's session.
         self.on_graphs_changed: Callable[[], None] | None = None
         self.on_sync_failed: Callable[[str], None] | None = None
+        self.on_graph_modified: Callable[[], None] | None = None
 
     @property
     def current_page(self) -> Any:
@@ -393,6 +479,8 @@ class NativeCanvasManager:
         if relayout:
             self._fit_to_view(fg)
         self.last_synced_export_hash = flow_graph_content_hash(fg)
+        if self.on_graph_modified:
+            self.on_graph_modified()
 
         # Push to GRC's native undo cache and mark page as modified
         page = self.current_page
@@ -421,6 +509,8 @@ class NativeCanvasManager:
             # Unsaved/untitled graph: nothing to persist to disk, but re-arm the
             # poll baseline so the 1.5s safety-net doesn't keep firing forever.
             self.last_synced_export_hash = flow_graph_content_hash(fg)
+            if self.on_graph_modified:
+                self.on_graph_modified()
             return
         try:
             lock = self._lock_path
@@ -459,6 +549,8 @@ class NativeCanvasManager:
                     self.last_disk_hash = _sha256_file(self.path)
                     self.last_synced_export_hash = flow_graph_content_hash(fg)
                     push_undo_snapshot(fg, Path(self.path))
+                    if self.on_graph_modified:
+                        self.on_graph_modified()
                 finally:
                     fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
         except Exception as e:

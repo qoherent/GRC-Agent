@@ -31,22 +31,18 @@ grc_trace_dataset/
 *.restored.grc
 *.tmp.grc
 
-# ---- Test output (generated .md logs from integration test runs) ----
+# ---- Test output & Scratch ----
 tests/output/
+playground/
+tmp/
 
-# ---- Local dev planning docs (not part of the shipped project) ----
-docs/backlog.md
+# ---- Local dev planning artifacts ----
 *.bak
 # Persisted chat sessions (SQLite) — local user transcripts, not source
 chat_sessions.db
 
 # Generated vector indexes (per-backend, built on first use — see grc_agent.ingest)
 src/grc_agent/vectors/
-
-# Test / scratch output
-tests/output/
-tmp/
-playground/
 
 
 # experiments/*/ eval pipelines — generated artifacts only, scripts stay tracked
