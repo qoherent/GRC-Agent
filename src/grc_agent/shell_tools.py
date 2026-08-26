@@ -192,6 +192,17 @@ class GrcShellToolset(ShellToolset[AgentDepsT]):
                         "SDR utilities, standalone scripts, data analysis). Do not use this to run the "
                         "active flowgraph — use run_flowgraph so GRC generates the latest code."
                     )
+                    # The harness docstring hardcodes "(default: 30)"; the app's real
+                    # default is GRC_SHELL_TIMEOUT -> 600 (shell_tools.default_timeout).
+                    # Parameter descriptions live in function_schema.json_schema — the
+                    # same dict every tool_def read sees (verified) — so mutating it in
+                    # place corrects what the model is told without touching the schema.
+                    props = tool.function_schema.json_schema.setdefault("properties", {})
+                    td = props.get("timeout_seconds")
+                    if isinstance(td, dict) and "description" in td:
+                        td["description"] = (
+                            "Maximum seconds to wait (default: GRC_SHELL_TIMEOUT, 600s)."
+                        )
                 elif name == "start_command":
                     tool.description = (
                         "Start a long-running command in the background (e.g. captures, servers). "

@@ -72,6 +72,13 @@ class ExecutionErrorMonitor:
         # reports failures to the model in-turn, so the follow-up
         # notify_run_failure turn would be redundant.
         self._agent_initiated = False
+        # Monotonic count of start markers seen. run_flowgraph captures it
+        # BEFORE triggering Execute and passes it to wait_for_run_end: if no
+        # start marker fired for that attempt (silent no-op — a disabled Gio
+        # action, an unsaved page slipping past the gates), the count is
+        # unchanged and the wait reports not_started instead of serving the
+        # previous run's stale "completed".
+        self._run_epoch = 0
         # Set to True when a ":error:" runtime error is seen in the output
         # during tracking — even if the process exits cleanly (code 0).
         # GNU Radio's scheduler handles buffer/rate errors gracefully, so
@@ -147,15 +154,44 @@ class ExecutionErrorMonitor:
         """
         self._agent_initiated = True
 
-    async def wait_for_run_end(self, timeout: float) -> str:
+    def mark_run_agent_initiated_cancelled(self) -> None:
+        """Drop the suppression flag: no start marker will ever follow.
+
+        Called by run_flowgraph when the Execute action raised, or when the
+        action returned without the synchronous 'Executing:' start marker
+        (a silent no-op). Without this, the flag would linger and wrongly
+        suppress the failure notification of a LATER user-initiated run.
+        """
+        self._agent_initiated = False
+
+    @property
+    def is_tracking(self) -> bool:
+        """True while a run's output is being captured (start marker seen,
+        terminal marker not yet)."""
+        return self._tracking
+
+    @property
+    def run_epoch(self) -> int:
+        """Monotonic count of runs started; unchanged while none is running."""
+        return self._run_epoch
+
+    async def wait_for_run_end(
+        self, timeout: float, *, epoch: int | None = None
+    ) -> str:
         """Await the current run's terminal marker.
 
         Returns "completed" when the run ended within `timeout` (or had
         already ended before the call — GRC's spawn-failure path emits its
         Done marker synchronously), "still_running" on timeout, and
-        "not_started" when no run has ever been observed (the Execute action
-        was a silent no-op — see the proxy's pre-gates).
+        "not_started" when the Execute action was a silent no-op: pass the
+        `epoch` captured by the caller BEFORE triggering the action; if no
+        start marker has fired since, the epoch is unchanged and no run
+        belongs to this attempt.
         """
+        if epoch is not None and epoch == self._run_epoch:
+            # No start marker fired since the caller captured the epoch — the
+            # Execute was a silent no-op. Do NOT serve the previous run's log.
+            return "not_started"
         if self._tracking:
             try:
                 await asyncio.wait_for(self._run_end.wait(), timeout)
@@ -183,6 +219,7 @@ class ExecutionErrorMonitor:
             self._graph_modified_since_last_run = False
             self._reset()
             self._run_end.clear()
+            self._run_epoch += 1
             _log.info("exec_monitor: started tracking run: %r", text[:120])
 
         self._append(text)

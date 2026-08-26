@@ -716,8 +716,8 @@ async def save_block_func(
     its own local inline source, unaffected. The saved block is a new, separately
     named catalog entry available for future change_graph calls (in this flowgraph
     or any other) once this call succeeds. This is not an out-of-tree (OOT) module —
-    it's GNU Radio's lighter hier-block library mechanism (~/.grc_gnuradio); say so
-    if asked, rather than calling it OOT.
+    it's GNU Radio's lighter hier-block library mechanism; say so if asked, rather
+    than calling it OOT.
 
     Args:
         instance_name: The epy_block instance in the current flowgraph to export.
@@ -755,9 +755,6 @@ async def run_flowgraph_func(
     ctx: RunContext[Any], wait: bool = True, timeout_seconds: float = 60.0
 ) -> str:
     """Run the active flowgraph using GRC's native Execute action, generating the latest Python code from the in-memory graph.
-
-    Always use this tool to execute flowgraphs — do not execute flowgraph Python
-    scripts in the shell, which would run stale code and bypass GRC console logging.
 
     The user watches the output live in GRC's console while the flowgraph runs;
     this tool returns only the run status — read the full stdout/stderr with
@@ -898,15 +895,26 @@ def grc_tools() -> list[Tool[Any]]:
 
 
 async def validate_flowgraph_state(ctx: RunContext[Any], output: str) -> str:
-    from pydantic_ai.messages import ToolCallPart
-
-    has_mutated = False
-    for msg in ctx.messages:
-        if hasattr(msg, "parts"):
-            for part in msg.parts:
-                if isinstance(part, ToolCallPart) and part.tool_name == "change_graph":
-                    has_mutated = True
-                    break
+    # A change_graph call only mutates the graph when it EXECUTED successfully:
+    # denied calls (approval card) never run their body, and failed/rolled-back
+    # calls leave the graph as it was before the call — validating the live
+    # graph against either would blame the agent for pre-existing user state.
+    # outcome is set on ToolReturnPart ('success'|'failed'|'denied'|'interrupted');
+    # a retried call leaves a RetryPromptPart with no outcome attribute. The one
+    # exception: a rollback_failed double-fault (adapter/graph._revert_flow_graph)
+    # CAN leave a mutated graph behind a failed part — its retry text carries the
+    # exact marker, so match that and validate then too.
+    has_mutated = any(
+        getattr(part, "tool_name", None) == "change_graph"
+        and (
+            getattr(part, "outcome", None) == "success"
+            or "rollback failed, flowgraph may be left mutated"
+            in str(getattr(part, "content", ""))
+        )
+        for msg in ctx.messages
+        if hasattr(msg, "parts")
+        for part in msg.parts
+    )
     if has_mutated:
         fg = ctx.deps
         # is_valid()/iter_error_messages() only read _error_messages, which

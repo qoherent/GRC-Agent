@@ -1029,7 +1029,7 @@ class ChatSidebar(Gtk.Box):
         self._approval_toggle = Gtk.ToggleButton()
         self._approval_toggle.set_valign(Gtk.Align.CENTER)
         self._approval_toggle.get_style_context().add_class("chat-mode-btn")
-        self._approval_toggle.get_accessible().set_name("Flowgraph change gate")
+        self._approval_toggle.get_accessible().set_name("Flowgraph action gate")
         self._approval_toggle.connect("toggled", self._on_approval_toggled)
         self._update_approval_toggle()
         context_row.pack_start(self._approval_toggle, False, False, 0)
@@ -1053,10 +1053,11 @@ class ChatSidebar(Gtk.Box):
             self._approval_toggle.handler_unblock_by_func(self._on_approval_toggled)
         self._approval_toggle.set_label("Mode: Manual" if asking else "Mode: Auto")
         self._approval_toggle.set_tooltip_text(
-            "Mode: Manual — ask before the agent changes the flowgraph (currently ON). "
-            "Click to switch to Auto (changes apply without asking)."
+            "Mode: Manual — ask before the agent changes the flowgraph, runs it, or runs shell commands (currently ON). "
+            "Click to switch to Auto (these actions apply without asking)."
             if asking
-            else "Mode: Auto — flowgraph changes apply without asking (gate OFF). Click to switch to Manual (ask for approval before changes)."
+            else "Mode: Auto — flowgraph changes, runs, and shell commands apply without asking (gate OFF). "
+            "Click to switch to Manual (ask for approval before actions)."
         )
 
     def _update_context_label(self) -> None:

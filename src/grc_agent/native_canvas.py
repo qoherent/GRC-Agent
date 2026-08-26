@@ -86,9 +86,6 @@ class NativeFlowgraphProxy:
     def __setattr__(self, name: str, value: Any) -> None:
         setattr(self._get_target(), name, value)
 
-    def get_state_lock(self) -> None:
-        return None
-
     def get_run_log(self) -> dict | None:
         """Return the last completed run's log via the exec_monitor wired at
         startup, or None if no monitor is wired or no run has completed."""
@@ -152,12 +149,7 @@ class NativeFlowgraphProxy:
         # edits can leave EXEC stale-disabled. The gates above re-establish
         # exactly the enabled condition, so enabling here is truthful.
         actions.FLOW_GRAPH_EXEC.set_enabled(True)
-        # Must be set BEFORE the action: the 'Executing:' start marker fires
-        # synchronously inside it, and the monitor consumes the flag at the
-        # run's terminal marker (suppressing the redundant follow-up failure
-        # turn — the tool result already reports the failure in-turn).
-        monitor.mark_run_agent_initiated()
-        actions.FLOW_GRAPH_EXEC()
+        epoch = self._trigger_execute(monitor, actions)
 
         if not wait:
             return {
@@ -170,7 +162,7 @@ class NativeFlowgraphProxy:
                 ),
             }
 
-        outcome = await monitor.wait_for_run_end(timeout_seconds)
+        outcome = await monitor.wait_for_run_end(timeout_seconds, epoch=epoch)
         if outcome == "completed":
             code = monitor.last_run_code
             return {
@@ -200,6 +192,27 @@ class NativeFlowgraphProxy:
                 "console and try the toolbar Run button."
             ),
         }
+
+    def _trigger_execute(self, monitor, actions) -> int:
+        """Flag this run as agent-initiated and trigger GRC's Execute.
+
+        The suppression flag must be set BEFORE the action (the 'Executing:'
+        start marker fires synchronously inside it) and dropped if no start
+        marker ever fires — otherwise it would wrongly suppress a later
+        user-initiated run's failure notification. Returns the pre-action run
+        epoch: unchanged after a silent no-op, which makes wait_for_run_end
+        report not_started instead of the previous run's stale 'completed'.
+        """
+        epoch = monitor.run_epoch
+        monitor.mark_run_agent_initiated()
+        try:
+            actions.FLOW_GRAPH_EXEC()
+        except Exception:
+            monitor.mark_run_agent_initiated_cancelled()
+            raise
+        if not monitor.is_tracking:
+            monitor.mark_run_agent_initiated_cancelled()
+        return epoch
 
     async def stop_flowgraph(self) -> dict:
         """Stop the active flowgraph's run through GRC's native Stop action

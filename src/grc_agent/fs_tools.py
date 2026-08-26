@@ -93,12 +93,6 @@ def set_active_graph_providers(
         _project_dir_fn = project_dir_fn
 
 
-def set_project_dir_provider(project_dir_fn: Callable[[], Path | str | None]) -> None:
-    """Install the callable that resolves the explicit project directory."""
-    global _project_dir_fn
-    _project_dir_fn = project_dir_fn
-
-
 def active_grc_path() -> Path | None:
     """Resolved path of the active flowgraph file, or ``None`` if unsaved."""
     raw = _active_grc_path_fn()

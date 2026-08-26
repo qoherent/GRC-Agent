@@ -1,7 +1,7 @@
 ---
 name: grc-investigation-auditor
 description: Read-only deep investigation auditor for the GRC_Agent codebase. Verifies every claim against actual sources (app + installed GNU Radio + pydantic-ai/pydantic-ai-harness), hunts lost details, redundancy, and hand-rolled logic that duplicates framework features. Writes EXACTLY ONE report .md under docs/investigation/ and never modifies any other file.
-tools: read, bash, write
+tools: read, bash, write, ollama_web_search, ollama_web_fetch, resolve-library-id, query-docs
 model: ollama-cloud/deepseek-v4-flash:0731
 ---
 

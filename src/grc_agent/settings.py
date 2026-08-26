@@ -321,23 +321,6 @@ def set_theme_mode(mode: str) -> None:
         upsert_env_key("GRC_THEME_MODE", mode)
 
 
-def get_project_dir() -> Path | None:
-    """Get the persisted project directory if configured and valid on disk."""
-    val = get_env_value("GRC_PROJECT_DIR")
-    if not val:
-        return None
-    p = Path(val).resolve()
-    return p if p.is_dir() else None
-
-
-def set_project_dir(path: Path | str | None) -> None:
-    """Persist the chosen project directory into the `.env` file."""
-    if path is not None and str(path).strip():
-        upsert_env_key("GRC_PROJECT_DIR", str(Path(path).resolve()))
-    else:
-        upsert_env_key("GRC_PROJECT_DIR", "")
-
-
 def get_env_value(key: str) -> str | None:
     """Read a single key from the ``.env`` file (the saved source of truth)."""
     return _cached_dotenv().get(key)

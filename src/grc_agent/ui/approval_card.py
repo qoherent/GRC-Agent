@@ -239,6 +239,3 @@ class ApprovalCard(Gtk.Box):
 
         self.pack_start(buttons, False, False, 0)
         self.show_all()
-
-    def get_tool_call_id(self) -> str:
-        return self._call.tool_call_id

@@ -508,3 +508,74 @@ def test_get_last_run_log_reports_run_in_progress():
     assert res["run_in_progress"] is True
     assert "previous completed run" in res["in_progress_note"]
     assert "previous" in res["log_text"]  # still the previous run's log
+
+
+# --- epoch guard: silent no-op vs stale completed (verify round C3) ---
+
+
+def test_wait_epoch_detects_silent_noop_after_previous_run():
+    """After any run has completed, a silent no-op Execute must report
+    not_started — NOT the previous run's stale 'completed'."""
+    import asyncio
+
+    async def main():
+        monitor = ExecutionErrorMonitor(on_error=_noop)
+        # A prior real run completes.
+        _feed_run(monitor, "/tmp/flow.py", "ok\n", code=0)
+        assert monitor.run_epoch == 1
+        # run_flowgraph captures the epoch before triggering Execute...
+        epoch = monitor.run_epoch
+        # ...the action is a silent no-op (no start marker fires)...
+        # ...and the wait is called with that epoch.
+        return await monitor.wait_for_run_end(5.0, epoch=epoch)
+
+    assert asyncio.run(main()) == "not_started"
+
+
+def test_wait_epoch_sees_a_real_start():
+    import asyncio
+
+    async def main():
+        monitor = ExecutionErrorMonitor(on_error=_noop)
+        epoch = monitor.run_epoch
+        monitor.handle_message("\nExecuting: /tmp/flow.py\n")  # start fires
+        task = asyncio.ensure_future(monitor.wait_for_run_end(5.0, epoch=epoch))
+        await asyncio.sleep(0)
+        monitor.handle_message("\n>>> Done (return code 0)\n")
+        return await task
+
+    assert asyncio.run(main()) == "completed"
+
+
+def test_wait_epoch_sees_synchronous_completion():
+    """The spawn-failure path: start AND done both fire synchronously inside
+    the action, before the wait is called — with a matching epoch this is a
+    legitimately completed (failed) run, not a no-op."""
+    import asyncio
+
+    async def main():
+        monitor = ExecutionErrorMonitor(on_error=_noop)
+        epoch = monitor.run_epoch
+        monitor.handle_message("\nExecuting: /tmp/flow.py\n")
+        monitor.handle_message("\n>>> Done\n")
+        return await monitor.wait_for_run_end(5.0, epoch=epoch)
+
+    assert asyncio.run(main()) == "completed"
+
+
+def test_run_epoch_counts_starts():
+    monitor = ExecutionErrorMonitor(on_error=_noop)
+    assert monitor.run_epoch == 0
+    _feed_run(monitor, "/tmp/flow.py", "x\n", code=0)
+    assert monitor.run_epoch == 1
+    _feed_run(monitor, "/tmp/flow.py", "y\n", code=0)
+    assert monitor.run_epoch == 2
+
+
+def test_mark_cancelled_drops_suppression_before_user_run():
+    calls = []
+    monitor = ExecutionErrorMonitor(on_error=lambda code, _log: calls.append(code))
+    monitor.mark_run_agent_initiated()
+    monitor.mark_run_agent_initiated_cancelled()  # no-op Execute
+    _feed_run(monitor, "/tmp/flow.py", "RuntimeError: boom\n", code=1)
+    assert calls == [1]  # user-initiated failure still notifies

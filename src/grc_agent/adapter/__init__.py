@@ -26,7 +26,6 @@ from grc_agent.adapter.layout import (
     GRID_W,
     LayoutModel,
     _compute_layout_model,
-    _compute_ranks,
 )
 from grc_agent.adapter.rag import (
     _EMBEDDING_DIM_CACHE,
@@ -54,7 +53,6 @@ __all__ = [
     "_atomic_write_text",
     "_cap_words",
     "_compute_layout_model",
-    "_compute_ranks",
     "_corpus_version",
     "_embed_endpoint",
     "_ensure_db_built",

@@ -21,15 +21,25 @@ from grc_agent.native_canvas import NativeCanvasManager, NativeFlowgraphProxy
 class _FakeExecMonitor:
     """The slice of ExecutionErrorMonitor the proxy relies on."""
 
-    def __init__(self, outcome="completed", code=0):
+    def __init__(self, outcome="completed", code=0, tracking=True):
         self.marked_agent_initiated = 0
+        self.cancelled_agent_initiated = 0
         self._outcome = outcome
         self.last_run_code = code
+        self._tracking = tracking
+        self.run_epoch = 0
 
     def mark_run_agent_initiated(self):
         self.marked_agent_initiated += 1
 
-    async def wait_for_run_end(self, timeout):  # noqa: ARG002
+    def mark_run_agent_initiated_cancelled(self):
+        self.cancelled_agent_initiated += 1
+
+    @property
+    def is_tracking(self):
+        return self._tracking
+
+    async def wait_for_run_end(self, timeout, *, epoch=None):  # noqa: ARG002
         return self._outcome
 
 
@@ -49,11 +59,11 @@ def _default_loop_policy():
 _MONITOR_DEFAULT = object()
 
 
-def _make_proxy(page, monitor=_MONITOR_DEFAULT, outcome="completed", code=0):
+def _make_proxy(page, monitor=_MONITOR_DEFAULT, outcome="completed", code=0, tracking=True):
     cm = NativeCanvasManager.__new__(NativeCanvasManager)
     cm.window = SimpleNamespace(current_page=page)
     if monitor is _MONITOR_DEFAULT:
-        monitor = _FakeExecMonitor(outcome=outcome, code=code)
+        monitor = _FakeExecMonitor(outcome=outcome, code=code, tracking=tracking)
     proxy = NativeFlowgraphProxy(cm, exec_monitor=monitor)
     return proxy, monitor
 
@@ -189,6 +199,45 @@ def test_run_wait_not_started():
     res = asyncio.run(proxy.run_flowgraph(wait=True))
 
     assert res["status"] == "not_started"
+
+
+def test_run_silent_noop_cancels_agent_initiated_flag():
+    """If the Execute action returns without the synchronous start marker
+    (silent no-op), the suppression flag must not linger — a later
+    user-initiated run failure would otherwise never notify."""
+    import asyncio
+
+    proxy, monitor = _make_proxy(
+        _valid_page(), outcome="not_started", tracking=False
+    )
+    res = asyncio.run(proxy.run_flowgraph(wait=True))
+    assert res["status"] == "not_started"
+    assert monitor.marked_agent_initiated == 1
+    assert monitor.cancelled_agent_initiated == 1
+
+
+def test_run_exception_after_mark_cancels_flag(monkeypatch):
+    """If the Execute action raises, the suppression flag is dropped so it
+    cannot leak into a later user-initiated run's failure notification."""
+    import asyncio
+
+    from grc_agent.adapter import gui_actions
+
+    actions = gui_actions()
+
+    class _Boom:
+        def set_enabled(self, _v):
+            pass
+
+        def __call__(self):
+            raise RuntimeError("boom")
+
+    monkeypatch.setattr(actions, "FLOW_GRAPH_EXEC", _Boom(), raising=False)
+    proxy, monitor = _make_proxy(_valid_page(), outcome="completed", tracking=True)
+    with pytest.raises(RuntimeError):
+        asyncio.run(proxy.run_flowgraph(wait=True))
+    assert monitor.marked_agent_initiated == 1
+    assert monitor.cancelled_agent_initiated == 1
 
 
 def test_stop_no_process_is_clean_noop(fake_actions):

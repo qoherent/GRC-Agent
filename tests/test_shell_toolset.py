@@ -68,20 +68,17 @@ class _Ctx:
 # --- identity: for_run must keep the subclass (the base impl drops it) ---
 
 
-def test_for_run_preserves_subclass_and_resolves_cwd_per_run(project_root, tmp_path):
+def test_for_run_preserves_subclass_and_resolves_cwd_per_run(project_root, tmp_path, monkeypatch):
     other = tmp_path / "elsewhere"
     other.mkdir()
     ts = _toolset()
     assert ts._cwd == project_root
     # Switch the project between construction and run start: for_run (and
     # every spawn) must follow the new provider value.
-    fs_tools.set_project_dir_provider(lambda: other)
-    try:
-        fr = asyncio.run(ts.for_run(_Ctx()))
-        assert isinstance(fr, GrcShellToolset)
-        assert fr._cwd == other
-    finally:
-        fs_tools.set_project_dir_provider(lambda: project_root)
+    monkeypatch.setattr(fs_tools, "_project_dir_fn", lambda: other)
+    fr = asyncio.run(ts.for_run(_Ctx()))
+    assert isinstance(fr, GrcShellToolset)
+    assert fr._cwd == other
 
 
 def test_exec_tools_carry_requires_approval_on_init_and_for_run():

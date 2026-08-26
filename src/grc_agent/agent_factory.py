@@ -99,6 +99,7 @@ _PLANNER_FUNCTION_TOOLS = frozenset(
         "read_tool_result",
         "search_conversation_history",
         "duckduckgo_search",
+        "web_search",  # defensive: native tools bypass PrepareTools today
         "web_fetch",
         "write_plan",
         "read_plan",
@@ -388,10 +389,11 @@ def _google_context_length(model: str) -> int | None:
 
     from grc_agent.settings import get_env_value
 
-    api_key = get_env_value("GOOGLE_API_KEY") or ""
+    key_var = _PREFLIGHT_ENDPOINTS["google"][1]
+    api_key = get_env_value(key_var) or ""
     if not api_key:
         return None
-    url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
+    url = _PREFLIGHT_ENDPOINTS["google"][0].format(key=api_key)
     with httpx.Client(timeout=3.0) as client:
         r = client.get(url)
     if r.status_code != 200:
@@ -440,17 +442,6 @@ def _ollama_context_length(model: str) -> int | None:
     return None
 
 
-# OpenAI-shaped /v1/models endpoints that carry context_length per model.
-_OPENAI_SHAPED_PROVIDERS = {
-    "openrouter": ("https://openrouter.ai/api/v1/models", "OPENROUTER_API_KEY"),
-    "openai": ("https://api.openai.com/v1/models", "OPENAI_API_KEY"),
-    "groq": ("https://api.groq.com/openai/v1/models", "GROQ_API_KEY"),
-    "mistral": ("https://api.mistral.ai/v1/models", "MISTRAL_API_KEY"),
-    "cohere": ("https://api.cohere.com/v1/models", "COHERE_API_KEY"),
-    "xai": ("https://api.x.ai/v1/models", "XAI_API_KEY"),
-}
-
-
 def _openai_shaped_context_length(provider: str, model: str) -> int | None:
     """GET the provider's /v1/models catalog -> context_length for the model.
     Works for OpenRouter and plain OpenAI (both expose context_length in the
@@ -464,17 +455,18 @@ def _openai_shaped_context_length(provider: str, model: str) -> int | None:
 
     from grc_agent.settings import get_env_value, load_settings
 
-    if provider in _OPENAI_SHAPED_PROVIDERS:
-        url, key_var = _OPENAI_SHAPED_PROVIDERS[provider]
+    if provider in _OPENAI_SHAPED_PROVIDER_IDS:
+        url_t, key_var, _headers = _PREFLIGHT_ENDPOINTS[provider]
+        api_key = get_env_value(key_var) or ""
+        url = url_t.format(key=api_key)  # only google carries {key}; no-ops elsewhere
     else:  # openai_compatible — the user's own endpoint
         base = (
             load_settings().get("openai_compatible_base_url")
             or get_env_value("OPENAI_COMPATIBLE_BASE_URL")
             or "http://localhost:8080/v1"
         ).rstrip("/")
-        url = base if base.endswith("/models") else f"{base}/models"
-        key_var = "OPENAI_COMPATIBLE_API_KEY"
-    api_key = get_env_value(key_var) or ""
+        url = _models_url(base)
+        api_key = get_env_value("OPENAI_COMPATIBLE_API_KEY") or ""
     headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
     with httpx.Client(timeout=3.0) as client:
         r = client.get(url, headers=headers)
@@ -526,7 +518,7 @@ def resolve_model_context_length(provider: str, model: str) -> int | None:
         probe = _CTX_PROBES.get(provider)
         if probe is not None:
             ctx_len = probe(model)
-        elif provider in _OPENAI_SHAPED_PROVIDERS or provider == "openai_compatible":
+        elif provider in _OPENAI_SHAPED_PROVIDER_IDS or provider == "openai_compatible":
             ctx_len = _openai_shaped_context_length(provider, model)
         else:
             ctx_len = None
@@ -905,35 +897,58 @@ def build_interactive_agents() -> AgentBundle:
     return build_agents_from_cfg(load_settings())
 
 
-# /models endpoints for the native cloud providers (the probe + the Load
-# button). One uniform table: a callable from api_key -> (url, headers).
+# One fixed table for every fixed-endpoint provider: the models-URL template,
+# the .env key var, and the header builder. `{key}` in a template is replaced
+# with the API key (Google's query-string form); headers are per-provider
+# (Anthropic's x-api-key + version, everything else Bearer). The context-length
+# probes (_openai_shaped_context_length, _google_context_length), the preflight
+# probe (_preflight_target) and the Settings Load button all read THIS table —
+# one source of truth, never a duplicated copy.
 _PREFLIGHT_ENDPOINTS = {
-    "anthropic": lambda k: (
+    "openrouter": (
+        "https://openrouter.ai/api/v1/models",
+        "OPENROUTER_API_KEY",
+        lambda k: {"Authorization": f"Bearer {k}"},
+    ),
+    "openai": (
+        "https://api.openai.com/v1/models",
+        "OPENAI_API_KEY",
+        lambda k: {"Authorization": f"Bearer {k}"},
+    ),
+    "anthropic": (
         "https://api.anthropic.com/v1/models",
-        {"x-api-key": k, "anthropic-version": "2023-06-01"},
+        "ANTHROPIC_API_KEY",
+        lambda k: {"x-api-key": k, "anthropic-version": "2023-06-01"},
     ),
-    "google": lambda k: (
-        f"https://generativelanguage.googleapis.com/v1beta/models?key={k}",
-        {},
+    "google": (
+        "https://generativelanguage.googleapis.com/v1beta/models?key={key}",
+        "GOOGLE_API_KEY",
+        lambda _k: {},
     ),
-    "groq": lambda k: (
+    "groq": (
         "https://api.groq.com/openai/v1/models",
-        {"Authorization": f"Bearer {k}"},
+        "GROQ_API_KEY",
+        lambda k: {"Authorization": f"Bearer {k}"},
     ),
-    "mistral": lambda k: (
+    "mistral": (
         "https://api.mistral.ai/v1/models",
-        {"Authorization": f"Bearer {k}"},
+        "MISTRAL_API_KEY",
+        lambda k: {"Authorization": f"Bearer {k}"},
     ),
-    "cohere": lambda k: (
+    "cohere": (
         "https://api.cohere.com/v1/models",
-        {"Authorization": f"Bearer {k}"},
+        "COHERE_API_KEY",
+        lambda k: {"Authorization": f"Bearer {k}"},
     ),
-    "xai": lambda k: (
+    "xai": (
         "https://api.x.ai/v1/models",
-        {"Authorization": f"Bearer {k}"},
+        "XAI_API_KEY",
+        lambda k: {"Authorization": f"Bearer {k}"},
     ),
 }
 _PREFLIGHT_LABELS = {
+    "openrouter": "OpenRouter",
+    "openai": "OpenAI",
     "anthropic": "Anthropic",
     "google": "Google (Gemini)",
     "groq": "Groq",
@@ -942,43 +957,39 @@ _PREFLIGHT_LABELS = {
     "xai": "xAI",
 }
 
+# OpenAI-shaped /v1/models providers whose catalogs carry per-model
+# context_length — DERIVED from the table above (everything except the
+# nonstandard Anthropic/Google shapes), never a second copy of the URLs.
+_OPENAI_SHAPED_PROVIDER_IDS = frozenset(_PREFLIGHT_ENDPOINTS) - {"anthropic", "google"}
+
+
+def _models_url(base: str) -> str:
+    """Normalize a base URL to the OpenAI-shaped /models endpoint."""
+    b = base.rstrip("/")
+    if b.endswith("/models"):
+        return b
+    return f"{b}/models" if b.endswith("/v1") else f"{b}/v1/models"
+
 
 def _preflight_target(provider: str, api_key: str, base_url: str) -> tuple[str, dict] | str:
     """Resolve the provider's /models endpoint to (url, headers), or return an
-    error string when a required key is missing."""
-    if provider in ("openrouter", "openai", "openai_compatible"):
-        if provider == "openrouter":
-            base = "https://openrouter.ai/api/v1"
-            if not api_key:
-                return "API key is required for OpenRouter"
-        elif provider == "openai":
-            base = "https://api.openai.com/v1"
-            if not api_key:
-                return "API key is required for OpenAI"
-        else:
-            base = (
-                base_url
-                or get_env_value("OPENAI_COMPATIBLE_BASE_URL")
-                or "http://localhost:8080/v1"
-            ).rstrip("/")
-        models_url = (
-            base
-            if base.endswith("/models")
-            else f"{base}/models"
-            if base.endswith("/v1")
-            else f"{base}/v1/models"
-        )
-        headers = (
-            {"Authorization": f"Bearer {api_key}"}
-            if api_key
-            else {}
-        )
-        return models_url, headers
-
+    error string when a required key is missing. One table
+    (_PREFLIGHT_ENDPOINTS) plus this resolver — the only place the endpoints
+    are addressed."""
     if provider in _PREFLIGHT_ENDPOINTS:
+        url_t, _key_var, headers_fn = _PREFLIGHT_ENDPOINTS[provider]
         if not api_key:
             return f"API key is required for {_PREFLIGHT_LABELS[provider]}"
-        return _PREFLIGHT_ENDPOINTS[provider](api_key)
+        return url_t.format(key=api_key), headers_fn(api_key)
+
+    if provider == "openai_compatible":
+        base = (
+            base_url
+            or get_env_value("OPENAI_COMPATIBLE_BASE_URL")
+            or "http://localhost:8080/v1"
+        ).rstrip("/")
+        headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+        return _models_url(base), headers
     if provider == "ollama_cloud":
         if not api_key:
             return "API key is required for Ollama Cloud"

@@ -2738,7 +2738,7 @@ def test_compact_button_requires_explicit_confirmation(tmp_path, monkeypatch):
 
 def test_project_directory_selector(tmp_path, monkeypatch):
     from grc_agent.chat_sidebar import ChatSidebar
-    from grc_agent.settings import get_project_dir
+    from grc_agent.settings import get_env_value
 
     env_file = tmp_path / ".env"
     monkeypatch.setenv("GRC_AGENT_ENV", str(env_file))
@@ -2749,7 +2749,7 @@ def test_project_directory_selector(tmp_path, monkeypatch):
     sidebar = ChatSidebar()
     sidebar.set_project_directory(proj_dir)
     assert sidebar.get_project_directory() == proj_dir
-    assert get_project_dir() == proj_dir
+    assert get_env_value("GRC_PROJECT_DIR") == str(proj_dir)
 
 
 def test_welcome_view_clear_all_sessions_button(tmp_path, monkeypatch):

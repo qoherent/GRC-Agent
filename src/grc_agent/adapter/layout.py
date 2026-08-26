@@ -190,14 +190,8 @@ def _compute_layout_model(
     return model
 
 
-def _compute_ranks(
-    flow_graph: Any, new_block_names: set[str], add_connections: list[str] | None
-) -> dict[str, int]:
-    """Topological rank (layer index, 0 = sources) per block — thin wrapper
-    over `_compute_layout_model` for callers that only need the column
-    assignment (tests). `change_graph` itself uses the full model so the
-    grandalf pass never runs twice."""
-    return _compute_layout_model(flow_graph, new_block_names, add_connections).ranks
+
+
 
 
 def _pack_header_band(header_blocks: list[Any], cols: int) -> dict[str, tuple[float, float]]:

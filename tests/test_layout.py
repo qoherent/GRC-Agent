@@ -9,7 +9,6 @@ from grc_agent.adapter import (
     GRID_H,
     GRID_W,
     _compute_layout_model,
-    _compute_ranks,
     change_graph,
     load_flow_graph,
 )
@@ -33,7 +32,7 @@ def test_compute_ranks_reflects_topology(temp_dial_tone):
     # the options block have no wire connections, so they land in their own
     # trivial rank-0 components.
     fg = load_flow_graph(str(temp_dial_tone))
-    ranks = _compute_ranks(fg, set(), [])
+    ranks = _compute_layout_model(fg, set(), []).ranks
     assert ranks["analog_sig_source_x_0"] == 0
     assert ranks["analog_sig_source_x_1"] == 0
     assert ranks["analog_noise_source_x_0"] == 0
@@ -602,7 +601,7 @@ def test_skip_layer_connection_layout_does_not_crash_on_dummy_vertex(temp_empty)
         force=True,
     )
     assert res["ok"] is True
-    ranks = _compute_ranks(fg, set(), [])
+    ranks = _compute_layout_model(fg, set(), []).ranks
     assert ranks["src"] == 0
     assert ranks["mix"] == 1
     assert ranks["add"] == 2
@@ -645,7 +644,7 @@ def test_multi_branch_ask_receiver_layout_success(temp_empty):
         force=True,
     )
     assert res["ok"] is True
-    ranks = _compute_ranks(fg, set(), [])
+    ranks = _compute_layout_model(fg, set(), []).ranks
     assert ranks["carrier"] == 0
     assert ranks["data"] == 0
     assert ranks["noise_src"] == 0
