@@ -12,7 +12,6 @@ Message history is stored as pydantic-ai's native ``ModelMessage`` objects.
 import asyncio
 import json
 import logging
-import os
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -91,6 +90,7 @@ from .settings import (
     get_env_value,
     get_theme_mode,
     load_settings,
+    resolve_key,
     save_settings,
     set_theme_mode,
     upsert_env_key,
@@ -2929,7 +2929,7 @@ class ChatSidebar(Gtk.Box):
 
             key_var = _PROVIDER_API_KEY.get(configured_provider)
             if key_var and configured_provider not in _PROVIDER_KEY_OPTIONAL:
-                key_val = get_env_value(key_var) or os.environ.get(key_var)
+                key_val = resolve_key(key_var)
                 if not key_val:
                     provider_title = _PROVIDER_LABELS.get(
                         configured_provider, configured_provider

@@ -324,3 +324,11 @@ def set_theme_mode(mode: str) -> None:
 def get_env_value(key: str) -> str | None:
     """Read a single key from the ``.env`` file (the saved source of truth)."""
     return _cached_dotenv().get(key)
+
+
+def resolve_key(key: str) -> str | None:
+    """Resolve a key from the .env file, falling back to the process
+    environment — the one uniform "where do secrets come from" rule used by
+    every provider-key read (the app never exports .env values into
+    os.environ itself, so a user who exports keys in their shell still works)."""
+    return get_env_value(key) or os.environ.get(key) or None

@@ -540,11 +540,9 @@ async def query_knowledge_func(
     Args:
         query: The search text.
         domain: "catalog" for block lookups, "docs" for conceptual/how-to questions.
-        k: How many results to return. Defaults to 5 — raise it (e.g. 10-20)
-            when you need broader recall (a vague query, or comparing several
-            candidate blocks); lower it (e.g. 2-3) when you already know
-            roughly what you're looking for and just need the top match.
-            Clamped to 1-20.
+        k: How many results to return (1-20, default 5). Raise toward 20 for
+            broader recall or when comparing several candidates; lower to 2-3
+            when you only need the top match.
     """
     k = max(_QUERY_KNOWLEDGE_MIN_K, min(_QUERY_KNOWLEDGE_MAX_K, k))
     engine = query_catalog if domain == "catalog" else query_docs
@@ -559,19 +557,16 @@ async def query_knowledge_func(
 async def generate_python_func(ctx: RunContext[Any], k: int = 5) -> str:
     """Render the Python source GNU Radio would generate from the current graph. Read-only — never writes to disk or runs the flowgraph.
 
-    Returns one entry per generated file: the main flowgraph script, plus one
-    per Embedded Python Block/Module instance if any are present. The main
-    script is always included; if there are more block-source files than
-    fit, the excess is dropped and counted in "omitted_files" — never
-    silently. Raises if the graph is currently invalid, or is a
-    hierarchical-block or C++-output flowgraph (neither can be rendered this
-    way) — fix the graph with change_graph and retry.
+    Returns one entry per generated file: the main flowgraph script plus one
+    per Embedded Python Block/Module if any are present (excess block-source
+    files are dropped and counted in "omitted_files", never silently). Fails
+    (with a clear error) on invalid graphs, hierarchical blocks, or C++-output
+    flowgraphs — fix the graph with change_graph and retry.
 
     Args:
         k: Max number of block-source files to include alongside the main
-            script (the main script itself doesn't count against this).
-            Defaults to 5 — raise it (up to 20) only if you actually need to
-            see every Embedded Python Block/Module's source in one call.
+            script. Defaults to 5; raise it (up to 20) only when you need to
+            see every block's source in one call.
     """
     try:
         result = preview_flowgraph_py(ctx.deps, k=k)
@@ -591,19 +586,15 @@ async def change_graph_func(
     remove_connections: list[str] | None = None,
     force: bool = False,
 ) -> str:
-    """Apply a batch of structural graph edits in a single transaction.
+    """Apply a batch of structural graph edits as one atomic transaction.
 
     The edit is applied only after the user approves it — this tool requires
     human-in-the-loop approval, and the flowgraph is never mutated before then.
 
-    Runs in a fixed phase order regardless of argument order: remove_connections,
-    remove_blocks, add_blocks, update_params, resolve 'auto' types, update_states,
-    add_connections. A type-controlling param (e.g. 'type') set to the literal
-    string 'auto' is resolved from an explicit, non-'auto' value on a connected
-    neighbor — including one added and connected in this same call — but only if
-    at least one side of the connection has such a value; set an explicit type on
-    at least one side rather than 'auto' on both, or the call fails with an
-    actionable error instead of guessing.
+    A type-controlling param (e.g. 'type') set to the literal string 'auto' is
+    resolved from an explicit, non-'auto' value on a connected neighbor —
+    including one added and connected in this same call; if neither side has an
+    explicit type, the call fails with an actionable error instead of guessing.
 
     Args:
         reason: One-sentence justification of this edit's intent, shown to the
@@ -619,6 +610,9 @@ async def change_graph_func(
             intentionally unconnected port mid-edit). Does not bypass this
             tool's own argument errors (unknown param, missing block).
     """
+    # Engine phase order (fixed regardless of argument order, backend detail
+    # the model does not need): remove_connections, remove_blocks, add_blocks,
+    # update_params, resolve 'auto' types, update_states, add_connections.
     add_blocks_dict = [b.model_dump(exclude_none=True) for b in add_blocks] if add_blocks else None
     update_params_dict = (
         [p.model_dump(exclude_none=True) for p in update_params] if update_params else None
@@ -761,9 +755,10 @@ async def run_flowgraph_func(
     get_run_log after the run completes. Running a flowgraph can transmit RF on
     connected hardware, so it requires the user's approval before starting.
 
-    The probe-before-run strategy applies: wire native diagnostic blocks
-    (e.g. blocks_probe_rate -> blocks_message_debug) BEFORE running so the log
-    carries verifiable signal-processing evidence, not just an exit code.
+    The system prompt teaches the probe-before-run verification strategy
+    (wire native diagnostic blocks so the log carries evidence, not just an
+    exit code) — apply it before running when functional verification is
+    needed.
 
     Args:
         wait: Block until the run finishes (right for command-line graphs that

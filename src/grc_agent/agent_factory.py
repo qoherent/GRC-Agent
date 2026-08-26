@@ -52,7 +52,7 @@ from grc_agent.agent import (
 from grc_agent.db import archive_transcript, get_db_path, get_step_store, init_db
 from grc_agent.fs_tools import GrcFileSystem
 from grc_agent.prompts import build_planner_prompt, build_system_prompt
-from grc_agent.settings import default_settings, get_env_value, load_settings
+from grc_agent.settings import default_settings, get_env_value, load_settings, resolve_key
 from grc_agent.shell_tools import GrcShell
 
 # genai-prices registry errors documented in the harness compaction docs:
@@ -250,13 +250,13 @@ def _build_model(cfg: dict, http_client: httpx.AsyncClient):
         # OpenRouter error taxonomy, attribution headers (HTTP-Referer /
         # X-Title), and model profiles — the generic OpenAI path silently
         # discards all of it.
-        key = get_env_value("OPENROUTER_API_KEY") or os.environ.get("OPENROUTER_API_KEY") or None
+        key = resolve_key("OPENROUTER_API_KEY")
         return OpenRouterModel(
             cfg["model"],
             provider=OpenRouterProvider(api_key=key, http_client=http_client),
         )
     if provider == "openai":
-        key = get_env_value("OPENAI_API_KEY") or os.environ.get("OPENAI_API_KEY") or None
+        key = resolve_key("OPENAI_API_KEY")
         return OpenAIChatModel(
             cfg["model"],
             provider=OpenAIProvider(api_key=key, http_client=http_client),
@@ -268,7 +268,7 @@ def _build_model(cfg: dict, http_client: httpx.AsyncClient):
         mod_name, cls_name, prov_mod, prov_cls, key_var, http_client_ok = _NATIVE_MODEL_BUILDERS[
             provider
         ]
-        key = get_env_value(key_var) or os.environ.get(key_var) or None
+        key = resolve_key(key_var)
         import importlib
 
         model_cls = getattr(importlib.import_module(mod_name), cls_name)
@@ -708,9 +708,7 @@ def _build_compaction_capability(
     ]
 
     # Absolute escape hatch for deployments where the fraction is wrong.
-    env_override = get_env_value("GRC_COMPACTION_TARGET_TOKENS") or os.environ.get(
-        "GRC_COMPACTION_TARGET_TOKENS"
-    )
+    env_override = resolve_key("GRC_COMPACTION_TARGET_TOKENS")
     try:
         target_tokens = int(env_override) if env_override else None
     except (ValueError, TypeError):
