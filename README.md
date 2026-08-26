@@ -54,11 +54,16 @@ flowchart LR
   / Always accept). The composer's **Mode toggle** switches to "Auto" to apply
   changes without asking, and back any time. The canvas redraws immediately,
   GRC's native undo/redo keeps working — what it changed is what you see.
+  Topology changes re-arrange the whole graph into a clean layered layout
+  (each independent chain gets its own row band, wires stay untangled), so
+  the canvas never degrades into a pile of blocks after multi-step edits.
 - **Run and stop flowgraphs itself** — the agent triggers GRC's native
   Execute/Stop (the same path as the toolbar Run button): output streams to
   the GRC console where you watch it live, and the agent reads the results
   back. Running requires your approval first (it may transmit RF on connected
-  hardware); stopping never does.
+  hardware); stopping never does. Ask for a **bounded run** and the agent
+  stops the graph itself when the time budget is up ("run it for 10 seconds
+  and report the log") — no leaked processes.
 - **Plan before you implement** — a separate read-only Planner mode researches
   and drafts a durable step-by-step plan; nothing changes until you click
   "Implement the Plan" to hand it to the executor.
@@ -70,6 +75,9 @@ flowchart LR
   generate from the current graph, read-only, nothing written to disk.
 - **Save reusable blocks** — exports a working Embedded Python Block into
   GRC's block library as a standalone catalog block for future flowgraphs.
+- **New graphs save into your project folder** — Ctrl+S on an untitled
+  flowgraph opens GRC's Save-As dialog already pointed at the project
+  directory you configured in the sidebar.
 
 ### Your project files
 
@@ -117,6 +125,14 @@ flowchart LR
   File access is sandboxed to your project folder; `.env` and `.git` are
   off-limits.
 - **Sessions persist** — full chat history, resumable, searchable.
+
+### The interface
+
+- **System / Dark / Light theming** — one-click toggle in the header, paired
+  with your installed dark theme.
+- **Live context & cost readout** — the context row shows the active
+  provider/model, tokens vs the model's real context window, and the latest
+  turn's native cost whenever the backend reports pricing.
 
 ## Supported LLM providers
 
