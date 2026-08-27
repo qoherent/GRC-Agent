@@ -12,16 +12,20 @@ from dotenv import dotenv_values
 from grc_agent.settings import env_path
 
 ENDPOINT = "https://ollama.com/v1/chat/completions"
-DEFAULT_MODEL = "deepseek-v4-flash:cloud"
+DEFAULT_MODEL = "glm-5.3-flash:cloud"
 
 
 def chat_completion(prompt: str, timeout: float = 300.0) -> str:
     """Single-shot, non-streaming chat completion. Raises on any failure —
     no retry, no silent fallback."""
-    env = dotenv_values(env_path())
-    api_key = env.get("OLLAMA_CLOUD_API_KEY") or os.environ.get("OLLAMA_CLOUD_API_KEY")
+    api_key = (
+        env.get("OLLAMA_API_KEY")
+        or env.get("OLLAMA_CLOUD_API_KEY")
+        or os.environ.get("OLLAMA_API_KEY")
+        or os.environ.get("OLLAMA_CLOUD_API_KEY")
+    )
     if not api_key:
-        raise RuntimeError(f"OLLAMA_CLOUD_API_KEY not found in {env_path()} or the environment")
+        raise RuntimeError(f"OLLAMA_API_KEY not found in {env_path()} or the environment")
     model = env.get("OLLAMA_CLOUD_MODEL") or os.environ.get("OLLAMA_CLOUD_MODEL", DEFAULT_MODEL)
 
     response = httpx.post(

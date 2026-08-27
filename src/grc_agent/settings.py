@@ -95,7 +95,7 @@ _PROVIDER_MODEL_KEY = {
 
 _DEFAULT_MODELS = {
     "ollama_model": "qwen3.8:latest",
-    "openrouter_model": "deepseek/deepseek-v4-flash",
+    "openrouter_model": "z-ai/glm-5.3-flash",
     "openai_model": "gpt-5.6-terra",
     "openai_compatible_model": "deepseek/deepseek-v4-flash",
     "anthropic_model": "claude-sonnet-5",
@@ -289,15 +289,19 @@ def save_settings(
         upsert_env_key("GRC_THEME_MODE", theme)
 
 
-_VALID_APPROVAL_MODES = ("ask", "always")
-_DEFAULT_APPROVAL_MODE = "ask"
+_VALID_APPROVAL_MODES = ("manual", "auto", "yolo")
+_DEFAULT_APPROVAL_MODE = "manual"
 
 
 def get_approval_mode() -> str:
-    """Get the persisted action approval gate ('ask' or 'always').
+    """Get the persisted action approval gate ('manual', 'auto', or 'yolo').
 
-    'ask' (default) requires user approval for physical side effects (change_graph,
-    run_flowgraph, run_command, start_command); 'always' auto-approves all actions.
+    - 'manual' (default): Requires user approval for all physical side effects
+      (change_graph, run_flowgraph, run_command, start_command).
+    - 'auto': Auto-approves flowgraph changes and runs without asking; shell
+      command execution still requires user approval.
+    - 'yolo': Auto-approves all actions (flowgraph mutations and shell commands)
+      without any gating.
     """
     val = get_env_value("GRC_AGENT_APPROVE_CHANGES") or os.environ.get("GRC_AGENT_APPROVE_CHANGES")
     return val if val in _VALID_APPROVAL_MODES else _DEFAULT_APPROVAL_MODE

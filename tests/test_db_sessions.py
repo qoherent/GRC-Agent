@@ -94,6 +94,33 @@ def test_get_recent_sessions_drops_blob_and_bounds(tmp_path, monkeypatch):
     assert all("messages" not in r for r in rows)
 
 
+def test_get_recent_sessions_scans_past_deleted_files(tmp_path, monkeypatch):
+    """get_recent_sessions must not truncate valid sessions when earlier
+    sessions point to files that no longer exist."""
+    monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
+
+    from grc_agent.db import get_recent_sessions, save_session
+
+    files = []
+    for i in range(15):
+        f = tmp_path / f"flowgraph_{i}.grc"
+        f.touch()
+        files.append(f)
+        save_session(None, str(f), [])
+
+    # Delete 10 of the files (e.g. newer ones)
+    for f in files[5:]:
+        f.unlink()
+
+    # get_recent_sessions without limit must return all 5 surviving files
+    surviving = get_recent_sessions()
+    assert len(surviving) == 5
+
+    # get_recent_sessions(limit=3) must return 3 surviving files
+    bounded = get_recent_sessions(limit=3)
+    assert len(bounded) == 3
+
+
 def test_prune_sessions_bounds_growth(tmp_path, monkeypatch):
     """DB-3 regression: an eviction policy caps the sessions table so it does
     not grow without limit (the old JSON store bounded itself to 10 on write)."""

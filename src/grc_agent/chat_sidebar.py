@@ -1034,16 +1034,14 @@ class ChatSidebar(Gtk.Box):
         self._compact_btn.set_sensitive(False)
         context_row.pack_start(self._compact_btn, False, False, 0)
 
-        # Flowgraph-change gate: asks for approval before every change_graph
-        # call (default) or auto-approves ("always"). The toggle is the
-        # always-visible affordance to re-enable the gate after "Always
-        # accept" turns it off — same persistent-setting pattern as the
-        # theme mode.
-        self._approval_toggle = Gtk.ToggleButton()
+        # Action approval gate: 'manual' (ask for all actions), 'auto'
+        # (flowgraph changes auto-applied, shell asks), 'yolo' (all actions auto-applied).
+        # Clicking the button cycles through the three modes.
+        self._approval_toggle = Gtk.Button()
         self._approval_toggle.set_valign(Gtk.Align.CENTER)
         self._approval_toggle.get_style_context().add_class("chat-mode-btn")
-        self._approval_toggle.get_accessible().set_name("Flowgraph action gate")
-        self._approval_toggle.connect("toggled", self._on_approval_toggled)
+        self._approval_toggle.get_accessible().set_name("Action approval gate")
+        self._approval_toggle.connect("clicked", self._on_approval_mode_clicked)
         self._update_approval_toggle()
         context_row.pack_start(self._approval_toggle, False, False, 0)
 
@@ -1052,26 +1050,46 @@ class ChatSidebar(Gtk.Box):
         content.pack_start(vbox, False, False, 0)
         self._update_context_label()
 
-    def _on_approval_toggled(self, button: Gtk.ToggleButton, _pspec: Any = None) -> None:
-        """Persist the gate state: checked = ask, unchecked = auto-approve."""
-        set_approval_mode("ask" if button.get_active() else "always")
+    def _on_approval_mode_clicked(self, _button: Gtk.Button) -> None:
+        """Cycle approval mode: Manual -> Auto -> YOLO -> Manual."""
+        current = get_approval_mode()
+        next_mode = {
+            "manual": "auto",
+            "auto": "yolo",
+            "yolo": "manual",
+        }.get(current, "manual")
+        set_approval_mode(next_mode)
         self._update_approval_toggle()
 
     def _update_approval_toggle(self) -> None:
-        """Sync the toggle widget to the persisted gate mode (no signal echo)."""
-        asking = get_approval_mode() == "ask"
-        if self._approval_toggle.get_active() != asking:
-            self._approval_toggle.handler_block_by_func(self._on_approval_toggled)
-            self._approval_toggle.set_active(asking)
-            self._approval_toggle.handler_unblock_by_func(self._on_approval_toggled)
-        self._approval_toggle.set_label("Mode: Manual" if asking else "Mode: Auto")
-        self._approval_toggle.set_tooltip_text(
-            "Mode: Manual — ask before the agent changes the flowgraph, runs it, or runs shell commands (currently ON). "
-            "Click to switch to Auto (these actions apply without asking)."
-            if asking
-            else "Mode: Auto — flowgraph changes, runs, and shell commands apply without asking (gate OFF). "
-            "Click to switch to Manual (ask for approval before actions)."
-        )
+        """Sync the mode button label, styling, and tooltip to the persisted mode."""
+        mode = get_approval_mode()
+        ctx = self._approval_toggle.get_style_context()
+        ctx.remove_class("chat-mode-manual")
+        ctx.remove_class("chat-mode-auto")
+        ctx.remove_class("chat-mode-yolo")
+
+        if mode == "manual":
+            self._approval_toggle.set_label("Mode: Manual")
+            self._approval_toggle.set_tooltip_text(
+                "Mode: Manual — ask before the agent changes the flowgraph, runs it, or runs shell commands. "
+                "Click to switch to Auto (flowgraph changes apply automatically)."
+            )
+            ctx.add_class("chat-mode-manual")
+        elif mode == "auto":
+            self._approval_toggle.set_label("Mode: Auto")
+            self._approval_toggle.set_tooltip_text(
+                "Mode: Auto — flowgraph changes and runs apply without asking; shell commands still ask for approval. "
+                "Click to switch to YOLO (all actions apply without asking)."
+            )
+            ctx.add_class("chat-mode-auto")
+        else:  # yolo
+            self._approval_toggle.set_label("Mode: YOLO")
+            self._approval_toggle.set_tooltip_text(
+                "Mode: YOLO — all actions (flowgraph changes, runs, and shell commands) apply without any gating or approval. "
+                "Click to switch to Manual (ask before actions)."
+            )
+            ctx.add_class("chat-mode-yolo")
 
     def _update_context_label(self) -> None:
         """Update the context usage label under the input box using Pydantic AI's native msg.usage."""
@@ -1304,7 +1322,7 @@ class ChatSidebar(Gtk.Box):
             self.set_status(building_msg, background=True)
         return True  # re-arm
 
-    def _on_clear_history_clicked(self, _widget: Gtk.Button) -> None:
+    def _on_clear_history_clicked(self, _widget: Gtk.Button | None = None) -> None:
         _log.info("Clear History: button clicked")
         dialog = Gtk.MessageDialog(
             transient_for=self.get_toplevel()
@@ -3117,17 +3135,20 @@ class ChatSidebar(Gtk.Box):
         """Resolve a run's pending approval requests (any approval-gated
         tool: change_graph, run_flowgraph, the shell exec tools).
 
-        With the gate in 'ask' mode, renders one ApprovalCard per request into
-        the streaming row and awaits the user's decision; with the gate in
-        'always' mode, auto-approves every request without UI. Shell commands
-        whose first token was session-allowed earlier are auto-approved the
-        same way. Returns the native DeferredToolResults consumed by the
-        resumed ``agent.iter``.
+        - 'manual': Renders an ApprovalCard for every request (unless a shell
+          command was previously prefix-allowed in this session).
+        - 'auto': Auto-approves flowgraph changes and runs without UI;
+          shell execution still requires user approval via ApprovalCard.
+        - 'yolo': Auto-approves all requests immediately without UI.
+
+        Returns the native DeferredToolResults consumed by the resumed
+        ``agent.iter``.
         """
         approvals = [c for c in output.approvals]
         if not approvals:
             return DeferredToolResults()
-        if get_approval_mode() != "ask":
+        mode = get_approval_mode()
+        if mode == "yolo":
             return DeferredToolResults(
                 approvals={c.tool_call_id: ToolApproved() for c in approvals}
             )
@@ -3136,12 +3157,16 @@ class ChatSidebar(Gtk.Box):
         cards: list[ApprovalCard] = []
         auto: dict[str, Any] = {}
         for call in approvals:
-            if self._shell_prefix_allowed(call):
+            is_shell = call.tool_name in ("run_command", "start_command")
+            if mode == "auto" and not is_shell:
+                auto[call.tool_call_id] = ToolApproved()
+                continue
+            if is_shell and self._shell_prefix_allowed(call):
                 auto[call.tool_call_id] = ToolApproved()
                 continue
             fut: asyncio.Future = asyncio.get_running_loop().create_future()
             pending[call.tool_call_id] = fut
-            if call.tool_name in ("run_command", "start_command"):
+            if is_shell:
                 # Shell cards: "Always allow" means allow this command's first
                 # token for the REST OF THIS SESSION (prefix-allow) — never the
                 # persisted global gate-off, which stays a deliberate Mode
@@ -3167,6 +3192,10 @@ class ChatSidebar(Gtk.Box):
             cards.append(card)
             ctx.box.pack_start(card, False, False, 0)
             card.show_all()
+
+        if not pending:
+            return DeferredToolResults(approvals=auto)
+
         self._scroll_to_bottom()
 
         try:
@@ -3245,10 +3274,15 @@ class ChatSidebar(Gtk.Box):
     def _always_approve_all(
         self, pending: dict[str, asyncio.Future], cards: list[ApprovalCard]
     ) -> None:
-        """'Always accept': persist the gate-off choice, approve every pending
+        """'Always accept': persist the gate mode to 'auto', approve every pending
         request, and drop the remaining cards (deferred to idle so a card is
         never destroyed from inside its own click handler)."""
-        set_approval_mode("always")
+        set_approval_mode("auto")
+        self._update_approval_toggle()
+        for fut in pending.values():
+            if not fut.done():
+                fut.set_result(ToolApproved())
+        GLib.idle_add(lambda: [c.destroy() for c in cards])
         self._update_approval_toggle()
         for fut in pending.values():
             if not fut.done():

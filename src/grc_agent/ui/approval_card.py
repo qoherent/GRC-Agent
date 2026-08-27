@@ -121,7 +121,9 @@ def format_tool_summary(tool_name: str, args: dict[str, Any]) -> str:
         if action == "stop":
             return "- Stop the active flowgraph execution (SIGTERM)."
         lines = ["- Run the active flowgraph with GRC's native Execute action."]
-        if args.get("wait", True):
+        if args.get("stop_after_seconds"):
+            lines.append(f"- Bounded run: automatically stop after `{args['stop_after_seconds']}s`.")
+        elif args.get("wait", True):
             lines.append(
                 f"- Wait up to `{args.get('timeout_seconds', 60)}s` for completion."
             )
@@ -233,8 +235,8 @@ class ApprovalCard(Gtk.Box):
                 always.set_tooltip_text("Allow this command for the rest of this session")
         else:
             always.set_tooltip_text(
-                "Apply this change and stop asking for approval — re-enable Manual mode with the "
-                "'Mode' toggle under the composer"
+                "Apply this change and switch to Auto mode (auto-apply flowgraph changes; "
+                "shell commands still ask) — cycle Mode button under composer to change"
             )
         always.set_focus_on_click(False)
         always.connect("clicked", lambda _b: on_always_accept())

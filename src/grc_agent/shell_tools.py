@@ -39,8 +39,8 @@ denylist, not by forecasting command names. ``GRC_SHELL_DENIED_COMMANDS``
 
 from __future__ import annotations
 
-import logging
 import asyncio
+import logging
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path

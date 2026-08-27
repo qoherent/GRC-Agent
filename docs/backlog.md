@@ -79,7 +79,7 @@ Active feature requests, architectural improvements, and planned capabilities. C
 
 ### 8. Flowgraph Change Approval (human-in-the-loop gate)
 * **Status**: ✅ Implemented — pydantic-ai native `requires_approval=True` + `DeferredToolRequests`/`ToolApproved`/`ToolDenied`.
-* **Scope**: `ApprovalCard` in-chat UI (reason + structured summary + Approve/Deny/Always-accept) and persisted `GRC_AGENT_APPROVE_CHANGES` gate with composer `Mode` toggle (Manual = ask / Auto = apply without asking).
+* **Scope**: `ApprovalCard` in-chat UI (reason + structured summary + Approve/Deny/Always-accept) and persisted `GRC_AGENT_APPROVE_CHANGES` gate with composer `Mode` button (Manual = ask all / Auto = flowgraph auto-applied & shell asks / YOLO = all actions un-gated).
 
 ---
 

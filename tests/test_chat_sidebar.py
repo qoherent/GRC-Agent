@@ -38,20 +38,22 @@ def test_change_summary_formatter():
 
 
 def test_approval_mode_settings_helpers(tmp_path, monkeypatch):
-    """The flowgraph-change gate persists via .env like the other settings."""
+    """The action approval gate persists via .env and supports manual, auto, and yolo."""
     from grc_agent.settings import get_approval_mode, set_approval_mode
 
     env_file = tmp_path / ".env"
     env_file.write_text("")
     monkeypatch.setenv("GRC_AGENT_ENV", str(env_file))
     monkeypatch.delenv("GRC_AGENT_APPROVE_CHANGES", raising=False)
-    assert get_approval_mode() == "ask"  # default: gate on
-    set_approval_mode("always")
-    assert get_approval_mode() == "always"
+    assert get_approval_mode() == "manual"  # default: manual
+    set_approval_mode("auto")
+    assert get_approval_mode() == "auto"
+    set_approval_mode("yolo")
+    assert get_approval_mode() == "yolo"
     set_approval_mode("bogus")
-    assert get_approval_mode() == "always"  # invalid values are ignored
-    set_approval_mode("ask")
-    assert get_approval_mode() == "ask"
+    assert get_approval_mode() == "yolo"  # invalid values are ignored
+    set_approval_mode("manual")
+    assert get_approval_mode() == "manual"
 
 
 def test_chat_sidebar_copy_and_rich_rendering():
@@ -229,11 +231,11 @@ def test_ui_micro_interactions_and_shortcuts():
     # 2. Active Provider badge tooltips
     sidebar.set_active_provider(
         "openrouter",
-        "deepseek/deepseek-v4-flash",
+        "z-ai/glm-5.3-flash",
         is_default=False,
         base_url="https://openrouter.ai/api/v1",
     )
-    assert sidebar._provider_label.get_text() == "OpenRouter · deepseek-v4-flash"
+    assert sidebar._provider_label.get_text() == "OpenRouter · glm-5.3-flash"
     tooltip = sidebar._provider_label.get_tooltip_text()
     assert "OpenRouter" in tooltip
     assert "https://openrouter.ai/api/v1" in tooltip
@@ -846,7 +848,7 @@ def test_welcome_ui_stays_compact_with_long_recent_sessions(monkeypatch):
     cm.current_page = object()
     sidebar.set_flowgraph_proxy(MagicMock(_canvas_manager=cm))
 
-    window = Gtk.Window()
+    window = Gtk.OffscreenWindow()
     window.set_default_size(420, 760)
     window.add(sidebar)
     window.show_all()
@@ -1519,7 +1521,7 @@ def test_expander_toggle_anchor_compensation():
     from grc_agent.chat_sidebar import ChatSidebar
 
     sidebar = ChatSidebar()
-    win = Gtk.Window()
+    win = Gtk.OffscreenWindow()
     win.set_default_size(400, 300)
     win.add(sidebar)
     # A couple of filler rows, then the expander row ABOVE the parked
@@ -1554,6 +1556,7 @@ def test_expander_toggle_anchor_compensation():
     assert delta > 0  # the row actually grew
     # The same visible content stays in view: value shifted by the delta.
     assert abs(adj.get_value() - (value_before + delta)) <= 1.0
+    win.destroy()
 
 
 def test_auto_scroll_intent_tracks_adjustment_value():
@@ -1564,7 +1567,7 @@ def test_auto_scroll_intent_tracks_adjustment_value():
     from grc_agent.chat_sidebar import ChatSidebar
 
     sidebar = ChatSidebar()
-    win = Gtk.Window()
+    win = Gtk.OffscreenWindow()
     win.set_default_size(400, 300)
     win.add(sidebar)
     for i in range(10):
@@ -1589,6 +1592,7 @@ def test_auto_scroll_intent_tracks_adjustment_value():
     # Scrolling back to the bottom re-engages follow.
     adj.set_value(adj.get_upper() - adj.get_page_size())
     assert sidebar._auto_scroll is True
+    win.destroy()
 
 
 def test_save_history_deletes_session_resurrected_by_concurrent_clear(monkeypatch):
@@ -1920,12 +1924,12 @@ def test_context_label_updates_with_pydantic_ai_usage(tmp_path, monkeypatch):
     monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
     monkeypatch.setitem(_af._CTX_PROBES, "ollama", lambda _model: 1024 * 1024)
     monkeypatch.setitem(_af._CTX_PROBES, "ollama_cloud", lambda _model: 1024 * 1024)
-    assert resolve_model_context_length("ollama", "deepseek-v4-flash:cloud") == 1_048_576
+    assert resolve_model_context_length("ollama", "glm-5.3-flash:cloud") == 1_048_576
     _context_length_cache.clear()
     _context_negative_cache.clear()
 
     sidebar = ChatSidebar()
-    sidebar.set_active_provider("ollama_cloud", "deepseek-v4-flash:cloud")
+    sidebar.set_active_provider("ollama_cloud", "glm-5.3-flash:cloud")
 
     sidebar._message_history = deserialize_messages(
         serialize_messages(
@@ -2371,7 +2375,7 @@ def test_prose_textview_wraps_at_available_width():
 
     from grc_agent.chat_sidebar import ChatSidebar
 
-    win = Gtk.Window()
+    win = Gtk.OffscreenWindow()
     win.set_default_size(700, 400)
     sidebar = ChatSidebar()
     win.add(sidebar)
@@ -2418,7 +2422,7 @@ def test_prose_textview_rewraps_on_listbox_resize():
     tv = _unwrap_textviews(box)[0]
     narrow_width, _height = tv.get_size_request()
 
-    win = Gtk.Window()
+    win = Gtk.OffscreenWindow()
     win.set_default_size(900, 500)
     win.add(sidebar)
     win.show_all()
@@ -2447,7 +2451,7 @@ def test_streaming_never_shoves_paned_divider():
     from grc_agent.chat_sidebar import ChatSidebar, _StreamCtx
 
     for start_pos, narrow in ((500, False), (782, True)):
-        win = Gtk.Window()
+        win = Gtk.OffscreenWindow()
         win.set_default_size(1000, 500)
         canvas = Gtk.Label(label="canvas")
         sidebar = ChatSidebar()  # loads the real CSS in its constructor
@@ -2505,7 +2509,7 @@ def test_model_wait_indicator_lifecycle():
 
     from grc_agent.chat_sidebar import ChatSidebar
 
-    win = Gtk.Window()
+    win = Gtk.OffscreenWindow()
     sidebar = ChatSidebar()
     win.add(sidebar)
     win.show_all()
@@ -2567,7 +2571,7 @@ def test_code_block_height_pin_shows_full_content():
         ]
     )
 
-    win = Gtk.Window()
+    win = Gtk.OffscreenWindow()
     win.set_default_size(1000, 800)
     sidebar = ChatSidebar()
     win.add(sidebar)
@@ -2838,11 +2842,12 @@ def test_welcome_view_clear_all_sessions_button(tmp_path, monkeypatch):
     from gi.repository import Gtk
     from pydantic_ai.messages import ModelRequest, UserPromptPart
 
+    from grc_agent.chat_sidebar import ChatSidebar
     from grc_agent.db import init_db, save_session
     from grc_agent.ui.welcome_view import WelcomeView
 
-    db_file = tmp_path / "chat_sessions.db"
-    monkeypatch.setenv("GRC_AGENT_DB", str(db_file))
+    env_file = tmp_path / ".env"
+    monkeypatch.setenv("GRC_AGENT_ENV", str(env_file))
     init_db()
     grc_file = tmp_path / "test.grc"
     grc_file.write_text("options:\n  parameters:\n    id: test\n")
@@ -2863,22 +2868,49 @@ def test_welcome_view_clear_all_sessions_button(tmp_path, monkeypatch):
     )
     welcome.render(current_page=None, active_session_id=None)
 
-    # Find the Delete all sessions button in listbox children
-    buttons = []
-
-    def _find_buttons(widget):
-        if isinstance(widget, Gtk.Button) and widget.get_label() == "Delete all sessions":
-            buttons.append(widget)
+    def _walk(widget):
+        yield widget
         if isinstance(widget, Gtk.Container):
             for child in widget.get_children():
-                _find_buttons(child)
+                yield from _walk(child)
 
-    for row in listbox.get_children():
-        _find_buttons(row)
+    all_widgets = list(_walk(listbox))
+    header_labels = [
+        w for w in all_widgets if isinstance(w, Gtk.Label) and "Recent" in w.get_text()
+    ]
+    assert len(header_labels) == 1
+    assert "Recent (1)" in header_labels[0].get_text()
 
+    buttons = [
+        w
+        for w in all_widgets
+        if isinstance(w, Gtk.Button) and w.get_label() == "Delete all sessions"
+    ]
     assert len(buttons) == 1
     buttons[0].clicked()
     clear_mock.assert_called_once()
+
+    # Also test with real ChatSidebar._on_clear_history_clicked handler (prevent TypeError regression)
+    sidebar = ChatSidebar()
+    welcome_real = WelcomeView(
+        listbox,
+        on_quick_prompt=MagicMock(),
+        on_open_session=MagicMock(),
+        on_delete_session=MagicMock(),
+        on_clear_all_sessions=sidebar._on_clear_history_clicked,
+    )
+    for child in listbox.get_children():
+        listbox.remove(child)
+    welcome_real.render(current_page=None, active_session_id=None)
+
+    real_btn = [
+        w for w in _walk(listbox) if isinstance(w, Gtk.Button) and w.get_label() == "Delete all sessions"
+    ]
+    assert len(real_btn) == 1
+    sidebar._on_clear_history_clicked()  # 0 args
+    if sidebar._open_dialog:
+        sidebar._open_dialog.destroy()
+        sidebar._open_dialog = None
 
 
 def test_theme_toggle_and_persistence(tmp_path, monkeypatch):
@@ -3354,7 +3386,7 @@ def test_always_allow_command_resolves_matching_pending_futures():
     # The persisted global gate is untouched.
     from grc_agent.settings import get_approval_mode
 
-    assert get_approval_mode() in ("ask", "always")  # unchanged by this click
+    assert get_approval_mode() in ("manual", "auto", "yolo")  # unchanged by this click
 
 
 def test_block_badge_prose_text_aligns_with_baseline():
@@ -3362,6 +3394,7 @@ def test_block_badge_prose_text_aligns_with_baseline():
     with the surrounding sentence baseline (0px vertical offset). Table cells
     use BlockBadge pills for interactive box containers."""
     from unittest.mock import MagicMock
+
     from gi.repository import Gtk
 
     from grc_agent.ui.block_badge import BlockBadge
@@ -3396,7 +3429,7 @@ def test_block_badge_prose_text_aligns_with_baseline():
     assert tag is not None
     assert getattr(tag, "grc_block_name", "") == "data_source"
 
-    win = Gtk.Window()
+    win = Gtk.OffscreenWindow()
     win.add(box)
     win.set_default_size(420, 90)
     win.show_all()
@@ -3419,33 +3452,111 @@ def test_block_badge_prose_text_aligns_with_baseline():
     assert pill.name == "data_source"
 
 
-def test_request_approvals_always_mode(tmp_path, monkeypatch):
-    """In 'always' approval mode, _request_approvals auto-approves immediately without UI."""
+def test_request_approvals_yolo_mode(tmp_path, monkeypatch):
+    """In 'yolo' approval mode, _request_approvals auto-approves all tools immediately without UI."""
     import asyncio
     from unittest.mock import MagicMock
+
     from pydantic_ai.messages import ToolCallPart
     from pydantic_ai.tools import DeferredToolRequests, ToolApproved
+
     from grc_agent.chat_sidebar import ChatSidebar
 
     monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
-    monkeypatch.setenv("GRC_AGENT_APPROVE_CHANGES", "always")
+    monkeypatch.setenv("GRC_AGENT_APPROVE_CHANGES", "yolo")
 
     async def _test():
         sidebar = ChatSidebar()
-        call = ToolCallPart("change_graph", {"reason": "test edit"}, tool_call_id="call_123")
-        output = DeferredToolRequests(approvals=[call])
+        fg_call = ToolCallPart("change_graph", {"reason": "test edit"}, tool_call_id="call_fg")
+        sh_call = ToolCallPart("run_command", {"command": "ls -la"}, tool_call_id="call_sh")
+        output = DeferredToolRequests(approvals=[fg_call, sh_call])
 
         ctx = MagicMock()
         results = await sidebar._request_approvals(ctx, output)
-        assert "call_123" in results.approvals
-        assert isinstance(results.approvals["call_123"], ToolApproved)
+        assert "call_fg" in results.approvals
+        assert isinstance(results.approvals["call_fg"], ToolApproved)
+        assert "call_sh" in results.approvals
+        assert isinstance(results.approvals["call_sh"], ToolApproved)
+        assert ctx.box.pack_start.call_count == 0  # No UI cards created
 
     asyncio.run(_test())
+
+
+def test_request_approvals_auto_mode_auto_approves_flowgraph_only(tmp_path, monkeypatch):
+    """In 'auto' mode, flowgraph mutations are auto-approved while shell execution still asks."""
+    import asyncio
+    import contextlib
+    from unittest.mock import MagicMock
+
+    from pydantic_ai.messages import ToolCallPart
+    from pydantic_ai.tools import DeferredToolRequests, ToolApproved
+
+    from grc_agent.chat_sidebar import ChatSidebar
+
+    monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
+    monkeypatch.setenv("GRC_AGENT_APPROVE_CHANGES", "auto")
+
+    async def _test():
+        sidebar = ChatSidebar()
+        # 1. Flowgraph-only batch: auto-approves immediately without UI
+        fg_call = ToolCallPart("change_graph", {"reason": "test edit"}, tool_call_id="call_fg")
+        run_fg_call = ToolCallPart("run_flowgraph", {"action": "start"}, tool_call_id="call_run_fg")
+        output_fg = DeferredToolRequests(approvals=[fg_call, run_fg_call])
+
+        ctx_fg = MagicMock()
+        results_fg = await sidebar._request_approvals(ctx_fg, output_fg)
+        assert isinstance(results_fg.approvals["call_fg"], ToolApproved)
+        assert isinstance(results_fg.approvals["call_run_fg"], ToolApproved)
+        assert ctx_fg.box.pack_start.call_count == 0
+
+        # 2. Shell call in auto mode: still creates approval card
+        sh_call = ToolCallPart("run_command", {"command": "echo test"}, tool_call_id="call_sh")
+        output_sh = DeferredToolRequests(approvals=[sh_call])
+        ctx_sh = MagicMock()
+        # Start _request_approvals task
+        task = asyncio.create_task(sidebar._request_approvals(ctx_sh, output_sh))
+        for _ in range(5):
+            await asyncio.sleep(0.01)
+        assert ctx_sh.box.pack_start.call_count == 1  # Card was added to UI
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+    asyncio.run(_test())
+
+
+def test_approval_mode_button_cycles_and_persists(tmp_path, monkeypatch):
+    """Clicking the mode button cycles Manual -> Auto -> YOLO -> Manual."""
+    from grc_agent.chat_sidebar import ChatSidebar
+    from grc_agent.settings import get_approval_mode
+
+    monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
+    monkeypatch.delenv("GRC_AGENT_APPROVE_CHANGES", raising=False)
+
+    sidebar = ChatSidebar()
+    assert get_approval_mode() == "manual"
+    assert sidebar._approval_toggle.get_label() == "Mode: Manual"
+
+    # Click 1: Manual -> Auto
+    sidebar._approval_toggle.clicked()
+    assert get_approval_mode() == "auto"
+    assert sidebar._approval_toggle.get_label() == "Mode: Auto"
+
+    # Click 2: Auto -> YOLO
+    sidebar._approval_toggle.clicked()
+    assert get_approval_mode() == "yolo"
+    assert sidebar._approval_toggle.get_label() == "Mode: YOLO"
+
+    # Click 3: YOLO -> Manual
+    sidebar._approval_toggle.clicked()
+    assert get_approval_mode() == "manual"
+    assert sidebar._approval_toggle.get_label() == "Mode: Manual"
 
 
 def test_confirm_yes_no_non_blocking(tmp_path, monkeypatch):
     """_confirm_yes_no must use non-blocking signals and fire callback on response."""
     from gi.repository import Gtk
+
     from grc_agent.chat_sidebar import ChatSidebar
 
     monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
@@ -3469,6 +3580,7 @@ def test_send_fix_when_free_waits_for_idle(tmp_path, monkeypatch):
     """_send_fix_when_free must wait for _idle_event before dispatching fix."""
     import asyncio
     from unittest.mock import MagicMock
+
     from grc_agent.chat_sidebar import ChatSidebar
 
     monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))

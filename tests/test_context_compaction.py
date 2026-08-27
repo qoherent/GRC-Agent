@@ -16,7 +16,7 @@ from pydantic_ai.messages import (
 from pydantic_ai.models.test import TestModel
 from pydantic_ai_harness.step_persistence import StepPersistence
 
-from grc_agent.agent_factory import _build_compaction_capability, make_summarizing_strategy
+from grc_agent.agent_factory import _build_compaction_capability
 from grc_agent.db import get_step_store
 
 
@@ -578,7 +578,7 @@ def test_unbounded_snapshots_keep_all_boundaries(tmp_path, monkeypatch):
 def test_compaction_target_probes_the_real_window(monkeypatch):
     """The REAL context window comes from the backend probe (Ollama /api/show,
     OpenRouter/OpenAI /v1/models, Codex context_window) — the same probe the
-    sidebar's context label uses — NOT a registry guess. deepseek-v4-flash
+    sidebar's context label uses — NOT a registry guess. glm-5.3-flash:cloud
     serves a 1M window; the probe must win over the 128k fallback."""
     monkeypatch.delenv("GRC_COMPACTION_TARGET_TOKENS", raising=False)
     monkeypatch.setattr(
@@ -586,7 +586,7 @@ def test_compaction_target_probes_the_real_window(monkeypatch):
         lambda *_a, **_k: 1_048_576,
     )
     cap = _build_compaction_capability(
-        {"provider": "ollama_cloud", "model": "deepseek-v4-flash:cloud"}
+        {"provider": "ollama_cloud", "model": "glm-5.3-flash:cloud"}
     )
     assert cap.context_window == 1_048_576, "probed window must win"
     assert cap.target_fraction == 0.85

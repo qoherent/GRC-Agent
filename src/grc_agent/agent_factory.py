@@ -425,7 +425,7 @@ def _ollama_context_length(model: str) -> int | None:
     """
     import httpx
 
-    from grc_agent.settings import get_env_value, load_settings, resolve_key
+    from grc_agent.settings import load_settings, resolve_key
 
     cfg = load_settings()
     if cfg.get("provider") == "ollama_cloud":

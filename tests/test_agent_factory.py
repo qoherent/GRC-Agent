@@ -123,20 +123,20 @@ def test_probe_backend_branches(monkeypatch):
         "get",
         lambda *_a, **_kw: _FakeResponse(
             payload={
-                "models": [{"name": "deepseek-v4-flash:cloud"}, {"name": "qwen3.6:35b-a3b-q4_K_M"}]
+                "models": [{"name": "glm-5.3-flash:cloud"}, {"name": "qwen3.6:35b-a3b-q4_K_M"}]
             }
         ),
     )
     # Mismatched tag -> warning that names what IS served.
     reach, warn = probe_backend(
-        "ollama_local", "", "http://localhost:11434", "deepseek-v4-flash:0731-cloud"
+        "ollama_local", "", "http://localhost:11434", "glm-5.3-flash:0731-cloud"
     )
     assert reach is None
     assert warn is not None and "not served" in warn
-    assert "deepseek-v4-flash:cloud" in warn
+    assert "glm-5.3-flash:cloud" in warn
     # Matching tag -> silent.
     _, warn2 = probe_backend(
-        "ollama_local", "", "http://localhost:11434", "deepseek-v4-flash:cloud"
+        "ollama_local", "", "http://localhost:11434", "glm-5.3-flash:cloud"
     )
     assert warn2 is None
 

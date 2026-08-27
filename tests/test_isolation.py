@@ -134,11 +134,11 @@ def test_build_model_isolation(tmp_path, monkeypatch):
     upsert_env_key("OLLAMA_API_KEY", "dummy-test-key")
     cfg = {
         "provider": "ollama_cloud",
-        "model": "deepseek-v4-flash:cloud",
+        "model": "glm-5.3-flash:cloud",
     }
     m = _build_model(cfg, http_client)
     assert isinstance(m, OllamaModel)
-    assert m.model_name == "deepseek-v4-flash:cloud"
+    assert m.model_name == "glm-5.3-flash:cloud"
 
     cfg = {
         "provider": "openai_compatible",
@@ -157,13 +157,13 @@ def test_scenario_model_builder_uses_provider(monkeypatch):
     ollama = build_scenario_model("ollama")
     assert isinstance(ollama, OllamaModel)
 
-    ollama_cloud = build_scenario_model("ollama_cloud", "deepseek-v4-flash:cloud")
+    ollama_cloud = build_scenario_model("ollama_cloud", "glm-5.3-flash:cloud")
     assert isinstance(ollama_cloud, OllamaModel)
-    assert ollama_cloud.model_name == "deepseek-v4-flash:cloud"
+    assert ollama_cloud.model_name == "glm-5.3-flash:cloud"
 
-    openrouter = build_scenario_model("openrouter", "deepseek/deepseek-v4-flash-0731")
+    openrouter = build_scenario_model("openrouter", "z-ai/glm-5.3-flash")
     assert isinstance(openrouter, OpenAIChatModel)
-    assert openrouter.model_name == "deepseek/deepseek-v4-flash-0731"
+    assert openrouter.model_name == "z-ai/glm-5.3-flash"
 
     openai_compat = build_scenario_model("openai_compatible", "my-custom-model")
     assert isinstance(openai_compat, OpenAIChatModel)
@@ -246,7 +246,7 @@ def test_build_model_ollama_cloud_raises_on_missing_api_key(tmp_path, monkeypatc
         _build_model(
             {
                 "provider": "ollama_cloud",
-                "model": "deepseek-v4-flash:cloud",
+                "model": "glm-5.3-flash:cloud",
                 "ollama_base_url": "https://ollama.com/v1",
             },
             http_client,
@@ -786,11 +786,11 @@ def test_ollama_cloud_model_builds_and_runs():
     # constructor here, or a regression in _build_model's cloud path would
     # pass unnoticed.
     model = _build_model(
-        {"provider": "ollama_cloud", "model": "deepseek-v4-flash:cloud"},
+        {"provider": "ollama_cloud", "model": "glm-5.3-flash:cloud"},
         _retrying_http_client(),
     )
     assert isinstance(model, OllamaModel)
-    assert model.model_name == "deepseek-v4-flash:cloud"
+    assert model.model_name == "glm-5.3-flash:cloud"
 
     # Run a real agent turn against Ollama Cloud
     import asyncio
@@ -902,7 +902,7 @@ def test_build_agents_from_cfg_produces_correct_model_type_per_provider(tmp_path
     )
 
     # ollama (remote/cloud)
-    save_settings("ollama_cloud", "deepseek-v4-flash:cloud")
+    save_settings("ollama_cloud", "glm-5.3-flash:cloud")
     upsert_env_key("OLLAMA_API_KEY", "dummy-key-for-build-test")
     agent_cloud = build_agents_from_cfg(load_settings()).executor
     assert isinstance(agent_cloud.model, OllamaModel), (
@@ -931,7 +931,7 @@ def test_build_agents_from_cfg_produces_correct_model_type_per_provider(tmp_path
     # openrouter: pydantic-ai's dedicated OpenRouterModel (provider-purity).
     from pydantic_ai.models.openrouter import OpenRouterModel
 
-    save_settings("openrouter", "deepseek/deepseek-v4-flash")
+    save_settings("openrouter", "z-ai/glm-5.3-flash")
     upsert_env_key("OPENROUTER_API_KEY", "sk-or-dummy-key-for-build-test")
     agent_ro = build_agents_from_cfg(load_settings()).executor
     assert isinstance(agent_ro.model, OpenRouterModel), (
@@ -1001,7 +1001,7 @@ def test_live_swap_rebuilds_agent_with_new_provider(tmp_path, monkeypatch):
     # 1. Boot with ollama cfg + a dummy key. We never send a real
     #    request on this agent, so the dummy key is fine — it just exercises
     #    the build path and gives us a baseline agent to "swap away from".
-    save_settings("ollama_cloud", "deepseek-v4-flash:cloud")
+    save_settings("ollama_cloud", "glm-5.3-flash:cloud")
     upsert_env_key("OLLAMA_API_KEY", "dummy-boot-key-not-used")
     agent1 = build_agents_from_cfg(load_settings()).executor
     assert isinstance(agent1.model, OllamaModel)
@@ -1869,7 +1869,7 @@ def test_ollama_context_length_targets_cloud_url_for_cloud_users(tmp_path, monke
     cs._context_length_cache.clear()
     cs._context_negative_cache.clear()
     try:
-        out = cs._ollama_context_length("deepseek-v4-flash:cloud")
+        out = cs._ollama_context_length("glm-5.3-flash:cloud")
     finally:
         cs._context_length_cache.clear()
         cs._context_negative_cache.clear()

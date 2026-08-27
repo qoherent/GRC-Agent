@@ -154,7 +154,7 @@ class WelcomeView:
             0,
         )
         lbl = Gtk.Label()
-        lbl.set_markup("<b>Recent</b>")
+        lbl.set_markup(f"<b>Recent ({len(sessions)})</b>")
         hdr_box.pack_start(lbl, False, False, 0)
 
         if self._on_clear_all_sessions is not None:
@@ -163,7 +163,12 @@ class WelcomeView:
             clear_btn.get_style_context().add_class("chat-compact-btn")
             clear_btn.set_halign(Gtk.Align.END)
             clear_btn.set_hexpand(True)
-            clear_btn.connect("clicked", lambda *_: self._on_clear_all_sessions())
+            clear_btn.connect(
+                "clicked",
+                lambda btn: self._on_clear_all_sessions(btn)
+                if self._on_clear_all_sessions
+                else None,
+            )
             hdr_box.pack_end(clear_btn, False, False, 0)
 
         self._listbox.add(hdr_box)

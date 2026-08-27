@@ -93,7 +93,7 @@ PROVIDER_MODEL_PLACEHOLDER = {
     # Both ollama providers share one model key (OLLAMA_CHAT_MODEL), so the
     # placeholder must not suggest a second, drifted default.
     "ollama_cloud": "qwen3.8:latest",
-    "openrouter": "deepseek/deepseek-v4-flash, anthropic/claude-sonnet-5…",
+    "openrouter": "z-ai/glm-5.3-flash, anthropic/claude-sonnet-5…",
     "openai": "gpt-5.6-terra — click Load to list yours",
     "openai_compatible": "model id served by your endpoint",
     "anthropic": "claude-sonnet-5 — click Load to list yours",

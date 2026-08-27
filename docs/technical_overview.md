@@ -44,13 +44,11 @@ The application merges the GNU Radio Companion desktop canvas with the AI sideba
 
 ## Tool Surface
 
-The agent interacts with the user's project through twenty-one tools — eight
+The agent interacts with the user's project through nineteen tools — seven
 flowgraph-domain tools (`inspect_graph`, `query_knowledge`, `generate_python`,
-`change_graph`, `run_flowgraph`, `stop_flowgraph`, `get_run_log`, `save_block`),
-eight sandboxed filesystem tools, four shell tools (`run_command`,
-`start_command`, `check_command`, `stop_command`), and the harness's
-`read_tool_result` (lossless spill/truncate read-back for oversized tool
-returns). The separate planner role holds `write_plan`/`read_plan` only; the
+`change_graph`, `run_flowgraph`, `get_run_log`, `save_block`),
+eight sandboxed filesystem tools, and four shell tools (`run_command`,
+`start_command`, `check_command`, `stop_command`). The separate planner role holds `write_plan`/`read_plan` only; the
 executor deliberately has no planning tools (the durable plan arrives via a
 read-only system reminder). Web search and fetch capabilities complete the
 surface.
@@ -96,7 +94,7 @@ Graph editing executes a batch of updates in a strict 7-phase transactional sequ
 7. **`add_connections`**: Wires ports together to re-establish the DSP signal chain.
 
 #### Human-in-the-Loop Approval (pydantic-ai native)
-`change_graph` is registered with pydantic-ai's `requires_approval=True`, so the model's call is **never executed until the user consents** — the run ends with a `DeferredToolRequests` output and the sidebar renders one `ApprovalCard` per proposed call: the model's required one-line `reason`, a uniform structured summary of the change (Markdown bullets — no raw JSON), and Approve / Deny / Always-accept actions. The same turn then resumes via `agent.iter(deferred_tool_results=...)` with `ToolApproved()`/`ToolDenied(message)`; a denial is fed back to the model natively and the prompt forbids re-submitting a denied edit. The gate persists in `.env` (`GRC_AGENT_APPROVE_CHANGES` = `ask` default | `always`) and is controlled from the composer's `Mode` toggle (Manual/Auto). Because the tool body never runs before consent, there is no unapproved in-memory mutation for the 1.5s safety-net poll to auto-write.
+`change_graph` is registered with pydantic-ai's `requires_approval=True`, so the model's call is **never executed until the user consents** — the run ends with a `DeferredToolRequests` output and the sidebar renders one `ApprovalCard` per proposed call: the model's required one-line `reason`, a uniform structured summary of the change (Markdown bullets — no raw JSON), and Approve / Deny / Always-accept actions. The same turn then resumes via `agent.iter(deferred_tool_results=...)` with `ToolApproved()`/`ToolDenied(message)`; a denial is fed back to the model natively and the prompt forbids re-submitting a denied edit. The gate persists in `.env` (`GRC_AGENT_APPROVE_CHANGES` = `manual` default | `auto` | `yolo`) and is controlled from the composer's `Mode` button (Manual: ask all; Auto: flowgraph auto-applied & shell asks; YOLO: all actions un-gated). Because the tool body never runs before consent, there is no unapproved in-memory mutation for the 1.5s safety-net poll to auto-write.
 
 #### Header-Band / Flow-Band Full Relayout
 Since the LLM lacks spatial awareness, block positioning is resolved programmatically — and, whenever a `change_graph` batch **changes topology** (any of add/remove blocks or connections; one uniform rule since 2026-08-24, previously only `add_blocks`), the *whole* flowgraph (not just the new block) is relaid out from scratch, so a later wire-only call re-ranks blocks that were added unwired instead of freezing a stale alphabetical stack. Every block is classified into a header band (variables, the options block, imports, snippets — packed left-to-right in fixed-width rows, alphabetically sorted, the options block always pinned first) or a flow band (everything else, laid out left-to-right by topological rank via `grandalf`, one grid cell per block; each weakly-connected component gets its own row band so independent chains never interleave, and same-rank blocks are ordered by a bounded barycenter crossing-minimizer — 8 sweeps — over the component's upstream positions, computed once per batch in a shared `LayoutModel`). Coordinates snap to a shared grid (`BLOCK_FOOTPRINT_W=300`, `BLOCK_FOOTPRINT_H=220`, `BLOCK_SPACING=60`) so overlap detection stays consistent across both bands. This only ever runs from `change_graph`'s own mutation — a user's manual canvas edits are never touched by it.
@@ -167,7 +165,7 @@ This replaces the old Yes/No "fix it?" bubble — the agent now reads the log as
 
 The integration test suite executes 14 distinct scenarios mapping real-world editing workflows. The first 13 pass across both local and cloud LLM backends; `25_save_epy_block_to_library` is Ollama Cloud-only so far (this project's standard live-test backend — see the Test Gate in `AGENTS.md`):
 
-| Scenario Name | qwen3.6:35b (Ollama Local) | deepseek-v4-flash (Ollama Cloud) | Verification Objective |
+| Scenario Name | qwen3.6:35b (Ollama Local) | glm-5.3-flash:cloud (Ollama Cloud) | Verification Objective |
 | :--- | :---: | :---: | :--- |
 | `01_add_throttle` | Pass | Pass | Inserts a throttle block inline inside the dial tone mixer path. |
 | `02_update_sample_rate` | Pass | Pass | Modifies the `samp_rate` variable parameter value to 48000. |

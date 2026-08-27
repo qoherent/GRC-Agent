@@ -294,18 +294,22 @@ def _sweep_orphan_plan_rows(conn: sqlite3.Connection) -> None:
     )
 
 
-def get_recent_sessions(limit: int = 10) -> list[dict[str, Any]]:
+def get_recent_sessions(limit: int | None = None) -> list[dict[str, Any]]:
     """Load recently active GRC flowgraph sessions, newest first, filtered to
-    paths still on disk. Bounded by a SQL LIMIT. The `first_message` column is
-    read directly — no per-row messages-blob deserialization on the hot path
-    (the column is populated at save_session time)."""
+    paths still on disk. The `first_message` column is read directly — no
+    per-row messages-blob deserialization on the hot path (the column is
+    populated at save_session time).
+
+    If ``limit`` is given, collects up to ``limit`` existing files on disk.
+    If ``limit`` is None, collects all existing flowgraph sessions (bounded
+    by table size ``_MAX_SESSIONS``).
+    """
     init_db()
 
     with _conn() as conn:
         rows = conn.execute(
             "SELECT id, grc_file_path, first_message, created_at, updated_at "
-            "FROM sessions ORDER BY updated_at DESC, id DESC LIMIT ?",
-            (limit,),
+            "FROM sessions ORDER BY updated_at DESC, id DESC",
         ).fetchall()
 
     res = []
@@ -327,6 +331,8 @@ def get_recent_sessions(limit: int = 10) -> list[dict[str, Any]]:
                     "updated_at": r["updated_at"],
                 }
             )
+            if limit is not None and len(res) >= limit:
+                break
     return res
 
 

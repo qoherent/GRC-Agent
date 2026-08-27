@@ -89,6 +89,29 @@ textview.chat-thinking-textview text {
     border-color: #c64600;
     color: #c64600;
 }
+.chat-mode-manual {
+    border: 1px solid @SOFT@;
+}
+.chat-mode-auto {
+    border: 1px solid #3584e4;
+    background: rgba(53, 132, 228, 0.18);
+    color: #3584e4;
+}
+.chat-mode-auto:hover {
+    background: rgba(53, 132, 228, 0.32);
+    border-color: #1c71d8;
+    color: #1c71d8;
+}
+.chat-mode-yolo {
+    border: 1px solid #e01b24;
+    background: rgba(224, 27, 36, 0.18);
+    color: #e01b24;
+}
+.chat-mode-yolo:hover {
+    background: rgba(224, 27, 36, 0.32);
+    border-color: #c01c28;
+    color: #c01c28;
+}
 
 /* ---- content containers (clear boundaries) -------------------------- */
 .chat-code-block,

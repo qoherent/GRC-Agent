@@ -46,7 +46,7 @@ from grc_agent.adapter import (
     query_docs,
     save_block_to_library,
 )
-from grc_agent.prompts import build_planner_prompt, build_system_prompt
+from grc_agent.prompts import build_system_prompt
 
 _log = logging.getLogger(__name__)
 
@@ -64,7 +64,7 @@ def build_scenario_model(provider: str, model_name: str | None = None) -> Any:
     if provider == "openrouter":
         key = os.environ.get("OPENROUTER_API_KEY") or "not-required"
         return OpenRouterModel(
-            model_name or os.environ.get("OPENROUTER_MODEL", "deepseek/deepseek-v4-flash"),
+            model_name or os.environ.get("OPENROUTER_MODEL", "z-ai/glm-5.3-flash"),
             provider=OpenRouterProvider(api_key=key),
         )
     if provider == "openai_compatible":
@@ -81,7 +81,7 @@ def build_scenario_model(provider: str, model_name: str | None = None) -> Any:
     if provider == "ollama_cloud":
         key = os.environ.get("OLLAMA_CLOUD_API_KEY", "")
         return OllamaModel(
-            model_name or os.environ.get("OLLAMA_CLOUD_MODEL", "deepseek-v4-flash:cloud"),
+            model_name or os.environ.get("OLLAMA_CLOUD_MODEL", "glm-5.3-flash:cloud"),
             provider=OllamaProvider(
                 base_url="https://ollama.com/v1",
                 api_key=key,
