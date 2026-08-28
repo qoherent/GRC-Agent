@@ -120,7 +120,7 @@ def ingest_catalog(  # noqa: C901
                     embeddings = [embed_document(t, model) for t in batch_texts]  # type: ignore[arg-type]
                 else:
                     embeddings = embed_documents(batch_texts, model)  # type: ignore[arg-type]
-                for bid, emb in zip(batch_ids, embeddings):
+                for bid, emb in zip(batch_ids, embeddings, strict=True):
                     vec_rows.append((bid, emb))
             except Exception as exc:
                 _log.warning(
@@ -187,6 +187,9 @@ def _compose_catalog_text(rendered: dict[str, Any]) -> str:
     parts += [
         f"port: {p['port_id']} ({p['dtype']})" for p in rendered["inputs"] + rendered["outputs"]
     ]
+    doc = str(rendered.get("doc") or "").strip()
+    if doc:
+        parts.append(f"doc: {doc}")
     return "\n".join(parts)
 
 

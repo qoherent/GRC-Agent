@@ -174,6 +174,12 @@ def _tool_label(
         ):
             label_name = f"{name} (lexical)"
         elif (
+            '"search_mode": "hybrid"' in res_str
+            or "'search_mode': 'hybrid'" in res_str
+            or '"search_mode":"hybrid"' in res_str
+        ):
+            label_name = f"{name} (hybrid)"
+        elif (
             '"search_mode": "vector"' in res_str
             or "'search_mode': 'vector'" in res_str
             or '"search_mode":"vector"' in res_str
@@ -394,6 +400,12 @@ def _clean_message_history_for_new_turn(
     while cleaned:
         last = cleaned[-1]
         if isinstance(last, ModelResponse) and last.tool_calls:
+            _log.warning(
+                "cleaning history for a new turn: dropping a response with %d unprocessed "
+                "tool call(s) %s — the calls stay recoverable in the step-store snapshots",
+                len(last.tool_calls),
+                [tc.tool_name for tc in last.tool_calls],
+            )
             cleaned.pop()
             continue
         break
@@ -501,6 +513,7 @@ class _StreamCtx:
     text_dirty: bool = False
     think_body: Any = None
     think_expander: Gtk.Expander | None = None
+    think_scrolled: Gtk.ScrolledWindow | None = None
     think_acc: _ChunkAccumulator = field(default_factory=_ChunkAccumulator)
     think_dirty: bool = False
     tools: dict[str, Gtk.Expander] = field(default_factory=dict)
@@ -1996,6 +2009,7 @@ class ChatSidebar(Gtk.Box):
         # Force a final flush so the last throttled chunk is painted before the
         # node hands control back (and before any markdown re-render).
         self._flush_streaming(ctx, force=True)
+        self._close_thinking(ctx)
 
     async def _stream_tools(self, ctx: _StreamCtx, node, run) -> None:
         async with node.stream(run.ctx) as stream:
@@ -2187,13 +2201,26 @@ class ChatSidebar(Gtk.Box):
                 self._scroll_to_bottom()
 
     def _flush_thinking(self, ctx: _StreamCtx) -> None:
-        """Append only the thinking delta since the last flush — replacing the
-        whole buffer would reset the thinking ScrolledWindow to its initial
-        scroll position, yanking a user who scrolled to read."""
+        """Append only the thinking delta since the last flush and auto-scroll."""
+        if ctx.think_body is None:
+            return
         buffer = ctx.think_body.get_buffer()
         delta = ctx.think_acc.drain_new()
         if delta:
+            adj = (
+                ctx.think_scrolled.get_vadjustment()
+                if ctx.think_scrolled is not None
+                else None
+            )
+            near_bottom = (
+                adj is None
+                or (adj.get_upper() - adj.get_page_size() - adj.get_value())
+                <= _SCROLL_STICK_THRESHOLD
+            )
             buffer.insert(buffer.get_end_iter(), delta)
+            if near_bottom:
+                buffer.move_mark(buffer.get_insert(), buffer.get_end_iter())
+                ctx.think_body.scroll_to_mark(buffer.get_insert(), 0.0, True, 0.0, 1.0)
         ctx.think_dirty = False
 
     def _flush_text(self, ctx: _StreamCtx) -> None:
@@ -2214,17 +2241,25 @@ class ChatSidebar(Gtk.Box):
         ctx.text_acc.clear()
         ctx.text_dirty = False
 
+    def _thinking_label(self, *, streaming: bool = False) -> str:
+        if getattr(self, "_active_provider", "") == "openai_codex":
+            return "Thinking (summary)..." if streaming else "Thought summary (Codex)"
+        return "Thinking..." if streaming else "Thought"
+
     def _close_thinking(self, ctx: _StreamCtx) -> None:
         if ctx.think_body is None:
             return
         self._flush_streaming(ctx, force=True)
         if ctx.think_expander is not None:
-            ctx.think_expander.set_label("Thought")
+            ctx.think_expander.set_label(self._thinking_label(streaming=False))
+            ctx.think_expander.set_expanded(False)
         ctx.think_body = None
         ctx.think_expander = None
+        ctx.think_scrolled = None
         ctx.think_acc.clear()
         ctx.think_dirty = False
         self._scrolled.check_resize()
+        self._scroll_to_bottom()
 
     def _ensure_text(self, ctx: _StreamCtx) -> Gtk.TextView:
         if ctx.text_lbl is None:
@@ -2275,10 +2310,14 @@ class ChatSidebar(Gtk.Box):
         return tv
 
     def _make_thinking_widget(
-        self, text: str = "", label: str = "Thinking..."
+        self,
+        text: str = "",
+        label: str = "Thinking...",
+        *,
+        expanded: bool = False,
     ) -> tuple[Gtk.Expander, Gtk.TextView]:
         exp = Gtk.Expander(label=label)
-        exp.set_expanded(False)
+        exp.set_expanded(expanded)
         exp.get_style_context().add_class("chat-thinking-expander")
         exp.set_hexpand(True)
         exp.set_halign(Gtk.Align.FILL)
@@ -2287,8 +2326,8 @@ class ChatSidebar(Gtk.Box):
         sw = Gtk.ScrolledWindow()
         sw.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
         sw.set_shadow_type(Gtk.ShadowType.NONE)
-        sw.set_min_content_height(120)
-        sw.set_max_content_height(500)
+        sw.set_min_content_height(200)
+        sw.set_max_content_height(750)
         sw.set_propagate_natural_height(True)
         sw.set_hexpand(True)
         sw.set_halign(Gtk.Align.FILL)
@@ -2299,15 +2338,22 @@ class ChatSidebar(Gtk.Box):
 
         sw.add(tv)
         exp.add(sw)
+        exp._grc_scrolled = sw
         return exp, tv
 
     def _ensure_thinking(self, ctx: _StreamCtx) -> Any:
         if ctx.think_body is None:
-            exp, tv = self._make_thinking_widget(label="Thinking...")
+            exp, tv = self._make_thinking_widget(
+                label=self._thinking_label(streaming=True),
+                expanded=True,
+            )
             ctx.box.pack_start(exp, False, False, 0)
             exp.show_all()
             ctx.think_expander = exp
             ctx.think_body = tv
+            ctx.think_scrolled = getattr(exp, "_grc_scrolled", None)
+            self._scrolled.check_resize()
+            self._scroll_to_bottom()
         return ctx.think_body
 
     def _make_text_label(self) -> Gtk.Label:
@@ -2538,7 +2584,9 @@ class ChatSidebar(Gtk.Box):
                 self._render_markdown_to_box(box, part.content, clear=False)
                 full_text += part.content
             elif isinstance(part, ThinkingPart):
-                exp, _tv = self._make_thinking_widget(part.content, label="Thought")
+                exp, _tv = self._make_thinking_widget(
+                    part.content, label=self._thinking_label(streaming=False)
+                )
                 box.pack_start(exp, False, False, 0)
                 exp.show_all()
                 full_text += f"<Thinking>\n{part.content}\n</Thinking>\n"

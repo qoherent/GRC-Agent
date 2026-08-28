@@ -374,11 +374,11 @@ def test_change_graph_validation_gate_exception_rolls_back(temp_empty):
     # construction, and the test would assert something unachievable rather
     # than the contract it documents.
     real_validate = fg.validate
-    calls = []
+    calls_blown = []
 
     def boom():
-        calls.append(1)
-        if len(calls) == 1:
+        if any(getattr(b, "name", "") == "v1" for b in getattr(fg, "blocks", [])) and not calls_blown:
+            calls_blown.append(1)
             raise RuntimeError("validate blew up")
         return real_validate()
 
@@ -700,3 +700,37 @@ def test_render_port_exposes_vlen_when_vector():
     fg.rewrite()
     info2 = render_port(scalar.active_sinks[0], mode="details")
     assert "vlen" not in info2
+
+
+def test_change_graph_pre_existing_errors_not_penalized(temp_dial_tone):
+    """If a flowgraph is already invalid due to a pre-existing error, a subsequent
+    edit that does not fix or worsen the error succeeds without rolling back."""
+    fg = load_flow_graph(str(temp_dial_tone))
+    # 1. Intentionally create an invalid state via force=True
+    res_force = change_graph(
+        fg,
+        update_params=[{"instance_name": "samp_rate", "params": {"value": "undefined_var_xyz"}}],
+        force=True,
+    )
+    assert res_force["ok"] is True
+
+    # 2. Modify an unrelated block (e.g. analog_sig_source_x_0 freq) without force=True
+    res_edit = change_graph(
+        fg,
+        update_params=[{"instance_name": "analog_sig_source_x_0", "params": {"freq": "440"}}],
+        force=False,
+    )
+    assert res_edit["ok"] is True
+    assert "pre_existing_errors" in res_edit
+    assert any("undefined_var_xyz" in err for err in res_edit["pre_existing_errors"])
+
+    # 3. Introduce a NEW invalid parameter -> must be rejected by validation gate
+    res_new_err = change_graph(
+        fg,
+        update_params=[{"instance_name": "analog_sig_source_x_1", "params": {"freq": "bad_syntax_abc"}}],
+        force=False,
+    )
+    assert res_new_err["ok"] is False
+    assert res_new_err["error_type"] == "validation_failed"
+    assert any("bad_syntax_abc" in e["message"] for e in res_new_err["errors"])
+

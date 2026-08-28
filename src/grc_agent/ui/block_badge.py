@@ -59,7 +59,7 @@ class BlockBadge(Gtk.EventBox):
     ``cm_getter`` resolves the live canvas manager on each event.
     """
 
-    def __init__(self, name: str, cm_getter, anchored: bool = False) -> None:
+    def __init__(self, name: str, cm_getter) -> None:
         super().__init__()
         self.name = name
         self._cm_getter = cm_getter

@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -490,14 +491,21 @@ def _log_injection_detection(ctx, call, verdict) -> None:  # noqa: ARG001
 # fallback) — and it can WRITE files, so a planted instruction is not just a
 # context hazard. One uniform rule: every client-executed tool result is
 # classified with stackone-defender tier-1 pattern detection (no ML extra, no
-# network); a high/critical-risk result is withheld and replaced with a short
-# notice telling the model the content was blocked. Known scope limits,
-# accepted: provider-native web tools run server-side and never transit the
-# client; ModelRetry failure text is our own strings. Tier-1 runs on the event
-# loop (~0.5ms/KB measured: 6ms for a 40KB inspect_graph, 48ms for a 100KB
-# read) — same cost class as the app's existing sync file I/O on that loop.
+# network), and every detection is logged via _log_injection_detection.
+# Detect-and-log, never withhold (block_high_risk=False, 2026-08-28 user
+# decision): withholding high-risk results false-positived on official GNU
+# Radio doxygen pages — their own jQuery boilerplate (`$(document)` ×2) trips
+# the tier-1 `shell_command` regex `\$\([^)]+\)` escalated to high by the
+# 2-matches+entropy rule — and blinded the agent mid-build (sessions 150/151
+# forensic). The tradeoff, accepted: a real injection now reaches the model
+# but is loudly logged, and the ToolReturn passes through unchanged. Known
+# scope limits, accepted: provider-native web tools run server-side and never
+# transit the client; ModelRetry failure text is our own strings. Tier-1 runs
+# on the event loop (~0.5ms/KB measured: 6ms for a 40KB inspect_graph, 48ms
+# for a 100KB read) — same cost class as the app's existing sync file I/O on
+# that loop.
 prompt_injection_cap = PromptInjectionDefender(
-    block_high_risk=True,
+    block_high_risk=False,
     on_detection=_log_injection_detection,
 )
 
@@ -533,7 +541,9 @@ async def query_knowledge_func(
     domain: Literal["catalog", "docs"],
     k: int = 5,
 ) -> str:
-    """Answer GNU Radio knowledge questions from two domains: catalog (block IDs, port names, parameter keys) or docs (concepts).
+    """Answer GNU Radio knowledge questions from two domains: catalog (block IDs, port names, parameter keys, and each block's implementation docstring with parameter units/semantics) or docs (concepts).
+
+    Responses carry search_mode ('vector' | 'lexical' | 'hybrid') and output_truncated (true when more matching entries existed beyond the k returned — raise k or refine the query).
 
     Args:
         query: The search text.
@@ -890,6 +900,32 @@ def grc_tools() -> list[Tool[Any]]:
     ]
 
 
+def _extract_turn_pre_existing_errors(messages: list[Any]) -> set[str]:
+    """Extract pre-existing error strings reported by the first change_graph execution in the current turn."""
+    for msg in messages:
+        if not hasattr(msg, "parts"):
+            continue
+        for part in msg.parts:
+            part_kind = getattr(part, "part_kind", None) or part.__class__.__name__
+            tool_name = getattr(part, "tool_name", None)
+            if tool_name == "change_graph" and (
+                part_kind in ("tool-return", "ToolReturnPart")
+                or getattr(part, "outcome", None) == "success"
+            ):
+                content = getattr(part, "content", None)
+                parsed = None
+                if isinstance(content, str):
+                    with contextlib.suppress(Exception):
+                        parsed = json.loads(content)
+                elif isinstance(content, dict):
+                    parsed = content
+
+                if isinstance(parsed, dict) and parsed.get("ok"):
+                    # The first executed change_graph in the turn sets the turn's true pre-existing baseline
+                    return set(parsed.get("pre_existing_errors") or [])
+    return set()
+
+
 async def validate_flowgraph_state(ctx: RunContext[Any], output: Any) -> Any:
     # A change_graph call only mutates the graph when it EXECUTED successfully:
     # denied calls (approval card) never run their body, and failed/rolled-back
@@ -922,6 +958,7 @@ async def validate_flowgraph_state(ctx: RunContext[Any], output: Any) -> Any:
         for part in msg.parts
     )
     if has_mutated:
+        turn_pre_existing_errors = _extract_turn_pre_existing_errors(current_turn_messages)
         fg = ctx.deps
         # is_valid()/iter_error_messages() only read _error_messages, which
         # only validate() populates (rewrite() clears it without refilling)
@@ -936,10 +973,12 @@ async def validate_flowgraph_state(ctx: RunContext[Any], output: Any) -> Any:
                     validation_errors.append(f"{parent.name}: {elem}: {msg}")
                 else:
                     validation_errors.append(f"{elem}: {msg}")
-            raise ModelRetry(
-                f"The flowgraph has validation errors after mutation: {validation_errors}. "
-                "You must run change_graph to correct these errors (or set force=True if they are unresolvable) before completing the response."
-            )
+            new_errors = [e for e in validation_errors if e not in turn_pre_existing_errors]
+            if new_errors:
+                raise ModelRetry(
+                    f"The flowgraph has validation errors after mutation: {new_errors}. "
+                    "You must run change_graph to correct these errors (or set force=True if they are unresolvable) before completing the response."
+                )
     return output
 
 

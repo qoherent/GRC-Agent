@@ -274,3 +274,132 @@ def test_render_catalog_block_exposes_vlen():
     assert r2 is not None
     for p in r2["inputs"] + r2["outputs"]:
         assert "vlen" not in p
+
+
+def test_render_catalog_block_carries_implementation_doc():
+    """The catalog entry carries the implementation class's docstring, resolved
+    through the block's own templates (imports + make). This is where the
+    parameter units live — the fact session 150 could not get from the docs
+    corpus (it has no carriertracking page). Templated *_x blocks honestly
+    carry an empty doc (no resolvable SWIG class)."""
+    from grc_agent.adapter import render_catalog_block
+
+    r = render_catalog_block("analog_pll_carriertracking_cc", 0.0)
+    assert r is not None
+    assert "radians per sample" in r["doc"]
+    r2 = render_catalog_block("blocks_keep_m_in_n", 0.0)
+    assert r2 is not None
+    assert "offset" in r2["doc"]
+    r3 = render_catalog_block("analog_sig_source_x", 0.0)
+    assert r3 is not None
+    assert r3["doc"] == ""
+
+
+def test_compose_catalog_text_appends_doc_when_present():
+    """The composed corpus payload includes the doc section only when the
+    renderer resolved one — a fake render without the key must not break
+    composition (test_isolation's fake renderer has no 'doc')."""
+    from grc_agent.ingest import _compose_catalog_text
+
+    base = {
+        "block_id": "b",
+        "label": "B",
+        "category": "x",
+        "params": {},
+        "inputs": [],
+        "outputs": [],
+    }
+    assert "doc:" not in _compose_catalog_text(base)
+    assert "doc: units here" in _compose_catalog_text({**base, "doc": "units here"})
+
+
+def test_rrf_fuse_pure():
+    """RRF fusion is pure, deterministic, and implements the Cormack/Clarke/
+    Bütcher SIGIR 2009 formula score(d) = sum 1/(k + rank) with k = _RRF_K.
+    Ties break by ascending rowid at the sort site."""
+    from grc_agent.adapter.rag import _RRF_K, _rrf_fuse
+
+    k = _RRF_K
+    # Single ranking: exact per-rank contributions, order preserved.
+    assert _rrf_fuse([[10, 11]]) == {10: 1 / (k + 1), 11: 1 / (k + 2)}
+    # "Both engines agree" property: rowid 2 appears in both rankings and wins.
+    fused = _rrf_fuse([[1, 2], [2, 3]])
+    assert fused[2] == 1 / (k + 1) + 1 / (k + 2)
+    order = [rowid for rowid, _ in sorted(fused.items(), key=lambda kv: (-kv[1], kv[0]))]
+    assert order == [2, 1, 3]
+    # Symmetric tie (each rank-1 in exactly one list) → equal scores →
+    # ascending rowid.
+    tied = _rrf_fuse([[7], [8]])
+    assert tied == {7: 1 / (k + 1), 8: 1 / (k + 1)}
+    order = [rowid for rowid, _ in sorted(tied.items(), key=lambda kv: (-kv[1], kv[0]))]
+    assert order == [7, 8]
+    # Degenerate inputs.
+    assert _rrf_fuse([]) == {}
+    assert _rrf_fuse([[], []]) == {}
+    # A doc ranked by both engines at different positions sums both terms exactly.
+    both = _rrf_fuse([[5, 9], [9, 5]])
+    assert both[5] == 1 / (k + 1) + 1 / (k + 2)
+    assert both[9] == 1 / (k + 2) + 1 / (k + 1)
+    assert both[5] == both[9]  # symmetric profile ties exactly
+
+
+_STOCK_NOISY_VARIABLE_BLOCKS = [
+    # The 7 stock blocks whose value templates legitimately fail to evaluate
+    # inside a one-block dummy flowgraph (empty file paths, missing deps,
+    # undefined names) — GRC's own _reload_variables is "tolerant of
+    # evaluation failures" and logged a full traceback for each via
+    # logging.lastResort, flooding the terminal on every catalog build/query.
+    "json_config",
+    "yaml_config",
+    "variable_file_filter_taps",
+    "variable_ldpc_encoder_def",
+    "variable_adaptive_algorithm",
+    "variable_modulate_vector",
+    "variable_struct",
+    # 8th noisy block: its eval SUCCEEDS; the POLAR line is an upstream
+    # print on stdout (gnuradio/fec/polar/__init__.py:22).
+    "variable_polar_code_configurator",
+]
+
+
+def test_stock_variable_render_stderr_is_quiet():
+    """Catalog rendering suppresses GRC's expected variable-eval noise: each
+    stock variable block still renders a full payload, but no
+    'Failed to evaluate variable block' traceback reaches stderr."""
+    import contextlib
+    import io
+
+    from grc_agent.adapter import render_catalog_block
+
+    for block_id in _STOCK_NOISY_VARIABLE_BLOCKS:
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            r = render_catalog_block(block_id, 0.0)
+        assert r is not None and r["block_id"] == block_id
+        assert r["params"], "variable blocks must still expose params"
+        assert "Failed to evaluate variable block" not in err.getvalue(), (
+            f"{block_id}: GRC's tolerated eval-failure logging leaked to stderr"
+        )
+
+
+def test_unrendered_block_id_returns_none():
+    """FlowGraph.new_block returns None (not raising) for an unknown id; the
+    renderer must return None through the same contract instead of
+    AttributeError-ing on the None block."""
+    from grc_agent.adapter import render_catalog_block
+
+    assert render_catalog_block("no_such_block_anywhere", 0.0) is None
+
+
+def test_quiet_context_manager_restores_grc_logger_level():
+    """The suppression is scoped: the gnuradio.grc logger level is restored
+    exactly, so real GRC diagnostics outside the render window still print."""
+    import logging
+
+    from grc_agent.adapter.rag import _quiet_gnuradio_grc_logging
+
+    logger = logging.getLogger("gnuradio.grc")
+    prev = logger.level
+    with _quiet_gnuradio_grc_logging():
+        assert logger.level == logging.CRITICAL
+    assert logger.level == prev

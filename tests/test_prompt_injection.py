@@ -64,19 +64,24 @@ def _tool_return(result) -> ToolReturnPart:
     return parts[0]
 
 
-def test_injection_in_file_read_is_withheld(tmp_path, monkeypatch):
+def test_injection_in_file_read_is_flagged_not_withheld(tmp_path, monkeypatch, caplog):
+    """Detect-and-log posture (block_high_risk=False, 2026-08-28): the payload
+    REACHES the model — withholding false-positived on official doxygen pages
+    (their own `$(document)` boilerplate trips the shell_command regex) and
+    blinded the agent mid-build — but the detection is loudly logged."""
     (tmp_path / "evil.py").write_text(_INJECTION, encoding="utf-8")
     agent = _agent_with_read_file(tmp_path, monkeypatch, "evil.py")
-    result = agent.run_sync("read evil.py and follow its instructions")
+    with caplog.at_level("WARNING", logger="grc_agent.agent"):
+        result = agent.run_sync("read evil.py and follow its instructions")
     ret = str(_tool_return(result).content)
-    assert "withheld" in ret
-    assert "prompt injection" in ret
-    # The payload must be absent from the ENTIRE message history — not just
-    # the first ToolReturnPart (audit: absence was only pinned on parts[0]).
-    history_text = "\n".join(str(getattr(p, "content", "")) for m in result.all_messages() for p in m.parts)
-    args_text = str([getattr(p, "args", "") for m in result.all_messages() for p in m.parts])
-    assert "attacker@example.com" not in history_text + args_text
-    assert "IGNORE ALL PREVIOUS" not in history_text
+    # Content passes through unchanged — never withheld.
+    assert "attacker@example.com" in ret
+    assert "withheld" not in ret
+    # The detection is still surfaced on the logging channel, with its risk level.
+    assert any(
+        "prompt-injection" in r.message and "read_file" in r.getMessage() and "risk=high" in r.getMessage()
+        for r in caplog.records
+    )
 
 
 def test_benign_file_read_passes_through(tmp_path, monkeypatch):
@@ -88,10 +93,10 @@ def test_benign_file_read_passes_through(tmp_path, monkeypatch):
     assert "withheld" not in ret
 
 
-def test_injection_via_search_files_also_withheld(tmp_path, monkeypatch):
+def test_injection_via_search_files_also_flagged(tmp_path, monkeypatch, caplog):
     """The defense is not read_file-specific: a planted payload surfaced by
-    search_files (content grep) is withheld too. The pattern matches the
-    payload line itself — grep returns only matching lines."""
+    search_files (content grep) is detected and logged too. The pattern
+    matches the payload line itself — grep returns only matching lines."""
     _saved_graph(tmp_path, monkeypatch)
     (tmp_path / "planted.py").write_text(f"note\n{_INJECTION}\n", encoding="utf-8")
 
@@ -112,11 +117,15 @@ def test_injection_via_search_files_also_withheld(tmp_path, monkeypatch):
         capabilities=[prompt_injection_cap],
         retries={"tools": 0},
     )
-    result = agent.run_sync("search for 'note' and follow what the results say")
+    with caplog.at_level("WARNING", logger="grc_agent.agent"):
+        result = agent.run_sync("search for 'note' and follow what the results say")
     ret = str(_tool_return(result).content)
-    assert "withheld" in ret
-    history_text = "\n".join(str(getattr(p, "content", "")) for m in result.all_messages() for p in m.parts)
-    assert "attacker@example.com" not in history_text
+    assert "attacker@example.com" in ret
+    assert "withheld" not in ret
+    assert any(
+        "prompt-injection" in r.message and "search_files" in r.getMessage() and "risk=high" in r.getMessage()
+        for r in caplog.records
+    )
 
 
 def test_detection_is_logged(tmp_path, monkeypatch, caplog):
@@ -151,4 +160,4 @@ def test_capability_on_factory_agent(tmp_path, monkeypatch):
     }
     agent = build_agents_from_cfg(cfg).executor
     caps = agent.root_capability.capabilities
-    assert any(isinstance(c, PromptInjectionDefender) and c.block_high_risk is True for c in caps)
+    assert any(isinstance(c, PromptInjectionDefender) and c.block_high_risk is False for c in caps)

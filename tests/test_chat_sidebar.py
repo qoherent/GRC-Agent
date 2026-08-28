@@ -791,7 +791,7 @@ def test_streaming_thinking_flush_throttled(monkeypatch):
 
 
 def test_thinking_expander_label_changes_on_close():
-    """Thinking expander shows 'Thinking...' during streaming and changes to 'Thinked' when closed."""
+    """Thinking expander shows 'Thinking...' and expands during streaming, then collapses to 'Thought' when closed."""
     from gi.repository import Gtk
 
     from grc_agent.chat_sidebar import ChatSidebar, _StreamCtx
@@ -802,9 +802,80 @@ def test_thinking_expander_label_changes_on_close():
     exp = ctx.think_expander
     assert exp is not None
     assert exp.get_label() == "Thinking..."
+    assert exp.get_expanded() is True
 
     sidebar._close_thinking(ctx)
     assert exp.get_label() == "Thought"
+    assert exp.get_expanded() is False
+
+
+def test_thinking_expander_label_codex_summary():
+    """When the active provider is openai_codex, the thinking expander shows
+    'Thinking (summary)...' while streaming and 'Thought summary (Codex)' when closed/reloaded."""
+    from gi.repository import Gtk
+    from pydantic_ai.messages import ModelResponse, ThinkingPart
+
+    from grc_agent.chat_sidebar import ChatSidebar, _StreamCtx
+
+    sidebar = ChatSidebar()
+    sidebar.set_active_provider("openai_codex", "gpt-5.3-codex")
+
+    # 1. Streaming lifecycle
+    ctx = _StreamCtx(Gtk.Box())
+    sidebar._ensure_thinking(ctx)
+    exp = ctx.think_expander
+    assert exp is not None
+    assert exp.get_label() == "Thinking..." or exp.get_label() == "Thinking (summary)..."
+    assert exp.get_expanded() is True
+
+    sidebar._close_thinking(ctx)
+    assert exp.get_label() == "Thought summary (Codex)"
+    assert exp.get_expanded() is False
+
+    # 2. Historical transcript render
+    box = Gtk.Box()
+    msg = ModelResponse(parts=[ThinkingPart(content="High level plan summary")])
+    sidebar._render_last_message_rich(box, msg)
+    found_exp = None
+    for child in box.get_children():
+        if isinstance(child, Gtk.Expander):
+            found_exp = child
+            break
+    assert found_exp is not None
+    assert found_exp.get_label() == "Thought summary (Codex)"
+    assert found_exp.get_expanded() is False
+
+
+def test_thinking_expander_auto_scroll_and_tall_sizing():
+    """Thinking widget is configured with increased height and auto-scrolls during streaming."""
+    from gi.repository import Gtk
+
+    from grc_agent.chat_sidebar import ChatSidebar, _ChunkAccumulator, _StreamCtx
+
+    sidebar = ChatSidebar()
+    ctx = _StreamCtx(Gtk.Box())
+    sidebar._ensure_thinking(ctx)
+
+    exp = ctx.think_expander
+    assert exp is not None
+    assert exp.get_expanded() is True
+
+    sw = getattr(exp, "_grc_scrolled", None)
+    assert isinstance(sw, Gtk.ScrolledWindow)
+    assert sw.get_min_content_height() >= 200
+    assert sw.get_max_content_height() >= 750
+
+    # Stream several chunks of thinking and verify delta buffer and mark movement
+    ctx.think_acc = _ChunkAccumulator("First thought line\n")
+    ctx.think_dirty = True
+    sidebar._flush_thinking(ctx)
+
+    buf = ctx.think_body.get_buffer()
+    assert "First thought line" in buf.get_text(buf.get_start_iter(), buf.get_end_iter(), True)
+    assert buf.get_insert() is not None
+
+    sidebar._close_thinking(ctx)
+    assert exp.get_expanded() is False
 
 
 def test_send_quick_prompt():
@@ -1352,6 +1423,8 @@ def test_collapsed_thinking_stream_does_not_force_flush_every_delta():
     sidebar._scroll_to_bottom = lambda *_args, **_kwargs: None
     ctx = _StreamCtx(sidebar._start_agent_message())
     sidebar._on_part_start(ctx, PartStartEvent(index=0, part=ThinkingPart(content="")))
+    # When user manually collapses the thinking container:
+    ctx.think_expander.set_expanded(False)
 
     event = PartDeltaEvent(index=0, delta=ThinkingPartDelta(content_delta="abc"))
     for _ in range(10_000):
@@ -3020,6 +3093,10 @@ def test_query_knowledge_label_shows_search_mode():
     assert (
         _tool_label("query_knowledge", result='{"search_mode": "lexical"}')
         == "\u2699 query_knowledge (lexical) \u2713"
+    )
+    assert (
+        _tool_label("query_knowledge", result='{"search_mode": "hybrid"}')
+        == "\u2699 query_knowledge (hybrid) \u2713"
     )
     assert (
         _tool_label("query_knowledge", ok=False, result='{"search_mode": "vector"}')

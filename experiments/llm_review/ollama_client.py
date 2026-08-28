@@ -18,6 +18,7 @@ DEFAULT_MODEL = "glm-5.3-flash:cloud"
 def chat_completion(prompt: str, timeout: float = 300.0) -> str:
     """Single-shot, non-streaming chat completion. Raises on any failure —
     no retry, no silent fallback."""
+    env = dotenv_values(env_path())
     api_key = (
         env.get("OLLAMA_API_KEY")
         or env.get("OLLAMA_CLOUD_API_KEY")

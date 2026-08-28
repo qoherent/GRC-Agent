@@ -239,8 +239,12 @@ class GrcShellToolset(ShellToolset[AgentDepsT]):
                     props = tool.function_schema.json_schema.setdefault("properties", {})
                     td = props.get("timeout_seconds")
                     if isinstance(td, dict) and "description" in td:
+                        # State the RESOLVED default, never a hardcoded number:
+                        # GRC_SHELL_TIMEOUT is user-tunable via .env and the
+                        # model-facing schema must not lie about the value.
                         td["description"] = (
-                            "Maximum seconds to wait (default: GRC_SHELL_TIMEOUT, 600s)."
+                            "Maximum seconds to wait (default: GRC_SHELL_TIMEOUT, "
+                            f"{default_timeout():g}s)."
                         )
                 elif name == "start_command":
                     tool.description = (

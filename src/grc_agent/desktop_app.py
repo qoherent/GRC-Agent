@@ -1,6 +1,7 @@
 # ruff: noqa: E402
 import asyncio
 import contextlib
+import os
 import signal
 import sys
 from pathlib import Path
@@ -311,6 +312,20 @@ def build_app() -> tuple[Gtk.Window, NativeCanvasManager, ChatSidebar, NativeFlo
     return window, canvas, sidebar, proxy
 
 
+def is_native_wayland_session() -> bool:
+    """Detect if running on a native Wayland session (where GTK3 nested menu grabs
+    can drop popups unless forced to XWayland via GDK_BACKEND=x11)."""
+    if os.environ.get("GDK_BACKEND") == "x11":
+        return False
+    session = os.environ.get("XDG_SESSION_TYPE", "").lower()
+    if session == "x11":
+        return False
+    if session == "wayland" or bool(os.environ.get("WAYLAND_DISPLAY")):
+        return True
+    disp = Gdk.Display.get_default()
+    return disp is not None and "Wayland" in type(disp).__name__
+
+
 async def _startup_preflight(sidebar: ChatSidebar) -> None:
     """Run after window.show_all() — surfaces a non-blocking status-bar
     warning if the configured chat backend is unreachable. Bounded at 5s
@@ -318,6 +333,11 @@ async def _startup_preflight(sidebar: ChatSidebar) -> None:
     unified main loop responsive (chat streaming, indexing polls,
     canvas syncs all keep firing) instead of the old sync call that
     delayed window.show_all() by up to 5s before any window appeared."""
+    if is_native_wayland_session():
+        sidebar.set_status(
+            "Advisory: Native Wayland detected. If menu popups drop, launch with: GDK_BACKEND=x11 uv run grc-agent",
+            background=True,
+        )
     try:
         cfg = load_settings()
 

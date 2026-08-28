@@ -1,4 +1,5 @@
 # ruff: noqa: E402
+import contextlib
 import fcntl
 import hashlib
 import logging
@@ -92,7 +93,23 @@ class NativeFlowgraphProxy:
         monitor = object.__getattribute__(self, "_exec_monitor")
         if monitor is None:
             return None
-        return monitor.get_last_run_log()
+        data = monitor.get_last_run_log()
+        if data is None:
+            return None
+        cm = object.__getattribute__(self, "_canvas_manager")
+        page = getattr(cm, "current_page", None)
+        if page is not None and getattr(page, "flow_graph", None) is not None:
+            with contextlib.suppress(Exception):
+                gen_opts = page.flow_graph.get_option("generate_options")
+                if gen_opts == "no_gui":
+                    data = dict(data)
+                    data["generate_options"] = "no_gui"
+                    data["external_terminal_note"] = (
+                        "This flowgraph was generated with generate_options='no_gui'. GNU Radio runs "
+                        "no_gui flowgraphs in an external terminal window (e.g. xterm); "
+                        "console output was directed to that terminal wrapper rather than captured in GRC's console log."
+                    )
+        return data
 
     async def run_flowgraph(
         self,
@@ -198,9 +215,16 @@ class NativeFlowgraphProxy:
         stop_after_seconds: float | None,
     ) -> dict:
         """Map the monitor's run outcome to the tool result payload."""
+        gen_opts = None
+        cm = object.__getattribute__(self, "_canvas_manager")
+        page = getattr(cm, "current_page", None)
+        if page is not None and getattr(page, "flow_graph", None) is not None:
+            with contextlib.suppress(Exception):
+                gen_opts = page.flow_graph.get_option("generate_options")
+
         if outcome == "completed":
             code = monitor.last_run_code
-            return {
+            res = {
                 "status": "completed",
                 "return_code": code,
                 "ran_successfully": code == 0,
@@ -211,18 +235,28 @@ class NativeFlowgraphProxy:
                     "the user if in doubt."
                 ),
             }
+            if gen_opts == "no_gui":
+                res["generate_options"] = "no_gui"
+                res["note"] = (
+                    "This flowgraph was generated with generate_options='no_gui'. GNU Radio runs "
+                    "no_gui flowgraphs in an external terminal wrapper; read get_run_log for output details."
+                )
+            return res
         if outcome == "still_running":
             if stop_after_seconds is not None:
                 # Bounded run exhausted its budget: stop it through the same
                 # native Stop path the toolbar button takes — no extra machinery.
                 return await self._finish_bounded_run(monitor, stop_after_seconds)
-            return {
+            res = {
                 "status": "still_running",
                 "note": (
                     f"The run did not finish within {timeout_seconds}s. GUI flowgraphs run "
                     "until stopped — call run_flowgraph(action='stop') when done, then read get_run_log."
                 ),
             }
+            if gen_opts == "no_gui":
+                res["generate_options"] = "no_gui"
+            return res
         return {
             "status": "not_started",
             "note": (

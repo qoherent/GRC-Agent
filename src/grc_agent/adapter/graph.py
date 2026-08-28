@@ -942,6 +942,19 @@ def change_graph(  # noqa: C901
     if add_blocks:
         new_block_names = {str(item.get("instance_name", "")).strip() for item in add_blocks}
 
+    pre_existing_errors: list[str] = []
+    try:
+        flow_graph.validate()
+        if not flow_graph.is_valid():
+            for elem, msg in flow_graph.iter_error_messages():
+                parent = getattr(elem, "parent_block", None)
+                if parent is not None and parent is not elem:
+                    pre_existing_errors.append(f"{parent.name}: {elem}: {msg}")
+                else:
+                    pre_existing_errors.append(f"{elem}: {msg}")
+    except Exception:
+        pass
+
     try:
         # Phase 1: remove_connections
         if remove_connections:
@@ -1354,15 +1367,19 @@ def change_graph(  # noqa: C901
                 validation_errors = [
                     {"code": "gnu_validation", "message": "GRC validation failed."}
                 ]
-            revert_error = _revert_flow_graph(flow_graph, initial_data)
-            if revert_error:
-                validation_errors.append({"code": "rollback_failed", "message": revert_error})
-            return {
-                "ok": False,
-                "error_type": "validation_failed",
-                "errors": validation_errors,
-                "rollback_failed": bool(revert_error),
-            }
+            new_errors = [
+                e for e in validation_errors if e["message"] not in pre_existing_errors
+            ]
+            if new_errors:
+                revert_error = _revert_flow_graph(flow_graph, initial_data)
+                if revert_error:
+                    new_errors.append({"code": "rollback_failed", "message": revert_error})
+                return {
+                    "ok": False,
+                    "error_type": "validation_failed",
+                    "errors": new_errors,
+                    "rollback_failed": bool(revert_error),
+                }
     except Exception as exc:
         # The validation gate itself raised (rather than populating an error
         # list). The phases above already mutated the shared, canvas-rendered
@@ -1383,7 +1400,10 @@ def change_graph(  # noqa: C901
     try:
         grc_file_path = getattr(flow_graph, "grc_file_path", "")
         if not grc_file_path or Path(grc_file_path).is_dir():
-            return {"ok": True, "relayout": relayout}
+            res = {"ok": True, "relayout": relayout}
+            if pre_existing_errors:
+                res["pre_existing_errors"] = pre_existing_errors
+            return res
         original = Path(grc_file_path)
         # resolve() follows symlinks, so the symlink check must run on the
         # unresolved path — checking it after resolve() is always False and
@@ -1436,7 +1456,10 @@ def change_graph(  # noqa: C901
             "rollback_failed": bool(revert_error),
         }
 
-    return {"ok": True, "relayout": relayout}
+    res = {"ok": True, "relayout": relayout}
+    if pre_existing_errors:
+        res["pre_existing_errors"] = pre_existing_errors
+    return res
 
 
 def _check_codegen_preconditions(flow_graph: Any) -> None:

@@ -1928,3 +1928,515 @@ def test_provider_catalog_is_complete_and_consistent():
         if p in ("ollama_local", "openai_compatible", "openai_codex"):
             continue
         assert PROVIDER_BASE_URL[p], f"{p} must have a fixed endpoint"
+
+
+@pytest.mark.asyncio
+async def test_validate_flowgraph_state_error_attribution():
+    """validate_flowgraph_state must not raise ModelRetry for pre-existing errors
+    reported by change_graph, but MUST raise ModelRetry if a new error was introduced."""
+    import json
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from pydantic_ai.exceptions import ModelRetry
+
+    from grc_agent.agent import validate_flowgraph_state
+
+    class FakeElem:
+        def __init__(self, name):
+            self.name = name
+            self.parent_block = None
+
+        def __str__(self):
+            return self.name
+
+    # 1. Flowgraph with pre-existing error that matches change_graph's pre_existing_errors
+    fg = MagicMock()
+    fg.validate.return_value = None
+    fg.is_valid.return_value = False
+    fg.iter_error_messages.return_value = [
+        (FakeElem("samp_rate"), "undefined_var_xyz")
+    ]
+
+    # Model messages simulating a change_graph execution that captured pre_existing_errors
+    tool_return_content = json.dumps({
+        "ok": True,
+        "pre_existing_errors": ["samp_rate: undefined_var_xyz"],
+        "reason": "changed frequency",
+    })
+
+    part_user = SimpleNamespace(part_kind="user-prompt")
+    part_call = SimpleNamespace(tool_name="change_graph", part_kind="tool-call")
+    part_return = SimpleNamespace(
+        tool_name="change_graph",
+        part_kind="tool-return",
+        outcome="success",
+        content=tool_return_content,
+    )
+
+    msg_user = SimpleNamespace(parts=[part_user])
+    msg_agent = SimpleNamespace(parts=[part_call, part_return])
+
+    ctx = SimpleNamespace(deps=fg, messages=[msg_user, msg_agent])
+
+    # Should succeed without ModelRetry because the only error was pre-existing
+    output = await validate_flowgraph_state(ctx, "Done!")
+    assert output == "Done!"
+
+    # 2. Flowgraph now has a NEW error in addition to the pre-existing one
+    fg.iter_error_messages.return_value = [
+        (FakeElem("samp_rate"), "undefined_var_xyz"),
+        (FakeElem("filter_0"), "Port is not connected"),
+    ]
+
+    with pytest.raises(ModelRetry, match="filter_0"):
+        await validate_flowgraph_state(ctx, "Done!")
+
+    # 3. Multi-call turn: Call 1 started with 0 pre-existing errors and created an error via force=True,
+    # then Call 2 ran. The baseline must come from Call 1 (0 errors), so turn-end validation detects the error.
+    call1_return = json.dumps({"ok": True, "reason": "added block with force"})
+    call2_return = json.dumps({
+        "ok": True,
+        "pre_existing_errors": ["filter_0: Port is not connected"],
+        "reason": "updated param",
+    })
+    msg_call1 = SimpleNamespace(parts=[
+        SimpleNamespace(tool_name="change_graph", part_kind="tool-call"),
+        SimpleNamespace(tool_name="change_graph", part_kind="tool-return", outcome="success", content=call1_return),
+    ])
+    msg_call2 = SimpleNamespace(parts=[
+        SimpleNamespace(tool_name="change_graph", part_kind="tool-call"),
+        SimpleNamespace(tool_name="change_graph", part_kind="tool-return", outcome="success", content=call2_return),
+    ])
+    fg_multicall = MagicMock()
+    fg_multicall.validate.return_value = None
+    fg_multicall.is_valid.return_value = False
+    fg_multicall.iter_error_messages.return_value = [(FakeElem("filter_0"), "Port is not connected")]
+
+    ctx_multicall = SimpleNamespace(deps=fg_multicall, messages=[msg_user, msg_call1, msg_call2])
+    with pytest.raises(ModelRetry, match="filter_0"):
+        await validate_flowgraph_state(ctx_multicall, "Done!")
+
+
+
+# --- hybrid retrieval, truncation symmetry, and corpus-integrity tests ------
+
+
+def _isolated_vectors(tmp_path, monkeypatch):
+    """The documented isolation idiom (tests/test_adapter_rag.py:19-20):
+    redirect the lazy DB build and the settings file into tmp."""
+    tmp_vectors = tmp_path / "vectors"
+    tmp_vectors.mkdir()
+    monkeypatch.setenv("GRC_AGENT_VECTORS_DIR", str(tmp_vectors))
+    monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
+    return tmp_vectors
+
+
+def test_docs_exact_phrase_ranks_top1_lexical(tmp_path, monkeypatch):
+    """Floor for the exact-phrase tier on the real shipped corpus: all 7
+    verbatim-unique phrases the 2026-08-28 stress run proved lexical ranks
+    top-1 (and vector mode missed) must stay rank-1 under lexical BM25.
+    Fusion (RRF) must never regress this floor."""
+    from grc_agent._paths import docs_dir
+    from grc_agent.adapter import query_docs
+    from grc_agent.adapter.rag import _FRESHNESS_CACHE
+
+    _isolated_vectors(tmp_path, monkeypatch)
+    save_settings("ollama_local", "qwen3.6:35b-a3b-q4_K_M", embed_backend="lexical")
+
+    phrases = [
+        "which gives 0.898757",
+        "must be accounted for when reasoning about stream rates",
+        "binary symmetric NRZ line codes",
+        "The ZMQ stream blocks have the option to pass tags",
+        "sent over the _ok_ or _fail_ output ports",
+        "This addition of the extra zeros is called _zeropadding_",
+        "use a _Window Type_ of _Rectangular_",
+    ]
+    corpus_files = sorted(docs_dir().glob("*.md"))
+    assert len(corpus_files) >= 50, "shipped docs corpus missing"
+    present = [
+        p for p in phrases
+        if any(p.lower() in f.read_text(encoding="utf-8", errors="ignore").lower()
+               for f in corpus_files)
+    ]
+    # Corpus-drift guard: the test must never rot into vacuousness.
+    assert len(present) >= 5, f"only {len(present)}/7 stress phrases still in corpus"
+
+    try:
+        for phrase in present:
+            res = query_docs(phrase, limit=5)
+            assert res["ok"] is True
+            assert res["search_mode"] == "lexical"
+            first_chunk = res["answer"].split("\n\n---\n\n")[0]
+            first_line = first_chunk.split("\n", 1)[0]
+            assert first_line.startswith("path: ")
+            stem = first_line[len("path: "):]
+            src = docs_dir() / f"{stem}.md"
+            assert src.exists(), f"rank-1 chunk names missing file {stem}"
+            assert phrase.lower() in src.read_text(encoding="utf-8", errors="ignore").lower()
+    finally:
+        _FRESHNESS_CACHE.pop("docs", None)
+
+
+def test_docs_and_catalog_both_report_output_truncated(tmp_path, monkeypatch):
+    """The 2026-08-28 symmetry fix: BOTH domains surface output_truncated with
+    identical engine-computed semantics ('the candidate pool held more than
+    limit entries'), and docs slices its answer to limit (the over-fetched
+    +1 rowid is a truncation probe, never an extra chunk). Before the fix the
+    docs key was absent and structurally always-False (no extra_limit)."""
+    from grc_agent.adapter import query_catalog, query_docs
+    from grc_agent.adapter.rag import _CORPUS_VERSION_CACHE, _FRESHNESS_CACHE
+
+    _isolated_vectors(tmp_path, monkeypatch)
+    save_settings("ollama_local", "qwen3.6:35b-a3b-q4_K_M", embed_backend="lexical")
+
+    # A tiny docs corpus with exactly 7 chunks (level-1/2 headings drive
+    # _chunk_markdown) — small enough for a truthful False at limit=20.
+    docs_tmp = tmp_path / "docs"
+    docs_tmp.mkdir()
+    (docs_tmp / "Alpha.md").write_text(
+        "# One\nalpha one text\n# Two\nalpha two text\n# Three\nalpha three text\n"
+        "# Four\nalpha four text\n",
+        encoding="utf-8",
+    )
+    (docs_tmp / "Beta.md").write_text(
+        "# Five\nbeta five text\n# Six\nbeta six text\n# Seven\nbeta seven text\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("GRC_AGENT_DOCS_DIR", str(docs_tmp))
+    # _CORPUS_VERSION_CACHE is keyed by domain only — a tmp corpus must not
+    # poison later real-corpus tests in the same process.
+    _CORPUS_VERSION_CACHE.pop("docs", None)
+    try:
+        res5 = query_docs("text", limit=5)
+        assert res5["ok"] is True
+        assert res5["search_mode"] == "lexical"
+        # The key must EXIST now (pre-fix it was omitted entirely)…
+        assert "output_truncated" in res5
+        # …and be truthful in both directions on a 7-chunk corpus.
+        assert res5["output_truncated"] is True  # 7 > 5 — entries were dropped
+        assert len(res5["answer"].split("\n\n---\n\n")) == 5
+        res20 = query_docs("text", limit=20)
+        assert res20["output_truncated"] is False  # 7 ≤ 20 — nothing dropped
+        assert len(res20["answer"].split("\n\n---\n\n")) == 7
+
+        # Catalog side (unchanged shape, now also exercised): the key is
+        # present and truthful (True on the 568-block platform at limit=5).
+        cat = query_catalog("low pass filter", limit=5)
+        assert cat["ok"] is True
+        assert "output_truncated" in cat
+        assert cat["output_truncated"] is True
+    finally:
+        _FRESHNESS_CACHE.pop("docs", None)
+        _FRESHNESS_CACHE.pop("catalog", None)
+        _CORPUS_VERSION_CACHE.pop("docs", None)
+
+
+def test_catalog_docstring_units_semantics_retrieval_lexical(tmp_path, monkeypatch):
+    """Hermetic twin of the stress run's D2 validation: on the lexical
+    backend, the 7 units/semantics queries the 2026-08-28 stress proved
+    rank<=2 with docstrings must stay rank<=2 with their doc field carrying
+    the expected substrings (pins _compose_catalog_text's doc enrichment)."""
+    from grc_agent.adapter import query_catalog
+    from grc_agent.adapter.rag import _FRESHNESS_CACHE
+
+    _isolated_vectors(tmp_path, monkeypatch)
+    save_settings("ollama_local", "qwen3.6:35b-a3b-q4_K_M", embed_backend="lexical")
+
+    matrix = [
+        ("PLL carrier tracking loop bandwidth w min_freq max_freq units radians per sample",
+         "analog_pll_carriertracking_cc", ["radians per sample", "NOT HERTZ"]),
+        ("keep m in n offset semantics which items are taken",
+         "blocks_keep_m_in_n", ["initial item offset", "number of items to take"]),
+        ("FM frequency modulator sensitivity units radians per sample amplitude",
+         "analog_frequency_modulator_fc", ["radians/sample"]),
+        ("costas loop carrier recovery locks to center frequency",
+         "digital_costas_loop_cc", ["Costas loop"]),
+        ("generalized FM demodulation with deemphasis and audio filtering",
+         "analog_fm_demod_cf", ["deemphasis"]),
+        ("limit the average sample rate flowing through a flowgraph",
+         "blocks_throttle", ["samples_per_sec"]),
+        ("quadrature demodulator complex input float output for FM and FSK",
+         "analog_quadrature_demod_cf", ["quadrature demodulator"]),
+    ]
+    try:
+        for query, expected_block, doc_substrings in matrix:
+            res = query_catalog(query, limit=5)
+            assert res["ok"] is True
+            block_ids = [r["block_id"] for r in res["results"]]
+            assert expected_block in block_ids, f"{expected_block} not in {block_ids[:3]}"
+            rank = block_ids.index(expected_block)
+            assert rank <= 2, f"{expected_block} ranked {rank} (stress proved <= 2)"
+            doc = res["results"][rank]["doc"]
+            assert doc, f"{expected_block} carried no implementation docstring"
+            for sub in doc_substrings:
+                assert sub in doc, f"{expected_block} doc missing {sub!r}"
+    finally:
+        _FRESHNESS_CACHE.pop("catalog", None)
+
+
+def test_catalog_docstring_units_semantics_retrieval_vector(tmp_path, monkeypatch):
+    """Provisioned-runtime variant of the D2 validation: the same 7-query
+    matrix through the REAL embedding backend (hybrid or vector mode).
+    Skipped unless a llama-server is already alive — cold tests must never
+    download or spawn one."""
+    from grc_agent import embed_runtime
+    from grc_agent.adapter import query_catalog
+    from grc_agent.adapter.rag import _FRESHNESS_CACHE
+
+    if not embed_runtime.is_alive():
+        pytest.skip("llama.cpp embedding runtime not alive (provisioned-only test)")
+
+    _isolated_vectors(tmp_path, monkeypatch)
+    save_settings("ollama_local", "qwen3.6:35b-a3b-q4_K_M", embed_backend="llamacpp")
+
+    matrix = [
+        ("PLL carrier tracking loop bandwidth w min_freq max_freq units radians per sample",
+         "analog_pll_carriertracking_cc", ["radians per sample", "NOT HERTZ"]),
+        ("keep m in n offset semantics which items are taken",
+         "blocks_keep_m_in_n", ["initial item offset", "number of items to take"]),
+        ("FM frequency modulator sensitivity units radians per sample amplitude",
+         "analog_frequency_modulator_fc", ["radians/sample"]),
+        ("costas loop carrier recovery locks to center frequency",
+         "digital_costas_loop_cc", ["Costas loop"]),
+        ("generalized FM demodulation with deemphasis and audio filtering",
+         "analog_fm_demod_cf", ["deemphasis"]),
+        ("limit the average sample rate flowing through a flowgraph",
+         "blocks_throttle", ["samples_per_sec"]),
+        ("quadrature demodulator complex input float output for FM and FSK",
+         "analog_quadrature_demod_cf", ["quadrature demodulator"]),
+    ]
+    try:
+        for query, expected_block, doc_substrings in matrix:
+            res = query_catalog(query, limit=5)
+            assert res["ok"] is True
+            assert res["search_mode"] in ("vector", "hybrid")
+            block_ids = [r["block_id"] for r in res["results"]]
+            assert expected_block in block_ids, f"{expected_block} not in {block_ids[:3]}"
+            rank = block_ids.index(expected_block)
+            assert rank <= 2, f"{expected_block} ranked {rank}"
+            doc = res["results"][rank]["doc"]
+            assert doc and all(sub in doc for sub in doc_substrings)
+    finally:
+        _FRESHNESS_CACHE.pop("catalog", None)
+
+
+def test_db_build_meta_integrity(tmp_path, monkeypatch):
+    """_db_meta + sqlite_master invariants for both domains and both flavors:
+    corpus_version matches the live fingerprint, embedding_model present iff
+    the vec0 index exists, FTS is external-content, and chunk counts equal
+    the ingest return values."""
+    import hashlib
+    import re as _re
+    import sqlite3
+
+    import grc_agent.ingest as ingest_mod
+    from grc_agent._paths import docs_dir
+    from grc_agent.adapter import _corpus_version, get_db_and_model
+    from grc_agent.adapter.rag import _EMBEDDING_DIM_CACHE, _FRESHNESS_CACHE
+    from grc_agent.ingest import ingest_catalog
+
+    _isolated_vectors(tmp_path, monkeypatch)
+
+    def check(domain, db_path, model, expect_vector, chunk_count):  # noqa: ARG001
+        conn = sqlite3.connect(db_path)
+        try:
+            meta = dict(conn.execute("SELECT key, value FROM _db_meta").fetchall())
+            assert meta.get("corpus_version") == _corpus_version(domain)
+            tables = {
+                r[0] for r in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type IN ('table','virtual table')"
+                )
+            }
+            assert f"{domain}_chunks" in tables
+            assert f"{domain}_fts" in tables
+            assert f"{domain}_idx" in tables if expect_vector else f"{domain}_idx" not in tables
+            assert ("embedding_model" in meta) == expect_vector
+            if expect_vector:
+                sql = conn.execute(
+                    "SELECT sql FROM sqlite_master WHERE name = ?", (f"{domain}_idx",)
+                ).fetchone()[0]
+                dim = int(_re.search(r"float\[(\d+)\]", sql).group(1))
+                assert dim == 3  # the deterministic fake embedder's dimension
+                fts_sql = conn.execute(
+                    "SELECT sql FROM sqlite_master WHERE name = ?", (f"{domain}_fts",)
+                ).fetchone()[0]
+                assert f"content='{domain}_chunks'" in fts_sql
+            count = conn.execute(f"SELECT count(*) FROM {domain}_chunks").fetchone()[0]
+            assert count == chunk_count
+        finally:
+            conn.close()
+
+    # Flavor A: llamacpp backend + deterministic fake embedder (hermetic
+    # vec0+FTS build; all three patch points required — see T7's docstring).
+    save_settings("ollama_local", "qwen3.6:35b-a3b-q4_K_M", embed_backend="llamacpp")
+    _EMBEDDING_DIM_CACHE.clear()
+    _FRESHNESS_CACHE.clear()
+
+    def fake_embed(text, model):  # noqa: ARG001
+        h = hashlib.sha256(text.encode()).digest()
+        return [b / 255.0 for b in h[:3]]
+
+    monkeypatch.setattr(ingest_mod, "embed_document", fake_embed)
+    import grc_agent.adapter.rag as rag_mod
+
+    monkeypatch.setattr(rag_mod, "embed_document", fake_embed)
+    try:
+        db_path, model = get_db_and_model("catalog")
+        n_blocks = ingest_catalog(db_path, model)
+        check("catalog", db_path, model, expect_vector=True, chunk_count=n_blocks)
+        db_path, model = get_db_and_model("docs")
+        n_chunks = ingest_mod.ingest_docs(db_path, model)
+        check("docs", db_path, model, expect_vector=True, chunk_count=n_chunks)
+        assert n_chunks == sum(
+            len(ingest_mod._chunk_markdown(f.read_text(encoding="utf-8", errors="ignore")))
+            for f in sorted(docs_dir().glob("*.md"))
+        )
+    finally:
+        _EMBEDDING_DIM_CACHE.clear()
+        _FRESHNESS_CACHE.clear()
+
+    # Flavor B: lexical backend — no vec0, no embedding_model, FTS only.
+    save_settings("ollama_local", "qwen3.6:35b-a3b-q4_K_M", embed_backend="lexical")
+    db_path, model = get_db_and_model("catalog")
+    n_blocks = ingest_catalog(db_path, model)
+    check("catalog", db_path, model, expect_vector=False, chunk_count=n_blocks)
+    _FRESHNESS_CACHE.clear()
+
+
+def test_stale_db_rebuilds_on_corpus_version_change(tmp_path, monkeypatch):
+    """Freshness machinery: a corrupted corpus_version triggers exactly one
+    rebuild on the next query; a healthy lexical-only DB must NEVER rebuild
+    merely because the vector index is absent (the anti-thrash rule)."""
+    import sqlite3
+
+    import grc_agent.ingest as ingest_mod
+    from grc_agent.adapter import query_docs
+    from grc_agent.adapter.rag import _CORPUS_VERSION_CACHE, _FRESHNESS_CACHE
+
+    _isolated_vectors(tmp_path, monkeypatch)
+    save_settings("ollama_local", "qwen3.6:35b-a3b-q4_K_M", embed_backend="lexical")
+
+    _CORPUS_VERSION_CACHE.pop("docs", None)
+    try:
+        first = query_docs("sample rate", limit=3)
+        assert first["ok"] is True
+        db_path, _model = None, None
+        # locate the DB the engine actually built
+        from grc_agent._paths import vectors_dir
+        db_path = str(vectors_dir() / "docs_lexical.db")
+        conn = sqlite3.connect(db_path)
+        before = conn.execute("SELECT count(*) FROM docs_chunks").fetchone()[0]
+        conn.execute("UPDATE _db_meta SET value='0000000000000000' WHERE key='corpus_version'")
+        conn.commit()
+        conn.close()
+        _FRESHNESS_CACHE.pop("docs", None)  # simulate the fresh process
+
+        rebuilt = query_docs("sample rate", limit=3)
+        assert rebuilt["ok"] is True
+        assert rebuilt["search_mode"] == "lexical"
+        conn = sqlite3.connect(db_path)
+        after = conn.execute("SELECT count(*) FROM docs_chunks").fetchone()[0]
+        meta = dict(conn.execute("SELECT key, value FROM _db_meta").fetchall())
+        conn.close()
+        assert after == before
+        from grc_agent.adapter import _corpus_version
+        assert meta["corpus_version"] == _corpus_version("docs")
+
+        # Anti-thrash: a healthy lexical-only DB must not rebuild — even with
+        # the freshness cache popped (fresh-process simulation), the metadata
+        # check passes and ingest_docs is never invoked again.
+        calls = []
+
+        def counting_stub(*a, **kw):  # noqa: ARG001
+            calls.append(1)
+            raise AssertionError("healthy lexical-only DB must not rebuild")
+
+        monkeypatch.setattr(ingest_mod, "ingest_docs", counting_stub)
+        _FRESHNESS_CACHE.pop("docs", None)
+        again = query_docs("sample rate", limit=3)
+        assert again["ok"] is True
+        assert calls == []
+    finally:
+        _FRESHNESS_CACHE.pop("docs", None)
+        _CORPUS_VERSION_CACHE.pop("docs", None)
+
+
+def test_hybrid_fusion_when_both_indexes_present(tmp_path, monkeypatch):
+    """The hybrid rule: when the DB contains BOTH a vec0 index and an FTS5
+    index and the query embeds, the two rankings fuse via RRF and
+    search_mode is 'hybrid' with no fallback message. Every lexical-only
+    path must be structurally unreachable here — and still behave exactly
+    as before when the guard fails (cases 2 and 3).
+
+    First hermetic test to exercise a full fake-embed vec0 build + KNN query;
+    the KNN SQL is production-proven (rag.py's vector branch)."""
+    import hashlib
+    import sqlite3
+
+    import grc_agent.ingest as ingest_mod
+    from grc_agent.adapter import get_db_and_model, query_catalog
+    from grc_agent.adapter.rag import _EMBEDDING_DIM_CACHE, _FRESHNESS_CACHE
+    from grc_agent.ingest import ingest_catalog
+
+    _isolated_vectors(tmp_path, monkeypatch)
+    save_settings("ollama_local", "qwen3.6:35b-a3b-q4_K_M", embed_backend="llamacpp")
+    db_path, model = get_db_and_model("catalog")
+    _EMBEDDING_DIM_CACHE.clear()
+
+    def fake_embed(text, model):  # noqa: ARG001
+        h = hashlib.sha256(text.encode()).digest()
+        return [b / 255.0 for b in h[:3]]
+
+    # All three patch points are required: the ingest test hook, the
+    # _build_db dimension check, and query-time embedding. Missing the
+    # second would send _build_db into embed_runtime.ensure_server() — a
+    # real download/start, breaking hermeticity.
+    monkeypatch.setattr(ingest_mod, "embed_document", fake_embed)
+    import grc_agent.adapter.rag as rag_mod
+
+    monkeypatch.setattr(rag_mod, "embed_document", fake_embed)
+    monkeypatch.setattr(rag_mod, "embed_query", lambda q, domain="catalog": fake_embed(q, domain))
+    ingest_catalog(db_path, model)
+
+    try:
+        # Case 1 — the rule: fused results, honest truncation, no fallback message.
+        res = query_catalog("low pass filter", limit=5)
+        assert res["ok"] is True
+        assert res["search_mode"] == "hybrid"
+        assert 0 < len(res["results"]) <= 5
+        assert res["output_truncated"] is True  # 568-block platform, 6-candidate pool
+        assert "message" not in res, "hybrid is not a fallback — no fallback message"
+        assert all("score" in r for r in res["results"])
+        assert any(r["distance"] != 0.0 for r in res["results"]), (
+            "vector-sourced rows carry a real distance"
+        )
+
+        # Case 2 — fallback still wins against a both-indexes DB: embed_query
+        # raising must yield lexical + fallback message (the hardest
+        # configuration for the fallback path).
+        def fail_query(q, domain="catalog"):  # noqa: ARG001
+            raise RuntimeError("backend down")
+
+        monkeypatch.setattr(rag_mod, "embed_query", fail_query)
+        res2 = query_catalog("low pass filter", limit=5)
+        assert res2["ok"] is True
+        assert res2["search_mode"] == "lexical"
+        assert "fallback" in res2.get("message", "").lower()
+
+        # Case 3 — single-index guard: with FTS dropped AND freshness
+        # pre-pinned (otherwise _build_db would rebuild — the missing-FTS
+        # staleness rule), the query runs the pure vector branch.
+        monkeypatch.setattr(rag_mod, "embed_query", lambda q, domain="catalog": [0.1, 0.2, 0.3])  # noqa: ARG005
+        conn = sqlite3.connect(db_path)
+        conn.execute("DROP TABLE catalog_fts")
+        conn.commit()
+        conn.close()
+        _FRESHNESS_CACHE["catalog"] = (db_path, model)  # skip the rebuild-on-missing-FTS
+        res3 = query_catalog("low pass filter", limit=5)
+        assert res3["ok"] is True
+        assert res3["search_mode"] == "vector"
+    finally:
+        _EMBEDDING_DIM_CACHE.clear()
+        _FRESHNESS_CACHE.pop("catalog", None)

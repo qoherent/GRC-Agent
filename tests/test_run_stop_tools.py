@@ -465,3 +465,35 @@ def test_tool_run_flowgraph_stop_requires_no_approval_and_stops():
     ctx = _ctx(_FakeDeps(proxy), tool_call_approved=False)
     res = json.loads(asyncio.run(run_flowgraph_func(ctx, action="stop")))
     assert res["status"] == "not_running"
+
+
+def test_get_run_log_annotates_no_gui():
+    page = _valid_page()
+    page.flow_graph.get_option.return_value = "no_gui"
+    monitor = MagicMock()
+    monitor.get_last_run_log.return_value = {
+        "return_code": 0,
+        "log_text": "",
+        "ran_successfully": True,
+        "run_in_progress": False,
+    }
+    proxy, _ = _make_proxy(page, monitor=monitor)
+    res = proxy.get_run_log()
+    assert res is not None
+    assert res["generate_options"] == "no_gui"
+    assert "external_terminal_note" in res
+    assert "no_gui" in res["external_terminal_note"]
+
+
+@pytest.mark.usefixtures("fake_actions")
+def test_run_flowgraph_annotates_no_gui():
+    import asyncio
+
+    page = _valid_page()
+    page.flow_graph.get_option.return_value = "no_gui"
+    proxy, _ = _make_proxy(page, outcome="completed", code=0)
+    res = asyncio.run(proxy.run_flowgraph(action="start", wait=True))
+    assert res["status"] == "completed"
+    assert res["generate_options"] == "no_gui"
+    assert "external terminal wrapper" in res["note"]
+

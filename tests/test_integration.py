@@ -16,6 +16,8 @@ from grc_agent.settings import env_path
 
 load_dotenv(env_path())
 
+pytestmark = pytest.mark.integration
+
 # Import components from grc_agent.agent
 from grc_agent.agent import (  # noqa: E402
     SCENARIOS,

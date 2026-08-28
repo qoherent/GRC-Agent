@@ -241,7 +241,15 @@ def _corpus_version(domain: str) -> str:
 
         platform = get_platform()
         block_ids = sorted(b for b in platform.blocks if not b.startswith("_"))
-        version = hashlib.sha256("\n".join(block_ids).encode()).hexdigest()[:16]
+        # The fingerprint must also move when COMPOSITION moves, not just when
+        # the block set does: render_catalog_block now embeds implementation
+        # docstrings in the payload, so a cached DB built by the older
+        # doc-less composition would otherwise still match on block-id hash
+        # alone and keep serving stale results. Bump the marker whenever the
+        # composition rule changes again.
+        version = hashlib.sha256(
+            ("\n".join(block_ids) + "\ncatalog-docstrings-v2").encode()
+        ).hexdigest()[:16]
     else:
         from grc_agent._paths import docs_dir
 
@@ -473,6 +481,27 @@ _FTS_TOKEN_RE = re.compile(r"\w+")
 # Realistic natural-language queries are far under this cap.
 _FTS_MAX_TOKENS = 32
 
+# Reciprocal Rank Fusion (RRF): score(d) = sum over input rankings of
+# 1 / (k + rank(d)), ranks 1-based. k = 60 is the constant from the source
+# publication — Cormack, Clarke & Bütcher, "Reciprocal Rank Fusion
+# outperforms Condorcet and individual Rank Learning Methods", SIGIR 2009,
+# pp. 758-759 — where it "was fixed during a pilot investigation and not
+# altered during subsequent validation". A literature constant, not a tuned
+# knob; do not tune it against local metrics.
+_RRF_K = 60
+
+
+def _rrf_fuse(rankings: list[list[int]]) -> dict[int, float]:
+    """Fuse ranked rowid lists via Reciprocal Rank Fusion (k = _RRF_K).
+
+    Pure and deterministic: no DB, no I/O. Ties are broken by ascending rowid
+    at the sort site (stable, DB-deterministic, no relevance meaning)."""
+    scores: dict[int, float] = {}
+    for ranking in rankings:
+        for pos, rowid in enumerate(ranking, start=1):
+            scores[rowid] = scores.get(rowid, 0.0) + 1.0 / (_RRF_K + pos)
+    return scores
+
 
 def _fts_query_string(q: str) -> tuple[str, bool] | None:
     """Build a permissive FTS5 MATCH expression from free-text input.
@@ -569,30 +598,65 @@ def _query_index(
 
         fetch_limit = limit + extra_limit
         vec_available = query_vec is not None and _table_exists(conn, idx_table)
+        fts_available = _table_exists(conn, fts_table)
+        fts_result = _fts_query_string(q)
+        fts_query = fts_result[0] if fts_result else None
 
-        if vec_available:
+        if vec_available and fts_available:
+            # Hybrid: both indexes present and the query embedded — fuse the
+            # two rankings with Reciprocal Rank Fusion instead of trusting
+            # either engine alone (measured complementary on these corpora:
+            # lexical owns verbatim phrases, vector owns paraphrases).
             vec_rows = conn.execute(
                 f"SELECT rowid, distance FROM {idx_table} WHERE embedding MATCH ? AND k = ? ORDER BY distance",
                 (sqlite_vec.serialize_float32(query_vec), fetch_limit),
             ).fetchall()
-            ranked_rowids = [row["rowid"] for row in vec_rows]
-            distance_by_rowid = {row["rowid"]: row["distance"] for row in vec_rows}
-            output_truncated = len(vec_rows) > limit
-            search_mode = "vector"
-        else:
-            fts_result = _fts_query_string(q)
-            fts_query = fts_result[0] if fts_result else None
             fts_rows = (
                 conn.execute(
                     f"SELECT rowid FROM {fts_table} WHERE {fts_table} MATCH ? "
                     f"ORDER BY bm25({fts_table}) LIMIT ?",
                     (fts_query, fetch_limit),
                 ).fetchall()
-                if fts_query and _table_exists(conn, fts_table)
+                if fts_query
+                else []
+            )
+            fused = _rrf_fuse(
+                [[row["rowid"] for row in vec_rows], [row["rowid"] for row in fts_rows]]
+            )
+            ranked_rowids = [
+                rowid
+                for rowid, _score in sorted(fused.items(), key=lambda kv: (-kv[1], kv[0]))
+            ][:fetch_limit]
+            distance_by_rowid = {row["rowid"]: row["distance"] for row in vec_rows}
+            score_by_rowid = fused
+            output_truncated = len(fused) > limit
+            search_mode = "hybrid"
+            # The FTS token cap applies to the lexical leg of a fused query
+            # too — disclose it here exactly as the pure-lexical branch does.
+            query_capped = bool(fts_result and fts_result[1])
+        elif vec_available:
+            vec_rows = conn.execute(
+                f"SELECT rowid, distance FROM {idx_table} WHERE embedding MATCH ? AND k = ? ORDER BY distance",
+                (sqlite_vec.serialize_float32(query_vec), fetch_limit),
+            ).fetchall()
+            ranked_rowids = [row["rowid"] for row in vec_rows]
+            distance_by_rowid = {row["rowid"]: row["distance"] for row in vec_rows}
+            score_by_rowid = {}
+            output_truncated = len(vec_rows) > limit
+            search_mode = "vector"
+        else:
+            fts_rows = (
+                conn.execute(
+                    f"SELECT rowid FROM {fts_table} WHERE {fts_table} MATCH ? "
+                    f"ORDER BY bm25({fts_table}) LIMIT ?",
+                    (fts_query, fetch_limit),
+                ).fetchall()
+                if fts_query and fts_available
                 else []
             )
             ranked_rowids = [row["rowid"] for row in fts_rows]
             distance_by_rowid = {}
+            score_by_rowid = {}
             output_truncated = len(fts_rows) > limit
             search_mode = "lexical"
             # Separate flag, NOT folded into embed_error: the truncation note
@@ -616,6 +680,7 @@ def _query_index(
             "ranked_rowids": ranked_rowids,
             "id_by_rowid": id_by_rowid,
             "distance_by_rowid": distance_by_rowid,
+            "score_by_rowid": score_by_rowid,
             "output_truncated": output_truncated,
             "embed_error": embed_error,
             "query_capped": query_capped,
@@ -649,6 +714,10 @@ def query_catalog(query: str, limit: int = 5) -> dict[str, Any]:
             continue
         rendered = render_catalog_block(block_id, result["distance_by_rowid"].get(rowid, 0.0))
         if rendered:
+            if result["search_mode"] == "hybrid":
+                # Truthful fused-rank signal — `distance` is vector-only and
+                # reads 0.0 for lexical-sourced rows (pre-existing convention).
+                rendered["score"] = round(result["score_by_rowid"].get(rowid, 0.0), 4)
             results.append(rendered)
         if len(results) >= limit:
             break
@@ -660,14 +729,16 @@ def query_catalog(query: str, limit: int = 5) -> dict[str, Any]:
         "output_truncated": result["output_truncated"],
         "search_mode": result["search_mode"],
     }
-    if result["search_mode"] == "lexical":
-        if result["query_capped"]:
-            # Disclosed in every backend mode (no silent transformation).
-            response["message"] = (
-                f"Lexical search truncated the query to the first {_FTS_MAX_TOKENS} word tokens."
-            )
-        elif result["embed_error"] or resolve_embed_backend(load_settings()) == "llamacpp":
-            response["message"] = _lexical_fallback_message(result["embed_error"])
+    if result["query_capped"]:
+        # Disclosed in every backend mode, hybrid included (no silent
+        # transformation).
+        response["message"] = (
+            f"Lexical search truncated the query to the first {_FTS_MAX_TOKENS} word tokens."
+        )
+    elif result["search_mode"] == "lexical" and (
+        result["embed_error"] or resolve_embed_backend(load_settings()) == "llamacpp"
+    ):
+        response["message"] = _lexical_fallback_message(result["embed_error"])
     return response
 
 
@@ -685,16 +756,72 @@ def _catalog_port_info(p: Any) -> dict[str, Any]:
     return info
 
 
+def _block_class_doc(b: Any) -> str:
+    """The implementation class's own docstring, resolved through the block's
+    native code templates: imports are exec'd exactly as GRC's generator runs
+    them, and ``templates.make``'s leading dotted name is resolved against that
+    namespace to reach the installed SWIG/Python class. This is where parameter
+    units and semantics live (e.g. the analog PLL blocks document frequencies
+    as "in radians per sample, NOT HERTZ" — the fact session 150 could not get
+    from the docs corpus because it has no carriertracking page). Returns ""
+    when the target is not resolvable (templated ``*_x`` blocks, variables,
+    options) — honest absence, never a guess."""
+    ns: dict[str, Any] = {}
+    for line in str(b.templates.get("imports") or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            exec(line, ns)  # noqa: S102 - the block's own static import lines, same lines GRC's generator runs
+        except Exception:
+            return ""
+    m = re.match(r"\s*([A-Za-z_][\w.]*)\s*\(", str(b.templates.get("make") or ""))
+    if not m:
+        return ""
+    obj: Any = ns
+    for attr in m.group(1).split("."):
+        obj = obj.get(attr) if isinstance(obj, dict) else getattr(obj, attr, None)
+        if obj is None:
+            return ""
+    return str(getattr(obj, "__doc__", "") or "").strip()
+
+
+@contextlib.contextmanager
+def _quiet_gnuradio_grc_logging():
+    """Silence GRC's expected variable-eval failure logging for the duration
+    of a dummy-flowgraph render.
+
+    The catalog render instantiates every library block in a throwaway
+    one-block flowgraph; FlowGraph.rewrite() runs _reload_variables, whose
+    evaluator is documented "tolerant of evaluation failures" — stock
+    variable templates that legitimately need user-supplied files/objects
+    (json_config, yaml_config, variable_file_filter_taps,\n    variable_ldpc_encoder_def, variable_adaptive_algorithm,\n    variable_modulate_vector, variable_struct) fail there by design, and
+    upstream logs a full traceback per failure. Those records are expected
+    noise, not diagnostics: raise the gnuradio.grc logger level for the
+    render only (restored in finally — real GRC diagnostics during actual
+    flowgraph load/run are unaffected). Without this the records reach
+    logging.lastResort and flood the terminal on every rebuild/query."""
+    grc_logger = logging.getLogger("gnuradio.grc")
+    prev = grc_logger.level
+    grc_logger.setLevel(logging.CRITICAL)
+    try:
+        yield
+    finally:
+        grc_logger.setLevel(prev)
+
+
 def render_catalog_block(block_id: str, distance: float) -> dict[str, Any] | None:
     from grc_agent.adapter.graph import get_platform, keep_param, type_controlling_params
 
     platform = get_platform()
     fg = platform.make_flow_graph()
-    try:
-        b = fg.new_block(block_id)
-    except KeyError:
+    # FlowGraph.new_block swallows KeyError and returns None for an unknown
+    # id (FlowGraph.py:340-345) — never raises.
+    b = fg.new_block(block_id)
+    if b is None:
         return None
-    fg.rewrite()
+    with _quiet_gnuradio_grc_logging():
+        fg.rewrite()
 
     params = {}
     type_controlling = type_controlling_params(block_id)
@@ -730,6 +857,7 @@ def render_catalog_block(block_id: str, distance: float) -> dict[str, Any] | Non
         "params": params,
         "inputs": inputs,
         "outputs": outputs,
+        "doc": _block_class_doc(b),
         "distance": round(distance, 3),
     }
 
@@ -747,26 +875,33 @@ def query_docs(query: str, limit: int = 5) -> dict[str, Any]:
         fts_table="docs_fts",
         chunks_table="docs_chunks",
         id_column="payload",
+        extra_limit=1,
     )
     if not result["ok"]:
         return {"ok": False, "answer": "", "message": result["message"]}
 
     id_by_rowid = result["id_by_rowid"]
-    chunks = [id_by_rowid[r] for r in result["ranked_rowids"] if r in id_by_rowid]
+    # Cap the answer at `limit`: the +1 over-fetched rowid is a truncation
+    # probe (mirrors the catalog's render-failure spare), never an extra
+    # chunk — the response surfaces at most `limit` entries like catalog does.
+    chunks = [id_by_rowid[r] for r in result["ranked_rowids"] if r in id_by_rowid][:limit]
     answer = "\n\n---\n\n".join(chunks)
 
     response: dict[str, Any] = {
         "ok": True,
         "query": q,
         "answer": answer,
+        "output_truncated": result["output_truncated"],
         "search_mode": result["search_mode"],
     }
-    if result["search_mode"] == "lexical":
-        if result["query_capped"]:
-            # Disclosed in every backend mode (no silent transformation).
-            response["message"] = (
-                f"Lexical search truncated the query to the first {_FTS_MAX_TOKENS} word tokens."
-            )
-        elif result["embed_error"] or resolve_embed_backend(load_settings()) == "llamacpp":
-            response["message"] = _lexical_fallback_message(result["embed_error"])
+    if result["query_capped"]:
+        # Disclosed in every backend mode, hybrid included (no silent
+        # transformation).
+        response["message"] = (
+            f"Lexical search truncated the query to the first {_FTS_MAX_TOKENS} word tokens."
+        )
+    elif result["search_mode"] == "lexical" and (
+        result["embed_error"] or resolve_embed_backend(load_settings()) == "llamacpp"
+    ):
+        response["message"] = _lexical_fallback_message(result["embed_error"])
     return response

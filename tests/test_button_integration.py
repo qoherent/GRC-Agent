@@ -44,10 +44,13 @@ def _ollama_cloud_available() -> bool:
     return bool(os.getenv("OLLAMA_CLOUD_API_KEY"))
 
 
-pytestmark = pytest.mark.skipif(
-    not _ollama_cloud_available(),
-    reason="OLLAMA_CLOUD_API_KEY not set — skipping Ollama Cloud integration tests.",
-)
+pytestmark = [
+    pytest.mark.integration,
+    pytest.mark.skipif(
+        not _ollama_cloud_available(),
+        reason="OLLAMA_CLOUD_API_KEY not set — skipping Ollama Cloud integration tests.",
+    ),
+]
 
 _CLOUD_MODEL = os.getenv("OLLAMA_CLOUD_MODEL", "glm-5.3-flash:cloud")
 _DIAL_TONE = str(Path("tests/data/dial_tone.grc").resolve())
@@ -291,7 +294,7 @@ def test_query_knowledge_catalog_search_real():
         )
         calls = _find_tool_calls(res, "query_knowledge")
         assert calls, "agent never called query_knowledge"
-        assert any(c.get("search_mode") in ("vector", "lexical") for c in calls), (
+        assert any(c.get("search_mode") in ("vector", "lexical", "hybrid") for c in calls), (
             f"expected a valid query_knowledge result, got: {calls}"
         )
         block_ids = [

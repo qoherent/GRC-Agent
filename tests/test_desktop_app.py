@@ -201,3 +201,69 @@ def test_untitled_save_folder_ignores_unset_or_invalid_dir(monkeypatch):
     save_cls(None, "")
     # Only GRC's own dirname('') no-op call runs; the subclass must not seed.
     assert seed_calls == [""]
+
+
+def test_is_native_wayland_session(monkeypatch):
+    from grc_agent.desktop_app import is_native_wayland_session
+
+    # Forced X11 backend -> always False
+    monkeypatch.setenv("GDK_BACKEND", "x11")
+    monkeypatch.setenv("XDG_SESSION_TYPE", "wayland")
+    assert is_native_wayland_session() is False
+
+    # Wayland session without GDK_BACKEND=x11 -> True
+    monkeypatch.delenv("GDK_BACKEND", raising=False)
+    monkeypatch.setenv("XDG_SESSION_TYPE", "wayland")
+    assert is_native_wayland_session() is True
+
+    # Wayland display env var -> True
+    monkeypatch.delenv("XDG_SESSION_TYPE", raising=False)
+    monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-0")
+    assert is_native_wayland_session() is True
+
+    # Pure X11 session -> False
+    monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+    monkeypatch.setenv("XDG_SESSION_TYPE", "x11")
+    assert is_native_wayland_session() is False
+
+
+def test_is_native_wayland_display_fallback(monkeypatch):
+    from gi.repository import Gdk
+
+    from grc_agent.desktop_app import is_native_wayland_session
+
+    class FakeWaylandDisplay:
+        pass
+
+    monkeypatch.delenv("GDK_BACKEND", raising=False)
+    monkeypatch.delenv("XDG_SESSION_TYPE", raising=False)
+    monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+    monkeypatch.setattr(Gdk.Display, "get_default", lambda: FakeWaylandDisplay())
+    assert is_native_wayland_session() is True
+
+
+@pytest.mark.asyncio
+async def test_startup_preflight_surfaces_wayland_advisory(monkeypatch):
+    from unittest.mock import AsyncMock, MagicMock
+
+    import grc_agent.desktop_app as desktop_app
+
+    sidebar = MagicMock()
+    monkeypatch.setattr(desktop_app, "is_native_wayland_session", lambda: True)
+    monkeypatch.setattr(
+        desktop_app, "load_settings", lambda: {"provider": "ollama_local", "model": "test"}
+    )
+    monkeypatch.setattr(
+        desktop_app.asyncio,
+        "to_thread",
+        AsyncMock(return_value=(None, None)),
+    )
+
+    await desktop_app._startup_preflight(sidebar)
+
+    sidebar.set_status.assert_called_with(
+        "Advisory: Native Wayland detected. If menu popups drop, launch with: GDK_BACKEND=x11 uv run grc-agent",
+        background=True,
+    )
+
+

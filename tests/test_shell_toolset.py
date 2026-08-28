@@ -18,6 +18,7 @@ import grc_agent.fs_tools as fs_tools
 from grc_agent.shell_tools import (
     GrcShell,
     GrcShellToolset,
+    default_timeout,
     derive_env_deny_patterns,
 )
 
@@ -261,3 +262,15 @@ def test_timeout_env_override(tmp_path, monkeypatch):
     env_file.write_text("GRC_SHELL_TIMEOUT=12.5\n")
     monkeypatch.setenv("GRC_AGENT_ENV", str(env_file))
     assert GrcShell().default_timeout == 12.5
+
+
+def test_run_command_description_states_resolved_default(tmp_path, monkeypatch):
+    """The model-facing timeout_seconds description states the RESOLVED
+    GRC_SHELL_TIMEOUT value, never a hardcoded number — the knob is
+    user-tunable via .env and the schema must not lie about it."""
+    env_file = tmp_path / ".env"
+    env_file.write_text("GRC_SHELL_TIMEOUT=12.5\n")
+    monkeypatch.setenv("GRC_AGENT_ENV", str(env_file))
+    ts = GrcShellToolset(default_timeout=default_timeout())
+    props = ts.tools["run_command"].function_schema.json_schema["properties"]
+    assert "12.5s" in props["timeout_seconds"]["description"]

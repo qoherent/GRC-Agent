@@ -33,8 +33,7 @@ flowchart LR
 
     FS -- "every tool result scanned" --> DEF{{Injection defense}}
     WEB --> DEF
-    DEF -- clean --> AG
-    DEF -- withheld --> AG
+    DEF -- "clean / flagged+logged" --> AG
 
     FG -- "run fails → return code" --> AG
     AG -- "reads full run log" --> FG
@@ -119,9 +118,11 @@ flowchart LR
 - **Handles long conversations** — bulky old tool results are cleared, aging
   turns summarized (your messages always preserved), sized against the
   model's real context window probed from the backend.
-- **Prompt-injection safe** — every client-executed tool result (project
+- **Prompt-injection scanned** — every client-executed tool result (project
   files via the fs tools, web pages via the local fetch fallback) is
-  scanned; a malicious instruction is withheld before reaching the model.
+  scanned and every detection is logged; flagged content is disclosed, not
+  silently injected into the model's context (detect-and-log, never
+  withheld — withholding false-positived on official documentation).
   File access is sandboxed to your project folder; `.env` and `.git` are
   off-limits.
 - **Sessions persist** — full chat history, resumable, searchable.
