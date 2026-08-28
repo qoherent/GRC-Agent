@@ -101,6 +101,7 @@ The _Category_ is where the block can be found in the block library on the right
 Save the flowgraph. 
 ## Variables vs Parameters
 A _variable_ is different than a _parameter_ in GNU Radio. A _parameter_ creates an interface for the _hier block_ to accept a value from an external source, whereas a _variable_ only exists internally to the _hier block_ : 
+This is also how a packaged subgraph exposes values: a hier block packages multiple inner blocks into one reusable block, and a _Parameter_ exposes a value from inside that packaged subgraph to the outside flowgraph, so a block in the larger graph can set it while the internal blocks see the updated value. 
 [![](https://wiki.gnuradio.org/images/thumb/d/d5/HierBlockParameterVariable.png/500px-HierBlockParameterVariable.png)](https://wiki.gnuradio.org/index.php?title=File:HierBlockParameterVariable.png)
   
 For example, the _samp_rate_ variable can only be accessed from within the _hier block_ : 

@@ -403,3 +403,119 @@ def test_quiet_context_manager_restores_grc_logger_level():
     with _quiet_gnuradio_grc_logging():
         assert logger.level == logging.CRITICAL
     assert logger.level == prev
+
+
+def test_former_both_engine_misses_now_rank(tmp_path, monkeypatch):
+    """The 4 queries the 2026-08-28 ground-truth stress run proved missing in
+    BOTH engines (corpus-coverage ceiling), after the corpus de-duplication
+    pass merged the stub pages into their canonical hosts and added the
+    packet-framing reference: each must now hit rank <= 5 (all rank 1 at
+    authoring time)."""
+    tmp_vectors = tmp_path / "vectors"
+    tmp_vectors.mkdir()
+    monkeypatch.setenv("GRC_AGENT_VECTORS_DIR", str(tmp_vectors))
+    monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
+    from grc_agent.settings import save_settings
+    save_settings("ollama_local", "qwen3.6:35b-a3b-q4_K_M", embed_backend="lexical")
+
+    from grc_agent.adapter import query_docs
+    from grc_agent.adapter.rag import _FRESHNESS_CACHE
+
+    matrix = [
+        ("dividing the incoming rate by an integer factor",
+         {"Sample_Rate_Change", "Sample_Rate"}),
+        ("exposing values of a packaged subgraph to the outside flowgraph",
+         {"Hier_Blocks_and_Parameters", "Hier_Blocks"}),
+        ("length header versus payload in burst transmission",
+         {"Tagged_Stream_Blocks", "Packet_Framing_Concepts"}),
+        ("frame integrity check before transmission",
+         {"CRC_Append", "Packet_Framing_Concepts"}),
+    ]
+    try:
+        for query, expected_stems in matrix:
+            res = query_docs(query, limit=5)
+            assert res["ok"] is True
+            paths = [
+                chunk.split("\n", 1)[0][len("path: "):]
+                for chunk in res["answer"].split("\n\n---\n\n")
+            ]
+            assert any(stem in paths for stem in expected_stems), (
+                f"{query!r}: none of {expected_stems} in top-5 (got {paths})"
+            )
+    finally:
+        _FRESHNESS_CACHE.pop("docs", None)
+
+
+def test_new_corpus_pages_rank_top1_for_unique_phrases(tmp_path, monkeypatch):
+    """The two pages added by the corpus expansion (QT GUI sinks reference,
+    packet-framing concepts) are retrievable top-1 for phrases unique to them
+    (uniqueness grep-verified against the whole corpus at authoring time)."""
+    tmp_vectors = tmp_path / "vectors"
+    tmp_vectors.mkdir()
+    monkeypatch.setenv("GRC_AGENT_VECTORS_DIR", str(tmp_vectors))
+    monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
+    from grc_agent.settings import save_settings
+    save_settings("ollama_local", "qwen3.6:35b-a3b-q4_K_M", embed_backend="lexical")
+
+    from grc_agent._paths import docs_dir
+    from grc_agent.adapter import query_docs
+    from grc_agent.adapter.rag import _CORPUS_VERSION_CACHE, _FRESHNESS_CACHE
+
+    probes = [
+        ("one parameter on them accounts for the most common GRC graph error",
+         "QT_GUI_Sinks"),
+        ("packets express that boundary either as", "Packet_Framing_Concepts"),
+    ]
+    corpus_files = sorted(docs_dir().glob("*.md"))
+    try:
+        for phrase, expected_stem in probes:
+            hosts = [
+                f for f in corpus_files
+                if phrase in f.read_text(encoding="utf-8", errors="ignore")
+            ]
+            if hosts != [docs_dir() / f"{expected_stem}.md"]:
+                continue  # corpus drifted — guard rather than assert stale pins
+            res = query_docs(phrase, limit=3)
+            assert res["ok"] is True
+            first = res["answer"].split("\n\n---\n\n")[0].split("\n", 1)[0]
+            assert first == f"path: {expected_stem}"
+    finally:
+        _FRESHNESS_CACHE.pop("docs", None)
+        _CORPUS_VERSION_CACHE.pop("docs", None)
+
+
+def test_lexical_catalog_rows_carry_no_distance_key(tmp_path, monkeypatch):
+    """Distance honesty (R7): rows sourced from the lexical ranking never had
+    a cosine distance evaluated — the render must OMIT the key entirely
+    instead of fabricating 0.0 (which reads as a perfect vector match)."""
+    from grc_agent.adapter import query_catalog
+    from grc_agent.adapter.rag import _FRESHNESS_CACHE
+
+    tmp_vectors = tmp_path / "vectors"
+    tmp_vectors.mkdir()
+    monkeypatch.setenv("GRC_AGENT_VECTORS_DIR", str(tmp_vectors))
+    monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
+    from grc_agent.settings import save_settings
+    save_settings("ollama_local", "qwen3.6:35b-a3b-q4_K_M", embed_backend="lexical")
+
+    try:
+        res = query_catalog("low pass filter", limit=5)
+        assert res["ok"] is True
+        assert res["results"]
+        for row in res["results"]:
+            assert "distance" not in row, (
+                "lexical-sourced rows carry no evaluated distance — omit it"
+            )
+    finally:
+        _FRESHNESS_CACHE.pop("catalog", None)
+
+
+def test_render_without_distance_omits_key():
+    """render_catalog_block with no distance argument returns a full payload
+    with the distance key absent — honest absence, never a fabricated 0.0."""
+    from grc_agent.adapter import render_catalog_block
+
+    r = render_catalog_block("blocks_throttle")
+    assert r is not None
+    assert "distance" not in r
+    assert r["params"] and r["doc"]

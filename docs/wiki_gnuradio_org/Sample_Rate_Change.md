@@ -38,6 +38,20 @@ SDR Hardware
 | --- |  
 This tutorial describes how to implement sample rate change within GNU Radio. 
 The previous tutorial, [Designing Filter Taps](https://wiki.gnuradio.org/index.php?title=Designing_Filter_Taps "Designing Filter Taps"), demonstrates how to design filter taps and use them in signal processing blocks. Please complete the [Designing Filter Taps](https://wiki.gnuradio.org/index.php?title=Designing_Filter_Taps "Designing Filter Taps") tutorial before completing this one. The next tutorial, [Frequency Shifting](https://wiki.gnuradio.org/index.php?title=Frequency_Shifting "Frequency Shifting"), describes how to apply a frequency shift to a signal both mathematically and with DSP blocks. 
+# Sample Rate
+
+Decimation is a sample-rate change that reduces the sampling rate. In GNU Radio
+flowgraphs, decimation is the downsampling side of rate-change processing and
+must be accounted for when reasoning about stream rates and rate-changing
+blocks: a decimating block divides the incoming sample rate by an integer
+factor, keeping one output item per group of incoming items and discarding the
+rest.
+
+Interpolation is a sample-rate change that increases the sampling rate. The GNU
+Radio Sample Rate Change tutorial describes interpolation as increasing the
+sampling rate and available bandwidth, for example with an interpolating FIR
+filter.
+
 ## Interpolation
 Interpolation is the process of increasing the sampling rate and thus the available bandwidth. This example demonstrates how to increase the sampling rate using the _Interpolating FIR Filter_ block. 
 Start by adding the following blocks to the flowgraph and connect them: 

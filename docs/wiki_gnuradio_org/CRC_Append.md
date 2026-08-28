@@ -2,7 +2,7 @@
 From GNU Radio
 [Jump to navigation](https://wiki.gnuradio.org/index.php?title=CRC_Append#mw-head) [Jump to search](https://wiki.gnuradio.org/index.php?title=CRC_Append#searchInput)
   
-The CRC Append block receives a PDU, calculates the CRC of the PDU data, appends it to the PDU, and sends that as its output. It can support any CRC whose size is a multiple of 8 bits between 8 and 64 bits. 
+The CRC Append block receives a PDU, calculates the CRC of the PDU data, appends it to the PDU, and sends that as its output. It can support any CRC whose size is a multiple of 8 bits between 8 and 64 bits. The matching CRC Check block verifies the appended checksum on the receive side and routes the PDU over its _ok_ or _fail_ output port, so appending the checksum before transmission and checking it after reception is how a link preserves frame integrity: a corrupted transmission fails the check instead of passing corrupted payload data downstream.
 The block uses the same notation as [this online CRC calculator](http://www.sunshine2k.de/coding/javascript/crc/crc_js.html) to define the CRC code parameters. The calculator includes a list of commonly used CRC codes, so it is a useful resource to find the parameters that are needed for this block. The default parameters of CRC Append correspond to the CRC-32 code. 
 `Added in 3.10.2.0`
 ## Parameters 

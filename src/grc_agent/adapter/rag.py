@@ -712,11 +712,15 @@ def query_catalog(query: str, limit: int = 5) -> dict[str, Any]:
         block_id = result["id_by_rowid"].get(rowid)
         if not block_id:
             continue
-        rendered = render_catalog_block(block_id, result["distance_by_rowid"].get(rowid, 0.0))
+        # Pass the row's real evaluated distance, or None when the row was
+        # sourced from the lexical leg (or lexical-only mode) and never had a
+        # distance computed — the renderer omits a None distance rather than
+        # fabricate a 0.0 that reads as a perfect vector match.
+        rendered = render_catalog_block(block_id, result["distance_by_rowid"].get(rowid))
         if rendered:
             if result["search_mode"] == "hybrid":
-                # Truthful fused-rank signal — `distance` is vector-only and
-                # reads 0.0 for lexical-sourced rows (pre-existing convention).
+                # Truthful fused-rank signal, present on every hybrid row;
+                # `distance` appears only on vector-sourced rows.
                 rendered["score"] = round(result["score_by_rowid"].get(rowid, 0.0), 4)
             results.append(rendered)
         if len(results) >= limit:
@@ -810,7 +814,9 @@ def _quiet_gnuradio_grc_logging():
         grc_logger.setLevel(prev)
 
 
-def render_catalog_block(block_id: str, distance: float) -> dict[str, Any] | None:
+def render_catalog_block(
+    block_id: str, distance: float | None = None
+) -> dict[str, Any] | None:
     from grc_agent.adapter.graph import get_platform, keep_param, type_controlling_params
 
     platform = get_platform()
@@ -850,7 +856,7 @@ def render_catalog_block(block_id: str, distance: float) -> dict[str, Any] | Non
     inputs = [_catalog_port_info(p) for p in b.active_sinks]
     outputs = [_catalog_port_info(p) for p in b.active_sources]
 
-    return {
+    rendered: dict[str, Any] = {
         "block_id": block_id,
         "label": getattr(b, "label", block_id),
         "category": " > ".join(b.category) if isinstance(b.category, list) else str(b.category),
@@ -858,8 +864,15 @@ def render_catalog_block(block_id: str, distance: float) -> dict[str, Any] | Non
         "inputs": inputs,
         "outputs": outputs,
         "doc": _block_class_doc(b),
-        "distance": round(distance, 3),
     }
+    # A real cosine distance exists only for vector-sourced rows. A None
+    # distance (lexical-sourced row: never evaluated) is OMITTED instead of
+    # fabricated as a 0.0 perfect-match — honest absence, not deception
+    # (AGENTS.md: no silent transformation). An explicit float — including a
+    # genuine 0.0 from the vector leg — still carries the rounded value.
+    if distance is not None:
+        rendered["distance"] = round(distance, 3)
+    return rendered
 
 
 def query_docs(query: str, limit: int = 5) -> dict[str, Any]:

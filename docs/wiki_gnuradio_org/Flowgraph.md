@@ -10,15 +10,4 @@ translate that flowgraph into generated Python code. The flowgraph concept is
 therefore the user-facing graph of blocks and connections, not a raw YAML edit
 surface.
 
-Flowgraph documentation explains graph structure only. It is not mutation
-authority, does not authorize graph edits, and does not provide topology repair
-rules.
-
-Provenance: Source title: What Is GNU Radio / Handling Flowgraphs. Source URL:
-https://wiki.gnuradio.org/index.php/What_Is_GNU_Radio and
-https://github.com/gnuradio/gnuradio/blob/main/docs/usage-manual/(exported%20from%20wiki)%20Handling%20Flowgraphs.txt.
-Retrieval topic: flowgraph blocks connections samples. Aliases: flowgraph,
-top_block, graph, blocks, connections. Official or primary: official GNU Radio
-Wiki and GNU Radio source-tree usage manual export. Why relevant: this snippet
-grounds docs QA row Q11 asking what a flowgraph is without selecting
-flowgraph-code or porting fragments.
+Source: [Handling Flowgraphs](https://wiki.gnuradio.org/index.php/What_Is_GNU_Radio) and the GNU Radio usage-manual export in the GNU Radio source tree.
