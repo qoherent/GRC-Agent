@@ -764,41 +764,19 @@ async def run_flowgraph_func(
 ) -> str:
     """Control execution of the active GNU Radio flowgraph (start or stop).
 
-    The user watches the output live in GRC's console while the flowgraph runs;
-    this tool returns only the run status — read the full stdout/stderr with
-    get_run_log after the run completes. Starting a flowgraph can transmit RF on
-    connected hardware, so action='start' requires the user's approval before
-    starting. Stopping a running flowgraph (action='stop') is safe and executes
-    immediately without approval.
-
-    A bounded run is one call: set stop_after_seconds (with wait=True) and the
-    flowgraph is stopped automatically once it has run that long without
-    finishing on its own — the result says stopped_after_timeout. Leave it
-    unset to run until the graph finishes or you stop it.
-
-    The system prompt teaches the probe-before-run verification strategy
-    (wire native diagnostic blocks so the log carries evidence, not just an
-    exit code) — apply it before running when functional verification is
-    needed.
+    Executes via GRC's native runner and streams console output live. Action 'start'
+    is approval-gated (RF safety); 'stop' terminates immediately without approval.
+    Read stdout/stderr with get_run_log after completion.
 
     Args:
-        action: 'start' to run the active flowgraph, or 'stop' to terminate the
-            currently running flowgraph (SIGTERM).
-        wait: For action='start', block until the run finishes (right for
-            command-line graphs that terminate on their own). Use False for GUI
-            flowgraphs (QT GUI sinks) — they run until stopped, so start
-            without waiting and call with action='stop' when done.
-        timeout_seconds: Max seconds to wait when action='start' and wait=True;
-            after that the run keeps going and the result says still_running.
+        action: 'start' to run the active flowgraph, or 'stop' to terminate it (SIGTERM).
+        wait: For action='start', True blocks until completion (for non-GUI graphs).
+            False returns immediately while the graph runs in background (for QT GUI sinks).
+        timeout_seconds: Max seconds to wait when wait=True before returning still_running.
             Ignored when stop_after_seconds is set.
-        stop_after_seconds: Optional runtime budget for a bounded run: when set
-            with action='start' and wait=True, the flowgraph is stopped
-            automatically after this many seconds of runtime if it has not
-            finished on its own (one call instead of start-then-stop). The stop
-            is the same SIGTERM the toolbar Stop button sends; the result says
-            stopped_after_timeout. Requires wait=True — with wait=False the call
-            returns before anything could enforce the deadline. Leave unset to
-            run until the graph finishes or you stop it.
+        stop_after_seconds: Optional runtime budget for a bounded run: automatically
+            stops the flowgraph after N seconds (requires wait=True). Leave unset to run
+            until completion or manual stop.
     """
     if action not in ("start", "stop"):
         raise ModelRetry(f"Invalid action {action!r}: must be 'start' or 'stop'.")
@@ -977,7 +955,7 @@ async def validate_flowgraph_state(ctx: RunContext[Any], output: Any) -> Any:
             if new_errors:
                 raise ModelRetry(
                     f"The flowgraph has validation errors after mutation: {new_errors}. "
-                    "You must run change_graph to correct these errors (or set force=True if they are unresolvable) before completing the response."
+                    "You must run change_graph to correct these errors before completing the response."
                 )
     return output
 

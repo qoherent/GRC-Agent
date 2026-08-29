@@ -155,7 +155,7 @@ def _cap_words(text: str, max_words: int, *, label: str = "") -> str:
     words = text.split()
     if len(words) <= max_words:
         return text
-    _log.warning(
+    _log.debug(
         "_cap_words: truncating %s from %d to %d words (%.0f%% discarded)",
         label or "a document chunk",
         len(words),

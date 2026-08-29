@@ -646,7 +646,7 @@ def fit_to_context(text: str, limit: int = CONTEXT_TOKENS - 8) -> str:
         tokens = c.post("/tokenize", json={"content": text}, headers=headers).json()["tokens"]
         if len(tokens) <= limit:
             return text
-        _log.warning(
+        _log.debug(
             "fit_to_context: truncating a document from %d to %d tokens (%.0f%% discarded)",
             len(tokens),
             limit,

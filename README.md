@@ -177,10 +177,12 @@ lexical automatically with a notice.
   sudo apt install gnuradio python3-gi python3-gi-cairo
   ```
 - **SDR hardware permissions** (if using physical SDRs like RTL-SDR, HackRF, USRP):
+  Physical SDRs should be accessible without `sudo`. Distro packages (e.g.
+  `uhd-host`, `rtl-sdr`, `hackrf`) install the required udev rules automatically.
+  If you encounter a USB permission error after installing driver packages,
+  reload rules and reconnect your device:
   ```bash
-  # Ensure udev rules and groups are set so you never need sudo
-  sudo usermod -aG plugdev,dialout,usrp $USER
-  sudo udevadm control --reload-rules && sudo udevadm trigger
+  sudo udevadm control --reload-rules
   ```
 
 ### Setup

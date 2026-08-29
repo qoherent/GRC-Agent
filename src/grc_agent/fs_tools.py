@@ -276,8 +276,7 @@ class GrcFileSystemToolset(FileSystemToolset[AgentDepsT]):
         per-block (targets) view of the active graph.
 
         Args:
-            path: File path relative to the root directory (the active
-                flowgraph's folder).
+            path: File path relative to the project directory.
             offset: Zero-based line offset to start reading from.
             limit: Maximum number of lines to return (default: 1000).
 
@@ -336,8 +335,7 @@ class GrcFileSystemToolset(FileSystemToolset[AgentDepsT]):
         create_directory first).
 
         Args:
-            path: File path relative to the root directory (the active
-                flowgraph's folder).
+            path: File path relative to the project directory.
             content: The text content to write.
             expected_hash: If provided, the write is rejected when the file exists
                 and its current hash doesn't match (optimistic concurrency).
