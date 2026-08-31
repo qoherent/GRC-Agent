@@ -33,6 +33,7 @@ Rules and architectural commandments for AI coding agents working on this codeba
 
 ## 3. General Best Coding Practices
 
+- **Git Workflow: Single-Branch Main Only**: Always work directly on `main` — never create feature branches, worktrees, or any alternative branch topology. Assume every change in the working tree (committed or uncommitted) is the user's own work: never stash, revert, exclude, or path-limit around it, and always include all current changes in any push. Commits stay conventionally scoped in message only, never in file ownership.
 - **No Silent Transformations or Hidden Truncation**: Any filtering, truncation, or omission in model-facing output must be explicit, truthful, and honest (`output_truncated`, explicit counts). Never silently drop data.
 - **Maximizing Context Honestly**: Do not enforce arbitrary context limits beyond what the backend actually supports. Never clip inputs or outputs using raw string slicing that breaks structured context (JSON/AST).
 - **Atomic Operations & Concurrency Safety**:

@@ -107,6 +107,7 @@ Active feature requests, architectural improvements, and planned capabilities. C
 | **Unified Flowgraph Execution** | `0.4.0` / `0.5.0` | Unified `run_flowgraph(action='start'\|'stop')` tool, bounded runtime `stop_after_seconds`, GRC console streaming, and `exec_monitor` log retention. |
 | **Hybrid RAG & Catalog Docstring Enrichment** | `0.5.0` / `Unreleased` | Reciprocal Rank Fusion (RRF $k=60$) vector + FTS5 search, embedded C++ SWIG docstrings for parameter units, silenced ingestion log noise. |
 | **Prompt Streamlining & C++ Catalog Default** | `Unreleased` | ~42% prompt token reduction, C++ catalog default prioritization, NumPy/SciPy vectorization rules for EPBs, and safe udev permissions guidance. |
+| **Chat Image Input (Multimodal Prompts)** | `Unreleased` | Composer attach button + thumbnail chips, pydantic-ai `Sequence[UserContent]`/`BinaryContent` user prompts into `agent.iter()`, base64 session round-trip via the existing TypeAdapter store, and bubble/history thumbnails decoded at target scale. |
 
 ---
 
