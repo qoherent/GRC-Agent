@@ -198,6 +198,23 @@ uv sync --extra dev --locked --python .venv/bin/python
 your system interpreter's ABI, so a uv-managed or pyenv/conda Python will
 fail to `import gnuradio` even with the bridge.
 
+#### Search Backend Options
+
+Choose how the agent searches the block catalog and documentation:
+
+* **Option 1: Lexical Search (Default)** — Zero extra downloads, nothing running in the background. Uses SQLite FTS5/BM25 keyword search:
+  ```bash
+  uv run grc-agent
+  ```
+
+* **Option 2: Local Vector Search (Hybrid RAG)** — Pre-download the pinned local runtime (~345 MB: llama.cpp + EmbeddingGemma into `~/.local/share/grc-agent`) for semantic search combined with FTS5 lexical search via Reciprocal Rank Fusion (RRF):
+  ```bash
+  # Pre-provision vector runtime and enable hybrid search before launch:
+  uv run python -c "from grc_agent import embed_runtime, settings; embed_runtime.provision(); settings.upsert_env_key('GRC_EMBED_BACKEND', 'llamacpp')"
+  uv run grc-agent
+  ```
+  *(You can also install or switch vector search anytime with one click in the app's Settings dialog).*
+
 Local Ollama note: the default context window is too small for multi-turn
 tool-calling. Set `OLLAMA_CONTEXT_LENGTH=120000` and restart the daemon
 (Linux: `sudo systemctl edit ollama`, add it under `[Service]`).
