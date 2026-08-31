@@ -3860,3 +3860,361 @@ def test_drag_drop_registration_and_batch_attach(tmp_path):
     assert len(sidebar._attachment_row.get_children()) == 2
     sidebar._update_send_sensitivity()
     assert sidebar._send_btn.get_sensitive()  # image-only send enabled
+
+
+# -- chat zoom input + sidebar font projection (R9/R10/R12, KD2) ------------
+
+
+def _settle_events() -> None:
+    """Drain the pending GTK event queue (idles, allocations, repaints) of
+    the default display — the same loop pattern every widget test here uses."""
+    import gi
+
+    gi.require_version("Gtk", "3.0")
+    from gi.repository import Gtk
+
+    # BOUNDED: ChatSidebar.__init__ arms a repeating 500ms poller (and a 60s
+    # one) that is never removed, and every sidebar this file constructs stays
+    # alive on its own poller source — once a few dozen are armed the default
+    # display always has a ready source and an unbounded drain never exits
+    # (observed live at this file's tail). 500 iterations settle every
+    # layout/idle sequence in this suite with wide margin.
+    n = 0
+    while n < 500 and Gtk.events_pending():
+        Gtk.main_iteration()
+        n += 1
+
+
+def _run_settle_frames(ms: int = 150) -> None:
+    """Run a bounded real main-loop window so GTK's frame-clock pass settles.
+
+    Cached PangoContexts only adopt a changed CSS font during the
+    frame-clock-driven style pass, which a bare events-pending drain does not
+    run to completion on offscreen widgets; a short live loop is the same
+    settle the running app gets from its next frame."""
+    import gi
+
+    gi.require_version("Gtk", "3.0")
+    from gi.repository import GLib, Gtk
+
+    def _stop() -> bool:
+        Gtk.main_quit()
+        return False
+
+    GLib.timeout_add(ms, _stop)
+    Gtk.main()
+
+
+def test_zoom_projection_css_rule_scope_clamp_and_theme_restore():
+    """R9/KTD8: the projection is ONE scoped CssProvider on the SIDEBAR's
+    style context (never the screen) carrying ONE recalculated absolute
+    .chat-sidebar font-size rule; values follow sidebar_font_multiplier
+    (clamped 0.7..1.8 x the measured theme base), zoom 1.0 restores the
+    measured theme default exactly (base x 1.0), and later projections
+    reload the same provider instead of remove/re-add."""
+    import re
+
+    from gi.repository import Gtk
+
+    from grc_agent.chat_sidebar import ChatSidebar, sidebar_font_multiplier
+
+    sidebar = ChatSidebar()
+    win = Gtk.OffscreenWindow()
+    win.set_default_size(400, 300)
+    win.add(sidebar)
+    for i in range(20):
+        sidebar._add_message_row(Gtk.Label(label=f"msg {i}\n" * 4))
+    win.show_all()
+    _settle_events()
+
+    # Capture the theme font BEFORE any projection — zoom 1.0 must land back
+    # on exactly this resolved description.
+    font_before = sidebar.get_style_context().get_font(Gtk.StateFlags.NORMAL).to_string()
+    assert sidebar._zoom_css_provider is None  # nothing projected yet
+
+    screen_adds = []
+    widget_adds = []
+    orig_screen_add = Gtk.StyleContext.add_provider_for_screen
+    orig_widget_add = Gtk.StyleContext.add_provider
+    try:
+        Gtk.StyleContext.add_provider_for_screen = staticmethod(
+            lambda *args: screen_adds.append(args)
+        )
+        Gtk.StyleContext.add_provider = lambda ctx, provider, prio: widget_adds.append(
+            (ctx, provider, prio)
+        )
+
+        def css_px() -> float:
+            css = sidebar._zoom_css_provider.to_string()
+            m = re.search(r"font-size: ([0-9.]+)px", css)
+            assert m is not None, css
+            assert ".chat-sidebar" in css
+            return float(m.group(1))
+
+        sidebar.set_zoom_projection(2.25)  # sqrt -> multiplier 1.5
+        assert sidebar._zoom_css_provider is not None
+        base = sidebar._zoom_css_base_px
+        assert base is not None and base > 0
+        assert abs(css_px() - base * sidebar_font_multiplier(2.25)) < 0.01
+
+        # The clamped mapping, exercised across GRC's native range and beyond
+        # (tolerance covers the 4-decimal CSS formatting precision).
+        for zoom in (0.1, 0.5, 1.0, 2.25, 5.0, 10.0):
+            sidebar.set_zoom_projection(zoom)
+            assert 0.7 * base - 1e-3 <= css_px() <= 1.8 * base + 1e-3
+
+        # Zoom 1.0: base x 1.0 == the measured theme default, and the sidebar's
+        # resolved style font reads back exactly as before any projection.
+        sidebar.set_zoom_projection(1.0)
+        assert abs(css_px() - base) < 0.005
+        assert (
+            sidebar.get_style_context().get_font(Gtk.StateFlags.NORMAL).to_string()
+            == font_before
+        )
+
+        # Scope: attached to THIS sidebar's style context exactly once, at
+        # application priority; the screen-level provider list is untouched.
+        assert screen_adds == []
+        assert len(widget_adds) == 1, widget_adds
+        ctx, _provider, prio = widget_adds[0]
+        assert ctx is sidebar.get_style_context()
+        assert prio == Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
+    finally:
+        # Reassign the saved introspected methods (PyGObject GI methods live
+        # in the class __dict__, so deleting the override would drop them).
+        Gtk.StyleContext.add_provider_for_screen = orig_screen_add
+        Gtk.StyleContext.add_provider = orig_widget_add
+
+    win.destroy()
+
+
+def test_zoom_projection_repins_code_blocks():
+    """R12: after a projected font inflate, an EXISTING code block re-measures
+    its height pin with the projected font (rows never clip), a block created
+    after the rescale settles to the same projected pin via its one-shot
+    first-allocate re-pin,
+    and the settled geometry shows min == natural with the TextView fully
+    visible."""
+    from gi.repository import Gtk
+
+    from grc_agent.chat_sidebar import ChatSidebar
+    from grc_agent.ui.code_block import CodeBlock
+
+    code = "\n".join(f"line {i}  ->  step_{i}" for i in range(8))
+
+    win = Gtk.OffscreenWindow()
+    win.set_default_size(1000, 800)
+    sidebar = ChatSidebar()
+    win.add(sidebar)
+    win.show_all()
+    _settle_events()
+
+    box = sidebar._start_agent_message()
+    sidebar._render_markdown_to_box(box, f"```\n{code}\n```\n", clear=True)
+    _settle_events()
+
+    def find_code_block(root):
+        return next((w for w in _iter_widgets(root) if isinstance(w, CodeBlock)), None)
+
+    cb = find_code_block(sidebar._listbox)
+    assert cb is not None
+    sw = next(c for c in cb.get_children() if isinstance(c, Gtk.ScrolledWindow))
+    tv = sw.get_child()
+    pin_before = sw.get_size_request()[1]
+
+    sidebar.set_zoom_projection(2.25)  # sqrt(2.25) = multiplier 1.5
+    _settle_events()
+
+    pin_after = sw.get_size_request()[1]
+    assert pin_after > pin_before, (pin_before, pin_after)
+    # The pin scales its line CONTENT with the projected font while the
+    # per-line spacing and margins stay fixed px (and hinted line advances
+    # quantize), so a short block's height ratio lands somewhat under the
+    # 1.5 font multiplier — the exact law is the new-vs-repinned equality.
+    assert abs(pin_after / pin_before - 1.5) < 0.3, (pin_before, pin_after)
+
+    # A block rendered AFTER the rescale pins at construction against an
+    # unparented style context (theme font); its style-updated font-watch
+    # re-pins it once packed into the projected hierarchy and the style pass
+    # resolves the projected font. That pass is frame-clock-driven, so this
+    # settle needs _run_settle_frames (a bare events drain does not complete
+    # the style pass on offscreen widgets).
+    box2 = sidebar._start_agent_message()
+    sidebar._render_markdown_to_box(box2, f"```python\n{code}\n```\n", clear=True)
+    _run_settle_frames()
+    cb2 = find_code_block(box2)
+    assert cb2 is not None and cb2 is not cb
+    sw2 = next(c for c in cb2.get_children() if isinstance(c, Gtk.ScrolledWindow))
+    assert sw2.get_size_request()[1] == pin_after
+
+    # Settled: below the cap the pin closes the min<natural gap and the
+    # TextView's allocation covers its content — no clipped rows.
+    assert pin_after < 420
+    _run_settle_frames()
+    sw_min, sw_nat = sw.get_preferred_height()
+    assert sw_min == sw_nat
+    assert tv.get_allocated_height() >= tv.get_preferred_height()[1] - 1
+    win.destroy()
+
+
+def test_zoom_projection_preserves_near_bottom_anchor():
+    """R9 anchor preservation (plan Approach 2): with the viewport pinned to
+    the bottom and simulated streaming rows arriving, a projected font
+    inflate re-seats the anchor at the new bottom and keeps stick-to-bottom
+    engaged — the re-seat is itself the value change the single authority
+    (_on_scroll_value_changed) re-derives _auto_scroll from; nothing here
+    writes the intent flag."""
+    from gi.repository import Gtk
+
+    from grc_agent.chat_sidebar import ChatSidebar
+
+    win = Gtk.OffscreenWindow()
+    win.set_default_size(400, 300)
+    sidebar = ChatSidebar()
+    win.add(sidebar)
+    win.show_all()
+    for i in range(10):
+        sidebar._add_message_row(Gtk.Label(label=f"msg {i}\n" * 5))
+    _settle_events()
+
+    adj = sidebar._scrolled.get_vadjustment()
+    adj.set_value(adj.get_upper() - adj.get_page_size())
+    _settle_events()
+    assert sidebar._auto_scroll is True
+
+    # Streaming rows land while pinned to the bottom.
+    sidebar._add_message_row(Gtk.Label(label="streamed chunk\n" * 6))
+    sidebar._add_message_row(Gtk.Label(label="more content\n" * 6))
+    _settle_events()
+    assert sidebar._auto_scroll is True
+
+    sidebar.set_zoom_projection(2.25)
+    _settle_events()
+
+    dist = adj.get_upper() - adj.get_page_size() - adj.get_value()
+    assert dist <= 1.0, f"viewport drifted {dist}px off the bottom after inflate"
+    assert sidebar._auto_scroll is True, "stick-to-bottom intent must stay engaged"
+    win.destroy()
+
+
+def test_zoom_projection_leaves_scrolled_up_reader_and_adjustment_alone():
+    """R10/KD2: the projection is one-directional — a canvas zoom change
+    updates the sidebar CSS but never scrolls the chat: a reader parked
+    mid-history keeps their exact vadjustment value and reader intent (no
+    feedback loop from the canvas into the transcript)."""
+    from gi.repository import Gtk
+
+    from grc_agent.chat_sidebar import ChatSidebar
+
+    win = Gtk.OffscreenWindow()
+    win.set_default_size(400, 300)
+    sidebar = ChatSidebar()
+    win.add(sidebar)
+    win.show_all()
+    for i in range(20):
+        sidebar._add_message_row(Gtk.Label(label=f"msg {i}\n" * 5))
+    _settle_events()
+
+    adj = sidebar._scrolled.get_vadjustment()
+    adj.set_value(300.0)
+    _settle_events()
+    assert sidebar._auto_scroll is False  # reading earlier content
+    value_before = adj.get_value()
+
+    sidebar.set_zoom_projection(2.25)
+    _settle_events()
+
+    assert adj.get_value() == value_before, "a zoom change must not scroll the chat"
+    assert sidebar._auto_scroll is False
+    # ... while the CSS did update to the projected size (base x sqrt(2.25)).
+    import re
+
+    css = sidebar._zoom_css_provider.to_string()
+    px = float(re.search(r"font-size: ([0-9.]+)px", css).group(1))
+    assert abs(px - sidebar._zoom_css_base_px * 1.5) < 0.01
+    win.destroy()
+
+
+def test_chat_ctrl_scroll_zooms_canvas_and_consumes_gesture():
+    """R10/KTD9: Control+wheel over the transcript drives exactly one native
+    canvas zoom step per wheel tick through GRC's own DrawingArea methods,
+    never scrolls the chat, never steals focus, and never disturbs
+    stick-to-bottom intent. Plain wheel passes through natively (native
+    scroll, no zoom, authority recomputes intent from the moved position);
+    smooth/horizontal deltas are not zoom gestures."""
+    from unittest.mock import MagicMock
+
+    import gi
+
+    gi.require_version("Gdk", "3.0")
+    from gi.repository import Gdk, Gtk
+
+    from grc_agent.chat_sidebar import _SCROLL_STICK_THRESHOLD, ChatSidebar
+
+    sidebar = ChatSidebar()
+    proxy = MagicMock()
+    cm = MagicMock()
+    proxy._canvas_manager = cm
+    sidebar.set_flowgraph_proxy(proxy)
+
+    win = Gtk.OffscreenWindow()
+    win.set_default_size(400, 300)
+    win.add(sidebar)
+    for i in range(12):
+        sidebar._add_message_row(Gtk.Label(label=f"msg {i}\n" * 5))
+    win.show_all()
+    _settle_events()
+
+    adj = sidebar._scrolled.get_vadjustment()
+    adj.set_value(adj.get_upper() - adj.get_page_size())
+    _settle_events()
+    assert sidebar._auto_scroll is True
+    focus_before = win.get_focus()
+    entry = sidebar._entry
+    assert not entry.tv.has_focus()
+
+    def scroll_event(direction, state):
+        ev = Gdk.Event.new(Gdk.EventType.SCROLL)
+        ev.scroll.direction = direction
+        ev.scroll.state = state
+        return sidebar._scrolled.emit("scroll-event", ev)
+
+    # Ctrl+wheel up: exactly one native zoom-in step, gesture consumed, the
+    # chat does not scroll, intent and focus are untouched.
+    v_before = adj.get_value()
+    assert scroll_event(Gdk.ScrollDirection.UP, Gdk.ModifierType.CONTROL_MASK) is True
+    cm.drawing_area.zoom_in.assert_called_once()
+    cm.drawing_area.zoom_out.assert_not_called()
+    assert adj.get_value() == v_before
+    assert sidebar._auto_scroll is True
+    assert win.get_focus() is focus_before
+    assert not entry.tv.has_focus()
+
+    # Ctrl+wheel down: exactly one zoom-out step.
+    assert scroll_event(Gdk.ScrollDirection.DOWN, Gdk.ModifierType.CONTROL_MASK) is True
+    cm.drawing_area.zoom_out.assert_called_once()
+    cm.drawing_area.zoom_in.assert_called_once()
+
+    # Plain wheel passes through: no extra zoom, native scrolling runs, and
+    # the single authority recomputes intent from the moved position. (The
+    # emit's boolean comes from the ScrolledWindow's own class handler, so
+    # pass-through is asserted by behavior, not by the return value.) One
+    # wheel tick stays within the stick threshold, so wheel up repeatedly —
+    # each event natively scrolled and unzoomed — until clearly off-bottom,
+    # where the authority's verdict is False.
+    scroll_event(Gdk.ScrollDirection.UP, 0)
+    cm.drawing_area.zoom_in.assert_called_once()  # not stepped again
+    cm.drawing_area.zoom_out.assert_called_once()
+    _settle_events()
+    assert adj.get_value() < v_before, "plain wheel must pass through to native scrolling"
+    for _ in range(20):
+        if adj.get_upper() - adj.get_page_size() - adj.get_value() > _SCROLL_STICK_THRESHOLD:
+            break
+        scroll_event(Gdk.ScrollDirection.UP, 0)
+        _settle_events()
+    assert sidebar._auto_scroll is False
+
+    # Ctrl+smooth is not one of the two zoom directions: falls through.
+    assert scroll_event(Gdk.ScrollDirection.SMOOTH, Gdk.ModifierType.CONTROL_MASK) is False
+    cm.drawing_area.zoom_in.assert_called_once()
+    win.destroy()

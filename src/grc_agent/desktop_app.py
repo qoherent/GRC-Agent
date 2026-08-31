@@ -257,6 +257,11 @@ def build_app() -> tuple[Gtk.Window, NativeCanvasManager, ChatSidebar, NativeFlo
     canvas.on_graphs_changed = lambda: _sync_sidebar(canvas, sidebar)
     canvas.on_sync_failed = lambda msg: sidebar.set_status(msg, error=True)
     canvas.on_graph_modified = exec_monitor.notify_graph_modified
+    # KD2/R9: canvas zoom is the single zoom source — the chat sidebar's text
+    # is a pure projection of it (sidebar_font_multiplier applied by
+    # set_zoom_projection as one scoped, session-only CSS rule). Peer of the
+    # wiring above; there is no inverse path back to the canvas.
+    canvas.on_zoom_changed = sidebar.set_zoom_projection
     canvas.setup_signal_handlers()
     proxy = NativeFlowgraphProxy(canvas, exec_monitor=exec_monitor)
     sidebar.set_flowgraph_proxy(proxy)

@@ -19,6 +19,12 @@ from gi.repository import Gdk, GLib, Gtk, Pango
 
 from .css import get_code_style
 
+# Height cap for the code body: below it the full content shows, above it an
+# exactly-420px viewport with a vertical scrollbar. Shared by the
+# min/max-content-height setup and the size-request pin so the two can never
+# drift apart.
+_HEIGHT_CAP = 420
+
 
 def _parse_rule(rule: str) -> tuple[str | None, bool, bool]:
     """Pygments style rule string -> (color_hex, bold, italic)."""
@@ -122,7 +128,7 @@ class CodeBlock(Gtk.Box):
         sw = Gtk.ScrolledWindow()
         sw.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
         sw.set_min_content_height(28)
-        sw.set_max_content_height(420)
+        sw.set_max_content_height(_HEIGHT_CAP)
         sw.set_propagate_natural_height(True)
 
         tv = Gtk.TextView()
@@ -152,17 +158,68 @@ class CodeBlock(Gtk.Box):
         # full) and exactly the cap above it (the existing 420px viewport +
         # vscroll).
         #
-        # Measured at construction via a Pango layout over the buffer text:
-        # an unrealized TextView reports preferred height 0/1 (no font
-        # metrics yet), but its style-context font IS already resolved
-        # (monospace 11 pre- and post-realize) and create_pango_layout
-        # inherits it — layout height + top/bottom margins equals the
+        # Measured via a Pango layout over the buffer text: an unrealized
+        # TextView reports preferred height 0/1 (no font metrics yet), but
+        # its style-context font IS already resolved (monospace 11 pre- and
+        # post-realize) — layout height + top/bottom margins equals the
         # realized preferred height exactly (verified: 322+12 == 334).
         # WrapMode.NONE means the height is width-independent, so this never
         # fights the horizontal scrollbar.
-        buf = tv.get_buffer()
+        # construction pin is best-effort and the FIRST size-allocate re-pin
+        # is authoritative: this block is constructed UNPARENTED by
+        # MarkdownView.render and packed only afterwards, so the
+        # construction-time style context cannot see hierarchy-scoped CSS
+        # (the sidebar's zoom projection) — a block created while a
+        # projection is active would pin with the stale theme font and clip
+        # rows (verified live: pin 273 vs true content 363 at 1.5x). The
+        # first size-allocate necessarily happens after packing, when the
+        # style font is resolved, so the one-shot re-pin below re-measures
+        # with the authoritative font before the row is ever shown clipped.
+        self._sw = sw
+        self._tv = tv
+        self._pinned_font_str = self.get_style_context().get_font(
+            Gtk.StateFlags.NORMAL
+        ).to_string()
+        self._repin_idle_id = 0
+        self._dead = False
+        self.connect("destroy", lambda *_: setattr(self, "_dead", True))
+        sw.set_size_request(-1, self._measure_body_height())
+        # The construction pin is best-effort: this block is constructed
+        # UNPARENTED by MarkdownView.render and packed only afterwards, so
+        # the construction-time style context cannot see hierarchy-scoped
+        # CSS (the sidebar's zoom projection), and the first size-allocate
+        # may still run before the style pass resolves the packed font
+        # (verified live: pin 273 vs true content 363 at 1.5x). So the block
+        # watches its own style-updated: whenever the RESOLVED font changes
+        # (packing under an active projection, a later projection step, a
+        # theme change), it re-measures and re-pins — one uniform rule, no
+        # one-shot windows to miss.
+        self.connect("style-updated", self._on_style_updated)
+
+        sw.add(tv)
+        self.pack_start(header, False, False, 0)
+        self.pack_start(sw, True, True, 0)
+
+    def _measure_body_height(self) -> int:
+        """Measure the pin height from the CURRENT buffer + CURRENT style font.
+
+        One measurement law used at construction and at re-pin (``repin_height``).
+        The resolved style font is set explicitly on the layout instead of
+        leaning on ``create_pango_layout``'s inheritance: the widget's cached
+        PangoContext only adopts a changed CSS font on the next
+        frame-clock-driven style pass (verified live — right after a provider
+        reload the style font reads 13.2pt while the PangoContext still holds
+        11pt), so an explicit description is what makes the re-pin measure the
+        PROJECTED font instead of a stale one. At construction the style font
+        and the PangoContext font are the same, so the inherited-layout result
+        is unchanged (verified: 302 == 302).
+        """
+        buf = self._tv.get_buffer()
         buf_text = buf.get_slice(buf.get_start_iter(), buf.get_end_iter(), True)
-        layout = tv.create_pango_layout(buf_text)
+        layout = self._tv.create_pango_layout(buf_text)
+        layout.set_font_description(
+            self._tv.get_style_context().get_font(Gtk.StateFlags.NORMAL)
+        )
         _lw, content_h = layout.get_pixel_size()
         # The per-line pixel spacing set above (3px above + 3px below) is not
         # part of the Pango measurement — the TextView adds one above/below
@@ -170,15 +227,48 @@ class CodeBlock(Gtk.Box):
         # trailing newline = 11 lines, spacing 66px exactly accounts for the
         # measured natural-vs-pango delta).
         spacing = (
-            tv.get_pixels_above_lines() + tv.get_pixels_below_lines()
+            self._tv.get_pixels_above_lines() + self._tv.get_pixels_below_lines()
         ) * layout.get_line_count()
-        sw.set_size_request(
-            -1, min(content_h + spacing + tv.get_top_margin() + tv.get_bottom_margin(), 420)
+        return min(
+            content_h + spacing + self._tv.get_top_margin() + self._tv.get_bottom_margin(),
+            _HEIGHT_CAP,
         )
 
-        sw.add(tv)
-        self.pack_start(header, False, False, 0)
-        self.pack_start(sw, True, True, 0)
+    def repin_height(self) -> int:
+        """R12 re-pin entry point: re-measure from the current buffer and the
+        current style font, then re-apply the height pin.
+
+        The construction-time pin was measured with the then-current font (an
+        unparented style context at that, so it is best-effort only); a
+        mid-session rescale of the projected chat font (sidebar
+        ``set_zoom_projection``) leaves it stale, which clips rows. The
+        style-updated font-watch, the first packing pass, and the sidebar's
+        projection sweeps all route through here, so every rendered block
+        measures the font its packed style context actually resolves to."""
+        height = self._measure_body_height()
+        self._sw.set_size_request(-1, height)
+        self._pinned_font_str = self.get_style_context().get_font(
+            Gtk.StateFlags.NORMAL
+        ).to_string()
+        return height
+
+    def _on_style_updated(self, *_args) -> None:
+        """Deferred font-watch: by idle time the full style pass (including
+        this block's revalidated context) has settled, so the comparison and
+        the re-measure both see the font the row will actually render with.
+        Deferring also avoids re-pinning reentrantly inside the
+        style-updated emission."""
+        if not self._dead and not self._repin_idle_id:
+            self._repin_idle_id = GLib.idle_add(self._repin_if_font_changed)
+
+    def _repin_if_font_changed(self) -> bool:
+        self._repin_idle_id = 0
+        if self._dead:
+            return False
+        current = self.get_style_context().get_font(Gtk.StateFlags.NORMAL).to_string()
+        if current != self._pinned_font_str:
+            self.repin_height()
+        return False  # one-shot
 
     def _on_copy(self, btn: Gtk.Button) -> None:
         clipboard = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)

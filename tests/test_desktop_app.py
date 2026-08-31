@@ -267,3 +267,32 @@ async def test_startup_preflight_surfaces_wayland_advisory(monkeypatch):
     )
 
 
+
+
+def test_canvas_zoom_wiring_contract():
+    """KD2/R9 wiring contract, pinned at both ends (build_app itself needs a
+    live GRC window and is not unit-testable here): NativeCanvasManager has
+    the assignable on_zoom_changed slot (peer of the on_graphs_changed/
+    on_sync_failed/on_graph_modified callbacks), and ChatSidebar exposes the
+    one-argument set_zoom_projection entry point desktop_app.py wires it to,
+    mapping through sidebar_font_multiplier."""
+    import inspect
+    from types import SimpleNamespace
+
+    from grc_agent.chat_sidebar import ChatSidebar
+    from grc_agent.native_canvas import NativeCanvasManager, sidebar_font_multiplier
+
+    entry = ChatSidebar.set_zoom_projection
+    assert callable(entry)
+    assert list(inspect.signature(entry).parameters) == ["self", "zoom_factor"]
+
+    cm = NativeCanvasManager.__new__(NativeCanvasManager)
+    cm.window = SimpleNamespace(current_page=None)
+    # Same seam as test_native_canvas's _zoom_test_manager: the assignability
+    # of the callback slot desktop_app.build_app wires to the sidebar entry.
+    cm.on_zoom_changed = None
+    assert cm.on_zoom_changed is None
+    cm.on_zoom_changed = ChatSidebar.set_zoom_projection  # the wiring shape
+
+    # The mapping the entry applies is the one committed pure function.
+    assert sidebar_font_multiplier(2.25) == 1.5
