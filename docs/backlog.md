@@ -6,70 +6,80 @@ Active feature requests, architectural improvements, and planned capabilities. C
 
 ## 📋 Active Backlog & Proposed Capabilities
 
-### 1. Autonomous Run / Debug / Screenshot Loop & Multimodal Context
-* **Status**: 🔄 Partial — Text run loop shipped (`run_flowgraph(action='start'|'stop')` + `get_run_log`); vision/multimodal input and artifact capture remain proposed.
-* **Shipped (Text Loop)**:
-  - Agent controls GRC's native Execute/Stop via unified `run_flowgraph(action='start'|'stop')` (native `Actions.FLOW_GRAPH_EXEC/KILL`, output streaming to GRC console; `start` gated by `ApprovalRequired()`, `stop` ungated, optional `stop_after_seconds` bounded runs).
-  - `exec_monitor` completion events (`wait_for_run_end`) and agent-initiated failure-notification suppression.
-  - Autonomous probe-verification strategy (probe_rate → message_debug → run → read log).
-* **Remaining Proposed Work**:
-  - **Vision-model probe**: `resolve_model_vision(provider, model)` inspecting backend capabilities (`/api/show` for Ollama, `/v1/models` for OpenRouter) surfaced as a Settings badge.
-  - **V1 data-plane capture**: probe/file-sink block → `numpy.fromfile` → PIL PNG → `ToolReturn(content=[BinaryContent(..., media_type='image/png')])` with numeric fallback for text-only models.
-  - **Pictorial Approval Card Previews**: Offscreen Cairo surface rendering (`gui.FlowGraph.draw(cr)` → PNG) to display proposed visual diffs in `ApprovalCard`.
-  - **File-RAG tool**: Bounded semantic query tool for large binary project documents (PDF datasheets, CSVs, RF captures) separate from literal line-by-line `read_file`.
+### 1. Multimodal GRC Visual Inspection & Canvas Screenshots
+* **Status**: 🔄 Proposed
+* **Objective**: Provide a model-facing visual tool (`screenshot_graph` / `capture_canvas`) that captures a high-resolution rendering of the live `.grc` flowgraph canvas and returns it as an image directly into the agent's multimodal context upon invocation.
+* **Architecture & Mechanics**:
+  - **On-Demand Visual Tool**: An explicit tool called by the agent when it requires visual, spatial, or layout verification beyond semantic JSON inspection.
+  - **Offscreen Cairo Rendering**: Directly hooks GRC's native Cairo drawing engine (`gui.FlowGraph.draw(cr)` rendered onto an offscreen `cairo.ImageSurface` → PNG byte stream) or canvas drawing area capture, ensuring clean renders free from window occlusion or OS desktop artifacts.
+  - **Multimodal Payload**: Attaches the captured image as `BinaryContent(data=png_bytes, media_type='image/png')` via Pydantic AI to vision-capable models (e.g. Gemini 2.5/3.7, Claude 3.5/3.7 Sonnet, GPT-4o).
+  - **Vision Model Probing**: Inspects backend provider capabilities (`/api/show` for Ollama, `/v1/models` for OpenRouter/OpenAI) to detect vision support dynamically, surfacing an active Vision badge in Settings.
+* **Target Use Cases**:
+  - Validating spatial visual arrangement, bus wiring clarity, and custom block layout aesthetics.
+  - Inspecting graphical state indicators (bypassed blocks, disabled subtrees, error highlights) directly on the graphical canvas.
 
 ---
 
-### 2. Extended RCA Hardening & Verification
-* **Status**: 🔄 Partial — Core diagnostics and typography shipped; validation-gate attribution and docstring enrichment shipped; wiki-corpus expansion active.
-* **Shipped Items**:
-  - Port `vlen` visibility in `render_port` and catalog inspection when `vlen ≠ 1`.
-  - Friendly retry-exhaustion continuation UX.
-  - Native GTK text tags with inter-line spacing and baseline-aligned block tags.
-  - Prompt invariants: failed-fix counter-strategy, external grounding nudges, and QT GUI FFT platform rules.
-  - **Validation-gate error attribution**: pre-batch `iter_error_messages()` snapshot distinguishes pre-existing broken graph state from the agent's own mutations; only new errors raise `ModelRetry`.
-  - **Catalog docstring enrichment**: implementation-class docstrings (parameter units/semantics) embedded into catalog payloads offline; validated 7/7 units/semantics queries at rank ≤ 2.
-* **Remaining Proposed Work**:
-  - **Wiki-corpus expansion**: the corpus still lacks dedicated pages for some topics (the 2026-08-28 ground-truth stress run left 4 queries missing in *both* engines — a corpus-coverage ceiling, not ranking); expansion beyond 94 files to QT GUI sinks, SDR hardware recipes, and modulation design guides remains.
-  - **Corpus de-duplication**: `Binary_Files_for_DSP.md` duplicates 43/63 long lines of `Reading_and_Writing_Binary_Files.md`; synthetic stub pages (`Provenance:`/`Aliases:` meta-text) split ranking mass in both engines. De-duplicate/stub-out before re-running the ground-truth stress matrix.
-  - **`output_truncated` density watch**: on the 568-block catalog the flag fired 7/7 in the stress run (honest, near-always true). If flag-fatigue is ever measurable, revisit the rejected count-field variant (`more_available: N`) — recorded in `docs/investigation/hybrid-fusion-and-docs-truncation-design.md` R3.
+### 2. Data-Plane Capture & Multimodal RF / File Visualization
+* **Status**: 🔄 Proposed
+* **Objective**: Enable the agent to directly observe, inspect, and visually diagnose live flowgraph streaming data and multimodal project files without flooding its context window with raw numbers or large text dumps.
+* **Supported Formats & Modality Handling**:
+  1. **Binary RF Stream Data (`.bin`, `.dat`, `.raw`, `.iq`)**:
+     - *Source*: Output files from `blocks_file_sink` or probe taps.
+     - *Processing*: Sample parsing via `numpy.fromfile` (complex64, float32, int16).
+     - *Visualization*: Generates spectral power density (FFT), I/Q constellation diagrams, eye diagrams, or time-domain waterfall plots via matplotlib/PIL.
+     - *Return*: Returns image payload (`image/png`) to vision LLMs; provides concise statistical metrics (estimated SNR, RMS power, peak frequencies, DC offset) as fallback or companion data.
+  2. **Direct Image Files (`.png`, `.jpg`, `.jpeg`, `.svg`)**:
+     - *Handling*: Direct binary reading and multimodal passthrough for flowgraph plot captures, UI diagrams, and schematic images in the project directory.
+  3. **Tabular & Register Spreadsheets (`.xlsx`, `.csv`, `.tsv`)**:
+     - *Handling*: Specialized structural parser that extracts sheet metadata, column schemas, and targeted row slices, or renders summary heatmap plots rather than dumping massive raw CSV text into prompt context.
+  4. **Text-Only Fallback Pipeline**:
+     - Automatically falls back to high-density statistical characterization (quantiles, FFT peak tables, symbol error rate estimates) when operating with text-only LLMs.
 
 ---
 
-## 🔍 Known Upstream Limitations & Platform Diagnostics
-
-1. **GTK3 Nested Submenus (File → New) on Wayland Compositors**:
-   - *Observation*: On native Wayland sessions under certain compositors (e.g. Mutter / GNOME on Ubuntu 26.04), nested GTK3 menu popups fail to map due to unhandled XDG grab events.
-   - *Planned Resolution*: Detect native Wayland display sessions at startup and display a subtle status-bar note advising `GDK_BACKEND=x11 uv run grc-agent`.
-
-2. **`no_gui` Flowgraph External Terminal Logging**:
-   - *Observation*: For `generate_options: no_gui` flowgraphs, upstream GRC wraps execution in `x-terminal-emulator`. The subprocess pipe captures the terminal wrapper stdout rather than the flowgraph output.
-   - *Planned Resolution*: Detect terminal wrapper execution in `exec_monitor` and annotate `get_run_log` with an external-terminal note.
-
-3. **ExecFlowGraphThread Early Spawn Failures**:
-   - *Observation*: If spawning the run subprocess raises inside GRC (`gnuradio/grc/gui/Executor.py:44`), GRC's exception handler emits `send_end_exec()` with a default return code of 0.
-   - *Planned Resolution*: Track process PID allocation directly to distinguish immediate spawn crashes from successful zero-exit runs.
-
-4. **ChatGPT (Codex) Reasoning Summary Annotations**:
-   - *Observation*: OpenAI does not expose raw reasoning tokens for GPT-5.x, returning concise high-level summaries by design.
-   - *Planned Resolution*: Annotate the thinking expander with a summary indicator when using the Codex provider so brevity is not mistaken for a rendering bug.
+### 3. Project Document File-RAG (Large Document Retrieval)
+* **Status**: 🔄 Proposed
+* **Objective**: Provide a dedicated semantic retrieval tool (`query_project_documents` / `file_rag`) enabling the agent to search through very large project assets (datasheets, hardware manuals, RF register maps, RFC specifications, IEEE standards, PDFs, and large text/code archives) without flooding or exhausting its limited context window.
+* **Key Distinctions**:
+  - Unlike `fs_tools.read_file` (which reads literal raw text lines and hits context limits on large files), `file_rag` chunks, embeds, and indexes project documents into a local project-level vector store.
+  - The model queries technical questions (e.g. "What are the register addresses for PLL divider N on chip X?", "What is the packet header sync word format?") and receives only the top-k relevant semantic chunks.
+* **Architecture & Privacy**:
+  - Uses the existing local, zero-dependency embedding runtime (`EmbeddingGemma` via `llama.cpp` over UNIX socket).
+  - Storage: Project-scoped SQLite vector + FTS5 database (`.grc_agent/project_docs.db`), keeping user project data 100% local.
 
 ---
 
-## 🔧 Upstream Issues to File (diagnosed in the 2026-08-28 sessions-150/151 forensic + grounding reports)
+### 4. Knowledge Base & Corpus Expansion
+* **Status**: 🔄 Partial (Hybrid RRF and SWIG docstrings shipped; expansion and cleanup active)
+* **4.1 Wiki Corpus Expansion**:
+  - Expand local knowledge corpus beyond the initial 94 wiki pages to close domain gaps identified in forensic audits:
+    - *QT GUI Sinks*: Detailed parameter guides, internal FFT behaviors, trigger modes, and vector lengths for `qtgui_sink_x`, `qtgui_freq_sink_x`, `qtgui_time_sink_x`, `qtgui_waterfall_sink_x`.
+    - *SDR Hardware Recipes*: Hardware setup guides, antenna selections, gain staging, and buffer tuning for UHD/USRP, RTL-SDR, HackRF, bladeRF, and ADALM-PLUTO.
+    - *Digital Synchronization & Modulation*: Practical recipes for Costas loops, Polyphase Clock Sync, Mueller & Müller clock recovery, symbol timing, and framing/deframing.
+* **4.2 Corpus De-duplication & Hygiene**:
+  - De-duplicate overlapping wiki articles (e.g. `Binary_Files_for_DSP.md` duplicates 43 of 63 long lines in `Reading_and_Writing_Binary_Files.md`).
+  - Eliminate synthetic stub pages containing `Provenance:` and `Aliases:` meta-text that dilute ranking mass in lexical and vector indexes.
+* **4.3 Truncation Density Monitoring**:
+  - Monitor `output_truncated` flag behavior across both `catalog` and `docs` domains to evaluate result density and k-parameter tuning.
 
-1. **pydantic-ai-harness `Shell` spawn stdin** (`pydantic_ai_harness/shell/_toolset.py:342-348`, `:422-428` in 0.23.0; still absent on main post-0.27.0):
-   - *Observation*: `anyio.open_process(..., stdout=PIPE, stderr=PIPE)` with no `stdin=` — anyio's unset default (`-1` == `PIPE`) hands the child a fresh pipe nobody writes or closes until the post-timeout `aclose()`. A command that ends up reading stdin (`grep -A6 "x" $(find /nonexistent …)` — empty file operand) blocks until the full default timeout (observed: 600 s of a real session).
-   - *Planned Resolution*: upstream issue proposing `stdin=subprocess.DEVNULL` at both spawn sites. Reproduced: blocks at any time cap, exits 0.00 s with DEVNULL. Harness #623 (0.26.0) covers spawn *failures*, not this hang.
-2. **stackone-defender tier-1 `shell_command` pattern refinement** (`stackone_defender/classifiers/patterns.py:124` in 0.7.4 — mitigated locally by detect-and-log):
-   - *Observation*: regex `\$\([^)]+\)` (medium) escalates to high on 2 matches + an entropy flag; official doxygen pages' own jQuery boilerplate (`$(document)` ×2) deterministically trip it → whole fetch withheld with `block_high_risk=True`. No pattern-level config, domain exemption, or tier-1 threshold knob exists up through 0.8.2.
-   - *Planned Resolution*: upstream issue proposing exclusion of benign `$(identifier)` JS patterns from command-substitution matching, or a withhold/severity knob on the harness defender.
-3. **ConversationSearch misses interrupted captures**:
-   - *Observation*: harness docs: `SnapshotHistorySource` "recovers original messages by unioning snapshots … while excluding interrupted captures" — tool calls cancelled with a Stop press (e.g. s150's two `run_command`s, retained only in `state=interrupted` snapshots) are invisible to in-app conversation search; only direct DB reads reach them.
-   - *Planned Resolution*: raise with upstream; sanctioned in-session recovery already exists (`continue_run(include_interrupted=True)`).
-4. **Catalog `distance` semantics for non-vector rows**:
-   - *Observation*: lexical-sourced catalog rows render `distance: 0.0` (pre-existing convention, `rag.py` render loop), which reads as a perfect vector match; under hybrid, the truthful fused `score` field carries the ranking signal instead.
-   - *Planned Resolution*: make `distance` nullable/omitted for non-vector rows in a lean pass (rejected-for-now in the design report R7 — touches every catalog-shape assertion; bundle with the next render-surface change).
+---
+
+### 5. Platform Hardening & Upstream Fixes
+* **Status**: 🔄 Active & Planned
+* **5.1 ExecFlowGraphThread Early Spawn Crash Tracking**:
+  - *Observation*: If spawning the run subprocess raises inside GRC (`gnuradio/grc/gui/Executor.py:44`), GRC's exception handler emits `send_end_exec()` with a default return code of 0.
+  - *Planned Resolution*: Track process PID allocation directly in `exec_monitor` to distinguish immediate subprocess spawn failures from legitimate zero-exit runs.
+* **5.2 Upstream Pydantic AI Harness `Shell` Stdin Hang**:
+  - *Observation*: `anyio.open_process` without an explicit `stdin=` defaults to `PIPE`, leaving an unwritten, unclosed stdin pipe that causes commands reading stdin (e.g. `grep` on empty file lists) to hang until timeout (up to 120s/600s).
+  - *Planned Resolution*: Submit upstream issue and pull request to `pydantic-ai-harness` proposing `stdin=subprocess.DEVNULL`.
+* **5.3 Upstream StackOne Defender Regex Refinement**:
+  - *Observation*: Regex `\$\([^)]+\)` escalates on benign jQuery boilerplate (`$(document)` ×2) in official GNU Radio Doxygen web pages, triggering false-positive injection withholding.
+  - *Planned Resolution*: Submit upstream issue to `stackone-defender` proposing exclusions for benign JS identifiers or configurable sensitivity thresholds.
+* **5.4 Catalog Distance Semantics**:
+  - Make `distance` field nullable or omitted for non-vector lexical rows to eliminate confusion where `distance: 0.0` was misinterpreted as a perfect vector distance match.
+* **5.5 ConversationSearch Snapshot Recovery for Interrupted Runs**:
+  - Engage with upstream harness to allow recovery of user-interrupted tool calls (`state=interrupted`) during session history analysis.
 
 ---
 
@@ -85,6 +95,8 @@ Active feature requests, architectural improvements, and planned capabilities. C
 | **GTK3 Theming & AST Markdown** | `0.3.1` / `0.3.2` | 3-way theme switching (`system`/`dark`/`light`), Pygments syntax highlighting, direct AST walker (`markdown-it-py`), hanging indents, and copy buttons. |
 | **Human-in-the-Loop Approvals** | `0.3.2` / `0.4.0` | Pydantic AI native `requires_approval=True` deferred tools, `ApprovalCard` diffs/command rendering, and composer `Mode` button (Manual / Auto / YOLO). |
 | **Unified Flowgraph Execution** | `0.4.0` / `0.5.0` | Unified `run_flowgraph(action='start'\|'stop')` tool, bounded runtime `stop_after_seconds`, GRC console streaming, and `exec_monitor` log retention. |
+| **Hybrid RAG & Catalog Docstring Enrichment** | `0.5.0` / `Unreleased` | Reciprocal Rank Fusion (RRF $k=60$) vector + FTS5 search, embedded C++ SWIG docstrings for parameter units, silenced ingestion log noise. |
+| **Prompt Streamlining & C++ Catalog Default** | `Unreleased` | ~42% prompt token reduction, C++ catalog default prioritization, NumPy/SciPy vectorization rules for EPBs, and safe udev permissions guidance. |
 
 ---
 
