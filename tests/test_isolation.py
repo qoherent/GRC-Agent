@@ -860,7 +860,8 @@ def test_system_prompt_keeps_unobservable_contracts():
 
     These describe harness contracts and GRC platform quirks the model has no
     other way to observe (turn-end validation, the EPB call-ordering quirk,
-    force=True splitting, auto dtype resolution)."""
+    force=True splitting, auto dtype resolution, environment permission
+    quirks like SDR udev rules and TUN/TAP CAP_NET_ADMIN)."""
     from grc_agent.prompts import build_system_prompt
 
     prompt = build_system_prompt()
@@ -870,8 +871,30 @@ def test_system_prompt_keeps_unobservable_contracts():
         "no add_blocks in that same call",
         "'auto' never resolves from another 'auto' block",
         "Never enumerate or reconstruct a block schema from memory",
+        # Environment permission quirks: lock both so a future prompt
+        # streamlining pass cannot silently drop either rule.
+        "install the driver udev rules package",
+        "CAP_NET_ADMIN",
+        "ip tuntap add dev tap0 mode tap user $USER",
+        "Do not advise running the app as root or setcap-ing the interpreter",
     ):
         assert fragment in prompt, f"lost an unobservable contract: {fragment!r}"
+
+
+def test_execution_environment_quirks_stay_out_of_planner_prompt():
+    """The planner is a read-only planning role and shares no execution
+    diagnostics surface with the executor — runtime remediation commands
+    (udev reload, TUN/TAP creation) belong only in the executor prompt."""
+    from grc_agent.prompts import build_planner_prompt
+
+    prompt = build_planner_prompt()
+    for fragment in (
+        "sudo udevadm control --reload-rules",
+        "ip tuntap add",
+    ):
+        assert fragment not in prompt, (
+            f"planner prompt gained execution-diagnostics quirk: {fragment!r}"
+        )
 
 
 def test_build_agents_from_cfg_produces_correct_model_type_per_provider(tmp_path, monkeypatch):
