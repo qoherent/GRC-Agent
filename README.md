@@ -202,14 +202,14 @@ fail to `import gnuradio` even with the bridge.
 
 Choose how the agent searches the block catalog and documentation:
 
-* **Option 1: Lexical Search (Default)** — Zero extra downloads, nothing running in the background. Uses SQLite FTS5/BM25 keyword search:
+* **Option 1: Lexical Search (Default / Fast Setup)** — Zero extra downloads, nothing running in the background. Uses SQLite FTS5/BM25 keyword search:
   ```bash
   uv run grc-agent
   ```
 
-* **Option 2: Local Vector Search (Hybrid RAG)** — Pre-download the pinned local runtime (~345 MB: llama.cpp + EmbeddingGemma into `~/.local/share/grc-agent`) for semantic search combined with FTS5 lexical search via Reciprocal Rank Fusion (RRF):
+* **Option 2: Local Vector Search (Hybrid RAG — Recommended for Best Retrieval)** — Superior retrieval quality by fusing semantic vector understanding with exact keyword matches (Reciprocal Rank Fusion). Requires downloading a lightweight local embedding model and runtime (~345 MB: pinned llama.cpp + EmbeddingGemma into `~/.local/share/grc-agent`, with zero system-wide dependencies):
   ```bash
-  # Pre-provision vector runtime and enable hybrid search before launch:
+  # Pre-provision the lightweight vector runtime and enable hybrid search:
   uv run python -c "from grc_agent import embed_runtime, settings; embed_runtime.provision(); settings.upsert_env_key('GRC_EMBED_BACKEND', 'llamacpp')"
   uv run grc-agent
   ```
