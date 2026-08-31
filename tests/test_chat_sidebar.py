@@ -3688,6 +3688,9 @@ def test_send_fix_when_free_waits_for_idle(tmp_path, monkeypatch):
 
 def _write_test_png(path) -> None:
     """Write a real 1x1 PNG through GdkPixbuf (same loader the sidebar uses)."""
+    import gi
+
+    gi.require_version("GdkPixbuf", "2.0")
     from gi.repository import GdkPixbuf
 
     pixbuf = GdkPixbuf.Pixbuf.new(GdkPixbuf.Colorspace.RGB, True, 8, 1, 1)
@@ -3710,8 +3713,6 @@ def _iter_widgets(widget):
 def test_composer_image_attachments(tmp_path):
     """Attach flow: chips appear, sensitivity admits image-only sends, prompt
     is built as a multimodal list, and the composer resets after dispatch."""
-    import asyncio
-
     from grc_agent.chat_sidebar import ChatSidebar
 
     sidebar = ChatSidebar()
@@ -3728,8 +3729,10 @@ def test_composer_image_attachments(tmp_path):
     assert sidebar._attach_btn is not None
     assert sidebar._attach_btn in sidebar._input_box.get_children()
 
-    # Adding an attachment shows a chip and enables image-only sends.
+    # Adding an attachment queues it; the caller refreshes chips once per
+    # batch (the chooser response handler does the same).
     sidebar._add_attachment(str(img_path))
+    sidebar._refresh_attachment_chips()
     assert len(sidebar._attachments) == 1
     assert sidebar._attachments[0].media_type == "image/png"
     assert sidebar._attachments[0].data.startswith(b"\x89PNG")
@@ -3741,6 +3744,7 @@ def test_composer_image_attachments(tmp_path):
     sidebar._remove_attachment(0)
     assert sidebar._attachments == []
     assert not sidebar._attachment_row.get_children()
+    assert not sidebar._attachment_row.get_visible()
     sidebar._update_send_sensitivity()
     assert not sidebar._send_btn.get_sensitive()
 
@@ -3753,6 +3757,7 @@ def test_composer_image_attachments(tmp_path):
     async def flow():
         sidebar._run_agent_turn = fake_turn
         sidebar._add_attachment(str(img_path))
+        sidebar._refresh_attachment_chips()
         sidebar._entry.set_text("what is this?")
         sidebar._dispatch_send()
         await asyncio.sleep(0)
@@ -3768,7 +3773,6 @@ def test_composer_image_attachments(tmp_path):
 def test_send_message_multimodal_and_image_only(tmp_path):
     """send_message accepts a multimodal prompt list, renders the user bubble
     with a thumbnail, and allows an image-only turn with blank text."""
-    import asyncio
     from collections.abc import Sequence
 
     from gi.repository import Gtk

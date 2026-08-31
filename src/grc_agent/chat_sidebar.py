@@ -13,13 +13,12 @@ import asyncio
 import contextlib
 import json
 import logging
-import mimetypes
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from decimal import Decimal
 from pathlib import Path
-from typing import Any
+from typing import Any, get_args
 
 import gi
 
@@ -46,6 +45,7 @@ from pydantic_ai.exceptions import (
 )
 from pydantic_ai.messages import (
     BinaryContent,
+    ImageMediaType,
     ModelMessage,
     ModelRequest,
     ModelResponse,
@@ -80,16 +80,26 @@ assert {_SUMMARY_ACTIONS_FIELD, _SUMMARY_EXPLANATION_FIELD} <= set(GrcAgentRespo
     "GrcAgentResponse fields changed; _parse_final_summary must be updated to match"
 )
 
-# The four image media types pydantic-ai's ImageMediaType admits — also the
-# exact set the attachment chooser filter accepts (one rule, no drift).
-_IMAGE_MEDIA_TYPES = ("image/png", "image/jpeg", "image/gif", "image/webp")
+# Derived from pydantic-ai's ImageMediaType so the chooser filter and the
+# attachment admission gate are the same set by construction (one rule, no
+# drift).
+_IMAGE_MEDIA_TYPES: tuple[str, ...] = get_args(ImageMediaType)
 
 
-def _pixbuf_from_bytes(data: bytes) -> GdkPixbuf.Pixbuf | None:
+def _pixbuf_from_bytes(data: bytes, max_height: int | None = None) -> GdkPixbuf.Pixbuf | None:
     """Decode image bytes through GdkPixbuf's streaming loader (the standard
-    GTK path). Returns None for undecodable bytes so callers can skip the
-    thumbnail rather than fail the whole turn."""
+    GTK path). When `max_height` is given, the loader's size-prepared hint
+    decodes directly at thumbnail scale, so a large photo never allocates a
+    full-resolution RGBA buffer just to shrink it. Returns None for
+    undecodable bytes so callers can skip the thumbnail rather than fail the
+    whole turn."""
     loader = GdkPixbuf.PixbufLoader()
+    if max_height is not None:
+
+        def _hint(_loader: GdkPixbuf.PixbufLoader, width: int, height: int) -> None:
+            _loader.set_size(max(1, round(width * max_height / height)), max_height)
+
+        loader.connect("size-prepared", _hint)
     try:
         loader.write(data)
         loader.close()
@@ -100,10 +110,13 @@ def _pixbuf_from_bytes(data: bytes) -> GdkPixbuf.Pixbuf | None:
         return None
 
 
-def _scale_pixbuf(pixbuf: GdkPixbuf.Pixbuf, height: int) -> GdkPixbuf.Pixbuf:
-    """Scale to `height` px preserving aspect ratio."""
-    width = max(1, round(pixbuf.get_width() * height / pixbuf.get_height()))
-    return pixbuf.scale_simple(width, height, GdkPixbuf.InterpType.BILINEAR)
+def _thumbnail(data: bytes, height: int) -> Gtk.Image | None:
+    """Aspect-preserving thumbnail widget at `height` px, or None for
+    undecodable bytes."""
+    pixbuf = _pixbuf_from_bytes(data, max_height=height)
+    if pixbuf is None:
+        return None
+    return Gtk.Image.new_from_pixbuf(pixbuf)
 from .db import (
     archive_transcript,
     conversation_id_for_session,
@@ -2479,14 +2492,9 @@ class ChatSidebar(Gtk.Box):
         if images:
             thumbs = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
             for image in images:
-                pixbuf = _pixbuf_from_bytes(image.data)
-                if pixbuf is not None:
-                    thumbs.pack_start(
-                        Gtk.Image.new_from_pixbuf(_scale_pixbuf(pixbuf, 128)),
-                        False,
-                        False,
-                        0,
-                    )
+                thumb = _thumbnail(image.data, 128)
+                if thumb is not None:
+                    thumbs.pack_start(thumb, False, False, 0)
             if thumbs.get_children():
                 thumbs.get_style_context().add_class("chat-user-msg-images")
                 vbox.pack_start(thumbs, False, False, 0)
@@ -3026,23 +3034,31 @@ class ChatSidebar(Gtk.Box):
         native.connect("response", self._on_attach_response)
         native.show()
 
-    def _on_attach_response(self, dialog: Any, response: int) -> None:
+    def _on_attach_response(self, dialog: Gtk.FileChooserNative, response: int) -> None:
         if response == Gtk.ResponseType.ACCEPT:
             for path in dialog.get_filenames():
                 self._add_attachment(path)
+            # One refresh per batch — _add_attachment only validates and
+            # queues, so multi-select costs one chip-row rebuild.
+            self._refresh_attachment_chips()
+            self._update_send_sensitivity()
         dialog.destroy()
 
     def _add_attachment(self, path: str) -> None:
-        """Queue one image file as a pending attachment (a chip). The chooser
-        filter already restricts to image media types; anything else that
-        reaches this seam is rejected with an explicit error bubble."""
-        media_type, _ = mimetypes.guess_type(path)
-        if media_type is None or not media_type.startswith("image/"):
+        """Queue one image file as a pending attachment (validated, not yet
+        rendered — the caller refreshes chips once per batch). Admission rule
+        is exact membership in `_IMAGE_MEDIA_TYPES`, the same set the chooser
+        filter offers; unreadable files are reported with an explicit error
+        bubble instead of failing the callback."""
+        try:
+            content = BinaryContent.from_path(path)
+        except OSError as e:
+            self._append_error(f"Cannot read attachment: {Path(path).name} ({e})")
+            return
+        if content.media_type not in _IMAGE_MEDIA_TYPES:
             self._append_error(f"Unsupported attachment type: {Path(path).name}")
             return
-        self._attachments.append(BinaryContent(data=Path(path).read_bytes(), media_type=media_type))
-        self._refresh_attachment_chips()
-        self._update_send_sensitivity()
+        self._attachments.append(content)
 
     def _remove_attachment(self, index: int) -> None:
         if 0 <= index < len(self._attachments):
@@ -3057,17 +3073,18 @@ class ChatSidebar(Gtk.Box):
             self._attachment_row.pack_start(
                 self._build_attachment_chip(index, attachment), False, False, 0
             )
+        # show_all() would re-show the row after set_visible(False), so the
+        # show is guarded by the same emptiness rule that drives visibility.
         self._attachment_row.set_visible(bool(self._attachments))
-        self._attachment_row.show_all()
+        if self._attachments:
+            self._attachment_row.show_all()
 
     def _build_attachment_chip(self, index: int, attachment: BinaryContent) -> Gtk.Widget:
         chip = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=2)
         chip.get_style_context().add_class("chat-attachment-chip")
-        pixbuf = _pixbuf_from_bytes(attachment.data)
-        if pixbuf is not None:
-            chip.pack_start(
-                Gtk.Image.new_from_pixbuf(_scale_pixbuf(pixbuf, 48)), False, False, 0
-            )
+        thumb = _thumbnail(attachment.data, 48)
+        if thumb is not None:
+            chip.pack_start(thumb, False, False, 0)
         remove_btn = Gtk.Button.new_from_icon_name(
             "window-close-symbolic", Gtk.IconSize.MENU
         )
@@ -3085,7 +3102,7 @@ class ChatSidebar(Gtk.Box):
         multimodal `Sequence[UserContent]` (text + image parts) per
         pydantic-ai's user-prompt contract. Returns False (no-op) if `prompt`
         carries neither text nor images, or a turn is already in flight."""
-        part = UserPromptPart(content=prompt)
+        part = user_request(prompt).parts[0]
         text = user_prompt_text(part)
         images = prompt_images(part)
         if (not text.strip() and not images) or self._busy:
@@ -3125,8 +3142,8 @@ class ChatSidebar(Gtk.Box):
             # SQLite INSERT on the GLib loop) BEFORE capturing the origin
             # session id, so conversation grouping, the plan handoff, and the
             # archive paths all see it. Payload: the user prompt included
-            # inline — NOT by mutating _message_history. agent.iter(text, ...)
-            # appends `text` to the canonical history itself; if we pre-loaded
+            # inline — NOT by mutating _message_history. agent.iter(prompt, ...)
+            # appends the prompt to the canonical history itself; if we pre-loaded
             # it into _message_history here, the success path's
             # run.result.all_messages() would contain the prompt TWICE (once
             # from our pre-load, once from pydantic-ai's own append) and

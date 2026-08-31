@@ -430,9 +430,7 @@ def prompt_images(part: UserPromptPart) -> list[BinaryContent]:
     if isinstance(content, str):
         return []
     return [
-        item
-        for item in content
-        if isinstance(item, BinaryContent) and item.media_type.startswith("image/")
+        item for item in content if isinstance(item, BinaryContent) and item.is_image
     ]
 
 

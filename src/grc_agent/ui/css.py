@@ -243,10 +243,7 @@ textview.chat-thinking-textview text {
     border-radius: 8px;
     background-color: alpha(@theme_fg_color, 0.025);
 }
-.chat-send-btn {
-    min-width: 34px;
-    min-height: 34px;
-}
+.chat-send-btn,
 .chat-attach-btn {
     min-width: 34px;
     min-height: 34px;
