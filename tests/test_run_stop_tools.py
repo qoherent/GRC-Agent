@@ -14,7 +14,7 @@ from unittest.mock import MagicMock
 import pytest
 from pydantic_ai.exceptions import ApprovalRequired, ModelRetry
 
-from grc_agent.agent import run_flowgraph_func
+from grc_agent.agent import run_flowgraph_func, save_graph_func
 from grc_agent.native_canvas import NativeCanvasManager, NativeFlowgraphProxy
 
 
@@ -122,11 +122,21 @@ def test_run_gates_already_running(fake_actions):
 
 
 def test_run_gates_unsaved_page(fake_actions):
+    """R6: the unsaved-run gate is self-serve — it names the save tool and
+    demands a retry, and it states the true invariant (GRC generates into the
+    saved graph's directory and executes from there). The old false claim
+    that execution generates from the saved file must be gone."""
     proxy, _ = _make_proxy(_valid_page(file_path=""))
-    with pytest.raises(ValueError, match="never been saved"):
+    with pytest.raises(ValueError) as excinfo:
         import asyncio
 
         asyncio.run(proxy.run_flowgraph(action="start"))
+    msg = str(excinfo.value)
+    assert "never been saved" in msg
+    assert "save_graph" in msg
+    assert "retry run_flowgraph" in msg
+    assert "directory" in msg
+    assert "generates from the saved file" not in msg
     fake_actions.exec_action.assert_not_called()
 
 
@@ -379,6 +389,9 @@ class _FakeDeps:
     async def stop_flowgraph(self):
         return await self._proxy.stop_flowgraph()
 
+    async def save_graph(self):
+        return await self._proxy.save_graph()
+
 
 def _ctx(deps, tool_call_approved=True):
     return SimpleNamespace(deps=deps, tool_call_approved=tool_call_approved)
@@ -417,8 +430,17 @@ def test_tool_run_flowgraph_wraps_gate_errors_as_modelretry():
     import asyncio
 
     proxy, _ = _make_proxy(_valid_page(file_path=""))
-    with pytest.raises(ModelRetry, match="never been saved"):
-        asyncio.run(run_flowgraph_func(_ctx(_FakeDeps(proxy), tool_call_approved=True), action="start", wait=True, timeout_seconds=1))
+    with pytest.raises(ModelRetry) as excinfo:
+        asyncio.run(
+            run_flowgraph_func(
+                _ctx(_FakeDeps(proxy), tool_call_approved=True), action="start", wait=True, timeout_seconds=1
+            )
+        )
+    msg = str(excinfo.value)
+    # The gate's self-serve wording crosses the tool boundary intact.
+    assert "never been saved" in msg
+    assert "save_graph" in msg
+    assert "retry run_flowgraph" in msg
 
 
 @pytest.mark.usefixtures("fake_actions")
@@ -935,4 +957,76 @@ def test_save_lock_contention_defers_truthfully_without_writing(tmp_path, monkey
     assert seen == []
     assert not (tmp_path / "untitled.grc").exists()
     assert not [p for p in tmp_path.iterdir() if p.is_file()], "no temp files may be left"
+
+
+# --- save_graph tool (agent-side save exposed to the model) ---
+
+
+def test_tool_save_graph_returns_path_and_page(tmp_path, monkeypatch):
+    """R1: the tool drives the proxy's real save and returns its {"path",
+    "page"} payload as JSON — an untitled page lands in the project
+    directory, ready for a subsequent run_flowgraph."""
+    import asyncio
+    import json
+
+    events = []
+    _patch_save_action(monkeypatch, events)
+    monkeypatch.setattr("grc_agent.native_canvas.flow_graph_content_hash", lambda _fg: "HASH")
+    page = _save_page(file_path="", options_id="default", saved=False)
+    platform, _seen = _fake_platform(events)
+    proxy, _cm, _window, _app = _make_save_proxy(page, tmp_path, monkeypatch, events, platform)
+
+    res = json.loads(asyncio.run(save_graph_func(_ctx(_FakeDeps(proxy)))))
+
+    assert res == {"path": str(tmp_path / "untitled.grc"), "page": "untitled"}
+    assert (tmp_path / "untitled.grc").exists()
+
+
+def test_tool_save_graph_wraps_proxy_valueerror_as_modelretry(tmp_path, monkeypatch):
+    """Proxy guard ValueErrors cross the tool boundary as ModelRetry carrying
+    the page/path detail — here the derived path is already open in another
+    tab, so the model can self-correct from the message alone."""
+    import asyncio
+
+    events = []
+    _patch_save_action(monkeypatch, events)
+    monkeypatch.setattr("grc_agent.native_canvas.flow_graph_content_hash", lambda _fg: "HASH")
+    page = _save_page(file_path="", options_id="default", saved=False)
+    other = SimpleNamespace(file_path=str(tmp_path / "untitled.grc"))
+    platform, seen = _fake_platform(events)
+    proxy, _cm, window, _app = _make_save_proxy(page, tmp_path, monkeypatch, events, platform)
+    window.get_pages = lambda: [other, page]
+
+    with pytest.raises(ModelRetry) as excinfo:
+        asyncio.run(save_graph_func(_ctx(_FakeDeps(proxy))))
+
+    msg = str(excinfo.value)
+    assert "another tab" in msg
+    assert "untitled.grc" in msg
+    assert seen == [], "a failed save must not have written anything"
+
+
+def test_tool_save_graph_requires_wired_deps():
+    """Unwired deps (raw flowgraph in some test contexts) -> the environment-
+    fault convention with explicit do-not-retry phrasing: a wiring fault must
+    not become a retry loop."""
+    import asyncio
+
+    with pytest.raises(ModelRetry, match="wiring") as excinfo:
+        asyncio.run(save_graph_func(_ctx(SimpleNamespace())))
+    assert "Do not retry" in str(excinfo.value)
+
+
+def test_grc_tools_save_graph_registration():
+    """save_graph is registered next to run_flowgraph with the house style:
+    approval-free (a save is local, atomic, never destructive) and
+    max_retries=3 like its sibling flowgraph tools."""
+    from grc_agent.agent import grc_tools
+
+    tools = grc_tools()
+    tool = {t.name: t for t in tools}["save_graph"]
+    assert tool.max_retries == 3
+    assert tool.requires_approval is False
+    names = [t.name for t in tools]
+    assert names.index("save_graph") > names.index("run_flowgraph")
 

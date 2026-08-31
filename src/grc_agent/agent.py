@@ -802,6 +802,40 @@ async def run_flowgraph_func(
     return json.dumps(res)
 
 
+async def save_graph_func(ctx: RunContext[Any]) -> str:
+    """Save the active flowgraph to disk through GRC's native serializer — the agent-side equivalent of Ctrl+S, with no dialog and no user interaction.
+
+    Takes no arguments: it always saves the currently active GRC tab. A page
+    that has never been saved is written into the project directory under a
+    name derived from the graph's options id (collision-free); a page that
+    already has a file is saved in place. The write is atomic. GRC generates
+    into the saved graph's directory and executes from there, so save here
+    before run_flowgraph when the flowgraph is untitled.
+
+    Returns a JSON object {"path", "page"}: "path" is the saved .grc file's
+    path and "page" is the tab name it lives under, so you can detect tab
+    switches between calls. Failures raise a retryable error naming the
+    target path or tab so you can correct course: no project directory is
+    selected (select one first), the derived path is already open in another
+    tab (switch to that tab and save there, or close it), the target file is
+    read-only (make it writable), the target is locked by another writer
+    (retry the save shortly), or the write itself failed (the target is left
+    untouched).
+    """
+    save_fn = getattr(ctx.deps, "save_graph", None)
+    if save_fn is None or not callable(save_fn):
+        raise ModelRetry(
+            "Saving the flowgraph is not available in this environment — this is a wiring "
+            "fault, not a fixable error. Do not retry; tell the user to save the flowgraph "
+            "in GRC (File > Save) and continue without this tool."
+        )
+    try:
+        res = await save_fn()
+    except ValueError as exc:
+        raise ModelRetry(str(exc)) from exc
+    return json.dumps(res)
+
+
 def grc_tools() -> list[Tool[Any]]:
     inspect_tool = Tool(
         inspect_graph_func,
@@ -859,6 +893,18 @@ def grc_tools() -> list[Tool[Any]]:
     )
     run_fg_tool.max_retries = 3
 
+    # Agent-side save (Ctrl+S parity): the unsaved-run gate directs the model
+    # here before a first run, so it sits next to run_flowgraph. No approval:
+    # a save is local and atomic, and its guards fail before anything is
+    # touched (never destructive).
+    save_graph_tool = Tool(
+        save_graph_func,
+        name="save_graph",
+        docstring_format="google",
+        require_parameter_descriptions=True,
+    )
+    save_graph_tool.max_retries = 3
+
     save_block_tool = Tool(
         save_block_func,
         name="save_block",
@@ -874,6 +920,7 @@ def grc_tools() -> list[Tool[Any]]:
         change_tool,
         run_log_tool,
         run_fg_tool,
+        save_graph_tool,
         save_block_tool,
     ]
 

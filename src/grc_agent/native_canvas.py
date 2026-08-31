@@ -196,8 +196,10 @@ class NativeFlowgraphProxy:
             )
         if not getattr(page, "file_path", None):
             raise ValueError(
-                "The flowgraph has never been saved. Save it in GRC first (File > Save) — "
-                "execution generates from the saved file."
+                "The flowgraph has never been saved. GRC generates into the saved "
+                "graph's directory and executes from there, so save it first: call "
+                "save_graph to write this flowgraph into the project directory, "
+                "then retry run_flowgraph."
             )
         fg = page.flow_graph
         # is_valid()/iter_error_messages() only read _error_messages, which is
