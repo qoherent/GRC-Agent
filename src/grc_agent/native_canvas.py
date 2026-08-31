@@ -4,9 +4,11 @@ import fcntl
 import hashlib
 import logging
 import math
+import os
+import tempfile
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, NoReturn
 
 import gi
 
@@ -77,6 +79,15 @@ def _sha256_file(path) -> str | None:
             return hashlib.file_digest(f, "sha256").hexdigest()
     except OSError:
         return None
+
+
+def _lock_path_for(path: Path) -> Path:
+    """Per-graph lock file for an explicit flowgraph path — the codebase's
+    one lock rule (``<dir>/.grc_agent/<name>.lock``, the same discipline
+    sync_manual_edit uses via NativeCanvasManager._lock_path), parameterized
+    by explicit target so an untitled page (whose page-derived path is empty)
+    can lock its derived save target (see NativeFlowgraphProxy.save_graph)."""
+    return path.parent / ".grc_agent" / (path.name + ".lock")
 
 
 class NativeFlowgraphProxy:
@@ -396,6 +407,196 @@ class NativeFlowgraphProxy:
             ),
         }
 
+    async def save_graph(self) -> dict:
+        """Save the active flowgraph into the project directory through GRC's
+        native platform serializer — the agent-side equivalent of Ctrl+S, with
+        no modal dialog and no user interaction.
+
+        Naming (titled in place vs derived untitled target), collision
+        avoidance, and the project-directory gate are the pure U1 rules
+        (adapter.graph.resolve_save_target). The write is atomic: GRC's
+        platform.save_flow_graph renders to a temp file in the target
+        directory (its own write is a plain non-atomic open-w), then fsync +
+        os.replace — all under the same per-graph flock discipline
+        sync_manual_edit uses. Every save runs the ordered pre-flight guards;
+        a real write (or a hash-equal no-op) re-baselines the disk/export
+        hashes immediately so the 1.5s manual-edit poll never fires a spurious
+        sync.
+
+        Returns ``{"path", "page"}`` — the saved path and the tab name — so
+        callers can detect tab switches between calls.
+        """
+        cm = object.__getattribute__(self, "_canvas_manager")
+        page = cm.current_page
+        if page is None:
+            raise ValueError(
+                "No flowgraph is open. Open or create a flowgraph in GRC "
+                "(File > New / File > Open) before saving it."
+            )
+        fg = page.flow_graph
+
+        from grc_agent import fs_tools
+        from grc_agent.adapter.graph import resolve_save_target
+
+        def _fail_save(reason: str) -> NoReturn:
+            """The one failure path: target untouched, page marked unsaved,
+            GRC's own fail-save console message (the same one its IOError
+            handler sends), and the retryable ValueError for the tool layer."""
+            page.saved = False
+            from gnuradio.grc.core import Messages
+
+            Messages.send_fail_save(str(target))
+            raise ValueError(f"Could not save {target.name}: {reason}")
+
+        # Guard (1), reused from the U1 helper: no project directory is the
+        # filesystem tools' gating error, verbatim. Every save lands inside
+        # the project sandbox — titled pages included.
+        options_id = fg.options_block.params["id"].get_value()
+        target, id_stem = resolve_save_target(
+            fs_tools.active_project_dir(), options_id, page.file_path
+        )
+        target = Path(target)
+
+        # Guard (2): the target may already be open in another tab (two
+        # untitled graphs derive the same first name; a previously saved file
+        # gets re-derived after an external delete). Saving here would fork
+        # the two tabs' content silently.
+        pages = cm.window.get_pages() if hasattr(cm.window, "get_pages") else [page]
+        for other in pages:
+            other_path = getattr(other, "file_path", None)
+            if other is page or not other_path:
+                continue
+            if os.path.abspath(other_path) == os.path.abspath(str(target)):
+                raise ValueError(
+                    f"{target.name} is already open in another tab "
+                    f"('{Path(other_path).stem}'). Switch to that tab and save it there, "
+                    "or close it, before saving this flowgraph."
+                )
+
+        # Guard (3): an existing but unwritable target is GRC's own IOError
+        # read-only failure, surfaced before anything is touched.
+        if target.exists() and not os.access(target, os.W_OK):
+            _fail_save("the file is read-only")
+
+        # Untitled pages take SAVE_AS parity: the options id is renamed to the
+        # sanitized stem of the chosen file and the graph is refreshed exactly
+        # the way GRC's SAVE_AS branch does after an id rename (vars +
+        # fg.update) — BEFORE serialization, so the renamed id lands in the
+        # written file.
+        if id_stem is not None and options_id != id_stem:
+            fg.options_block.params["id"].set_value(id_stem)
+            if hasattr(cm.window, "vars") and hasattr(cm.window.vars, "update_gui"):
+                cm.window.vars.update_gui(fg.blocks)
+            fg.update()
+
+        # Guard (4): the export the writer would produce is already byte-
+        # identical on disk (adapter's _serialize_flow_graph-based content
+        # hash vs the canvas's raw-file _sha256_file — the exact pair the
+        # manual-edit poll compares): state-only update, no write.
+        if target.exists() and flow_graph_content_hash(fg) == _sha256_file(target):
+            self._finish_save(cm, page, fg, target, first_naming=not page.file_path)
+            return {"path": str(target), "page": target.stem}
+
+        # Atomic write seam: render through GRC's platform to a temp file in
+        # the target directory, then fsync + os.replace — under the per-graph
+        # flock, with BlockingIOError deferring as a truthful error (an agent
+        # save has no next-poll retry to lean on, and must never partially
+        # write or block the single gbulb UI thread).
+        try:
+            lock = _lock_path_for(target)
+            lock.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            with lock.open("a", encoding="utf-8") as lock_file:
+                try:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    raise ValueError(
+                        f"{target.name} is locked by another writer (the same graph may be "
+                        "open in another GRC instance, or a save is mid-commit). "
+                        "Retry the save in a moment."
+                    ) from None
+                try:
+                    self._render_and_replace(cm, target, fg)
+                except Exception as e:
+                    _fail_save(str(e))
+                finally:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+        except OSError as e:
+            _fail_save(str(e))
+
+        self._finish_save(cm, page, fg, target, first_naming=not page.file_path)
+        return {"path": str(target), "page": target.stem}
+
+    @staticmethod
+    def _render_and_replace(cm: Any, target: Path, fg: Any) -> None:
+        """Atomic write seam for save_graph: GRC's platform.save_flow_graph
+        renders the flowgraph to ``filename`` with a plain open-w, so render
+        to a TEMP file in the target directory first, then fsync + os.replace
+        + directory fsync — the _atomic_write_text discipline with the
+        rendering itself kept in GRC's hands (platform parity)."""
+        fd, tmp_name = tempfile.mkstemp(
+            prefix=target.name + ".", suffix=".tmp", dir=str(target.parent)
+        )
+        tmp = Path(tmp_name)
+        try:
+            os.close(fd)  # platform.save_flow_graph opens the path itself
+            cm.platform.save_flow_graph(str(tmp), fg)
+            with open(tmp, "r+b") as f:
+                os.fsync(f.fileno())
+            os.replace(tmp, target)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                tmp.unlink()
+            raise
+        try:
+            dir_fd = os.open(str(target.parent), os.O_DIRECTORY)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+        except AttributeError:
+            # os.O_DIRECTORY not available on non-POSIX platforms.
+            pass
+        except OSError as exc:
+            _log.debug("directory fsync failed for %s: %s", target.parent, exc)
+
+    @staticmethod
+    def _finish_save(cm: Any, page: Any, fg: Any, target: Path, *, first_naming: bool) -> None:
+        """Post-save surface refresh — makes an agent save surface-
+        indistinguishable from GRC's own dispatch: the page/path state GRC's
+        SAVE handler sets after platform.save_flow_graph (Application.py
+        ~670-676), the Save-action enablement + main.update() tail of
+        _handle_action (~879-885), and — on first naming only — the
+        recent-files + submenu refreshes of the SAVE_AS branch (~698-700). No
+        FLOW_GRAPH_SAVE action is dispatched: that would write the file a
+        second time. Closes with the post-write baseline refresh (R7) so the
+        1.5s manual-edit poll never re-syncs this save."""
+        page.file_path = str(target)
+        fg.grc_file_path = str(target)
+        page.saved = True
+
+        from grc_agent.adapter import gui_actions
+
+        actions = gui_actions()
+        actions.FLOW_GRAPH_SAVE.set_enabled(not page.saved)
+        if hasattr(cm.window, "update"):
+            cm.window.update()
+
+        if first_naming:
+            config = getattr(getattr(cm, "app", None), "config", None)
+            if config is not None and hasattr(config, "add_recent_file"):
+                config.add_recent_file(str(target))
+            for submenus in (
+                getattr(cm.window, "tool_bar", None),
+                getattr(cm.window, "menu", None),
+            ):
+                if submenus is not None and hasattr(submenus, "refresh_submenus"):
+                    submenus.refresh_submenus()
+
+        # Baselines follow the page's (possibly new) path — mirrors
+        # sync_manual_edit's post-write re-baseline; the next poll tick must
+        # perform no spurious sync_manual_edit.
+        cm._sync_page_baselines()
+
     async def notify_edit(self, relayout: bool = False) -> dict:
         cm = object.__getattribute__(self, "_canvas_manager")
         cm.after_agent_edit(relayout=relayout)
@@ -515,7 +716,7 @@ class NativeCanvasManager:
         p = self.path
         if not p:
             return None
-        return Path(p).parent / ".grc_agent" / (Path(p).name + ".lock")
+        return _lock_path_for(Path(p))
 
     def _get_scrolled_window(self, da: Any = None) -> Any:
         if da is None:
