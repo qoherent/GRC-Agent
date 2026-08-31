@@ -184,6 +184,20 @@ lexical automatically with a notice.
   ```bash
   sudo udevadm control --reload-rules
   ```
+- **TUN/TAP interfaces** (flowgraphs bridging RF to a network interface, e.g.
+  `network_tuntap_pdu`):
+  Creating a named tun/tap interface requires the `CAP_NET_ADMIN` capability —
+  a world-accessible `/dev/net/tun` is not enough, so a non-root run fails with
+  an `EPERM` from `tun_alloc`/`TUNSETIFF`. The flowgraph is fine; pre-create a
+  persistent interface owned by your user, once and outside the app (substitute
+  the block's `ifname`, e.g. `tap0`):
+  ```bash
+  sudo ip tuntap add dev tap0 mode tap user $USER
+  ```
+  The flowgraph then attaches without privileges. The interface survives
+  flowgraph restarts but not reboots — re-create it after a reboot, or make it
+  durable with a systemd unit. Do not run the app with `sudo` or `setcap` its
+  interpreter; both elevate far more than this needs.
 
 ### Setup
 ```bash
