@@ -2440,3 +2440,36 @@ def test_hybrid_fusion_when_both_indexes_present(tmp_path, monkeypatch):
     finally:
         _EMBEDDING_DIM_CACHE.clear()
         _FRESHNESS_CACHE.pop("catalog", None)
+
+
+def test_ollama_cloud_has_dedicated_model_slot(tmp_path, monkeypatch):
+    """Local and cloud Ollama keep separate model settings: switching provider
+    preserves each one's saved name, the cloud default is the cloud-tier
+    glm-5.3-flash:cloud (not the local quantized default), and Save writes
+    OLLAMA_CLOUD_MODEL — not OLLAMA_CHAT_MODEL — when cloud is active."""
+    env = tmp_path / ".env"
+    monkeypatch.setenv("GRC_AGENT_ENV", str(env))
+
+    # Defaults: each slot starts from its own tier-appropriate default.
+    cfg = load_settings()
+    assert cfg["ollama_model"] == "qwen3.8:latest"
+    assert cfg["ollama_cloud_model"] == "glm-5.3-flash:cloud"
+
+    # Save a local model, then switch to cloud with a cloud model.
+    save_settings("ollama_local", "qwen3.6:35b-a3b-q4_K_M")
+    save_settings("ollama_cloud", "glm-5.3-flash:cloud")
+    cfg = load_settings()
+    assert cfg["provider"] == "ollama_cloud"
+    assert cfg["model"] == "glm-5.3-flash:cloud"
+    assert cfg["ollama_cloud_model"] == "glm-5.3-flash:cloud"
+    # The local slot is untouched by the cloud save.
+    assert cfg["ollama_model"] == "qwen3.6:35b-a3b-q4_K_M"
+
+    content = env.read_text(encoding="utf-8")
+    assert "OLLAMA_CLOUD_MODEL=glm-5.3-flash:cloud" in content
+
+    # Switching back to local restores the local name — no shared-key bleed.
+    save_settings("ollama_local", cfg["ollama_model"])
+    cfg = load_settings()
+    assert cfg["model"] == "qwen3.6:35b-a3b-q4_K_M"
+    assert cfg["ollama_cloud_model"] == "glm-5.3-flash:cloud"  # preserved

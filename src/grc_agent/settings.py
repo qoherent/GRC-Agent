@@ -15,7 +15,9 @@ Env vars (resolved by env_path(): GRC_AGENT_ENV override -> repo-root `.env`
                             mistral | cohere | xai | openai_codex)
   GRC_EMBED_BACKEND         embeddings backend: lexical | llamacpp
                             (default: lexical)
-  OLLAMA_CHAT_MODEL         Ollama chat model (local and cloud share it)
+  OLLAMA_CHAT_MODEL         Ollama chat model (local daemon)
+  OLLAMA_CLOUD_MODEL        Ollama Cloud chat model (cloud-tier names like
+                            glm-5.3-flash:cloud — separate from local)
   OPENROUTER_MODEL          OpenRouter chat model
   OPENAI_MODEL              OpenAI API chat model
   OPENAI_COMPATIBLE_MODEL   other OpenAI-compatible chat model
@@ -66,7 +68,7 @@ _DEFAULT_THEME = "system"
 # Per-provider chat-model env var name + settings dict key.
 _PROVIDER_ENV_VAR = {
     "ollama_local": "OLLAMA_CHAT_MODEL",
-    "ollama_cloud": "OLLAMA_CHAT_MODEL",
+    "ollama_cloud": "OLLAMA_CLOUD_MODEL",
     "openrouter": "OPENROUTER_MODEL",
     "openai": "OPENAI_MODEL",
     "openai_compatible": "OPENAI_COMPATIBLE_MODEL",
@@ -80,7 +82,7 @@ _PROVIDER_ENV_VAR = {
 }
 _PROVIDER_MODEL_KEY = {
     "ollama_local": "ollama_model",
-    "ollama_cloud": "ollama_model",
+    "ollama_cloud": "ollama_cloud_model",
     "openrouter": "openrouter_model",
     "openai": "openai_model",
     "openai_compatible": "openai_compatible_model",
@@ -95,6 +97,7 @@ _PROVIDER_MODEL_KEY = {
 
 _DEFAULT_MODELS = {
     "ollama_model": "qwen3.8:latest",
+    "ollama_cloud_model": "glm-5.3-flash:cloud",
     "openrouter_model": "z-ai/glm-5.3-flash",
     "openai_model": "gpt-5.6-terra",
     "openai_compatible_model": "deepseek/deepseek-v4-flash",
@@ -194,6 +197,9 @@ def load_settings() -> dict:
         provider = _DEFAULT_PROVIDER
 
     ollama_model = vals.get("OLLAMA_CHAT_MODEL") or _DEFAULT_MODELS["ollama_model"]
+    ollama_cloud_model = (
+        vals.get("OLLAMA_CLOUD_MODEL") or _DEFAULT_MODELS["ollama_cloud_model"]
+    )
     openrouter_model = vals.get("OPENROUTER_MODEL") or _DEFAULT_MODELS["openrouter_model"]
     openai_model = vals.get("OPENAI_MODEL") or _DEFAULT_MODELS["openai_model"]
     openai_compatible_model = (
@@ -232,6 +238,7 @@ def load_settings() -> dict:
         "embed_backend": embed_backend,
         "theme": theme,
         "ollama_model": ollama_model,
+        "ollama_cloud_model": ollama_cloud_model,
         "openrouter_model": openrouter_model,
         "openai_model": openai_model,
         "openai_compatible_model": openai_compatible_model,
