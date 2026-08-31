@@ -1,13 +1,20 @@
 import logging
 import sqlite3
 import threading
+from collections.abc import Sequence
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
 from pydantic_ai import ModelMessagesTypeAdapter
-from pydantic_ai.messages import ModelMessage, UserPromptPart
+from pydantic_ai.messages import (
+    BinaryContent,
+    ModelMessage,
+    ModelRequest,
+    UserContent,
+    UserPromptPart,
+)
 from pydantic_ai_harness.planning import PlanItem, SqlitePlanStore
 from pydantic_ai_harness.step_persistence import (
     ContinuableSnapshot,
@@ -400,6 +407,33 @@ def user_prompt_text(part: UserPromptPart) -> str:
     return "".join(
         item if isinstance(item, str) else getattr(item, "text", "") for item in content
     )
+
+
+def user_request(prompt: str | Sequence[UserContent]) -> ModelRequest:
+    """Build the one canonical user `ModelRequest` from a prompt.
+
+    Accepts the same `str | Sequence[UserContent]` contract as
+    `Agent.run(user_prompt=...)`, so text-only and multimodal turns construct
+    their history rows through a single rule instead of a text-only
+    constructor that silently drops images.
+    """
+    return ModelRequest(parts=[UserPromptPart(content=prompt)])
+
+
+def prompt_images(part: UserPromptPart) -> list[BinaryContent]:
+    """Image parts of a multimodal `UserPromptPart` (empty for text-only).
+
+    The extraction companion to `user_prompt_text` — the sidebar's bubble
+    renderer uses it to thumbnail what the model actually received.
+    """
+    content = part.content
+    if isinstance(content, str):
+        return []
+    return [
+        item
+        for item in content
+        if isinstance(item, BinaryContent) and item.media_type.startswith("image/")
+    ]
 
 
 def _first_user_prompt(messages: list[ModelMessage]) -> str:

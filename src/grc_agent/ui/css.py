@@ -247,6 +247,19 @@ textview.chat-thinking-textview text {
     min-width: 34px;
     min-height: 34px;
 }
+.chat-attach-btn {
+    min-width: 34px;
+    min-height: 34px;
+}
+.chat-attachment-chip {
+    border: 1px solid alpha(@theme_fg_color, 0.22);
+    border-radius: 8px;
+    padding: 2px;
+    background-color: alpha(@theme_fg_color, 0.08);
+}
+.chat-user-msg-images image {
+    border-radius: 6px;
+}
 .chat-agent-msg-box {
     border: 1px solid @SOFT@;
     border-radius: 8px;

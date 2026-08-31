@@ -152,3 +152,48 @@ def test_db_connection_is_closed_after_use(tmp_path, monkeypatch):
 
     with pytest.raises(sqlite3.ProgrammingError):
         conn.execute("SELECT 1")
+
+
+def test_user_request_and_prompt_flattening():
+    """`user_request` builds the one canonical user ModelRequest for both
+    text and multimodal prompts; `user_prompt_text`/`prompt_images` flatten
+    it back into text and image parts."""
+    from pydantic_ai.messages import BinaryContent
+
+    from grc_agent.db import prompt_images, user_prompt_text, user_request
+
+    req = user_request("plain")
+    assert user_prompt_text(req.parts[0]) == "plain"
+    assert prompt_images(req.parts[0]) == []
+
+    img = BinaryContent(data=b"\x89PNG\r\n\x1a\nDATA", media_type="image/png")
+    multi = user_request(["describe", img])
+    assert user_prompt_text(multi.parts[0]) == "describe"
+    assert prompt_images(multi.parts[0]) == [img]
+
+
+def test_multimodal_session_roundtrip(tmp_path, monkeypatch):
+    """A session saved with an image-bearing user turn reloads with the image
+    bytes and media type intact (base64 round-trip through the sanctioned
+    ModelMessagesTypeAdapter)."""
+    monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
+    from pydantic_ai.messages import BinaryContent
+
+    from grc_agent.db import (
+        deserialize_messages,
+        load_session,
+        prompt_images,
+        save_session,
+        user_request,
+    )
+
+    grc = tmp_path / "m.grc"
+    grc.write_text("<grc/>")
+    img = BinaryContent(data=b"\x89PNG-roundtrip", media_type="image/png")
+    sid = save_session(None, str(grc), [user_request(["look at this", img])])
+    row = load_session(sid)
+    msgs = deserialize_messages(row["messages"])
+    imgs = prompt_images(msgs[0].parts[0])
+    assert len(imgs) == 1
+    assert imgs[0].media_type == "image/png"
+    assert imgs[0].data.startswith(b"\x89PNG")

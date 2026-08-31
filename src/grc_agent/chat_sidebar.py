@@ -10,10 +10,12 @@ Message history is stored as pydantic-ai's native ``ModelMessage`` objects.
 """
 
 import asyncio
+import contextlib
 import json
 import logging
+import mimetypes
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from decimal import Decimal
 from pathlib import Path
@@ -26,7 +28,7 @@ gi.require_version("Gdk", "3.0")
 gi.require_version("Pango", "1.0")
 
 
-from gi.repository import Gdk, GLib, GObject, Gtk, Pango
+from gi.repository import Gdk, GdkPixbuf, GLib, GObject, Gtk, Pango
 from pydantic_ai import (
     Agent,
     FunctionToolCallEvent,
@@ -43,6 +45,7 @@ from pydantic_ai.exceptions import (
     UsageLimitExceeded,
 )
 from pydantic_ai.messages import (
+    BinaryContent,
     ModelMessage,
     ModelRequest,
     ModelResponse,
@@ -53,6 +56,7 @@ from pydantic_ai.messages import (
     ThinkingPart,
     ToolCallPart,
     ToolReturnPart,
+    UserContent,
     UserPromptPart,
 )
 from pydantic_ai.tools import (
@@ -75,6 +79,31 @@ _SUMMARY_EXPLANATION_FIELD = "explanation"
 assert {_SUMMARY_ACTIONS_FIELD, _SUMMARY_EXPLANATION_FIELD} <= set(GrcAgentResponse.model_fields), (
     "GrcAgentResponse fields changed; _parse_final_summary must be updated to match"
 )
+
+# The four image media types pydantic-ai's ImageMediaType admits — also the
+# exact set the attachment chooser filter accepts (one rule, no drift).
+_IMAGE_MEDIA_TYPES = ("image/png", "image/jpeg", "image/gif", "image/webp")
+
+
+def _pixbuf_from_bytes(data: bytes) -> GdkPixbuf.Pixbuf | None:
+    """Decode image bytes through GdkPixbuf's streaming loader (the standard
+    GTK path). Returns None for undecodable bytes so callers can skip the
+    thumbnail rather than fail the whole turn."""
+    loader = GdkPixbuf.PixbufLoader()
+    try:
+        loader.write(data)
+        loader.close()
+        return loader.get_pixbuf()
+    except GLib.Error:
+        with contextlib.suppress(GLib.Error):
+            loader.close()
+        return None
+
+
+def _scale_pixbuf(pixbuf: GdkPixbuf.Pixbuf, height: int) -> GdkPixbuf.Pixbuf:
+    """Scale to `height` px preserving aspect ratio."""
+    width = max(1, round(pixbuf.get_width() * height / pixbuf.get_height()))
+    return pixbuf.scale_simple(width, height, GdkPixbuf.InterpType.BILINEAR)
 from .db import (
     archive_transcript,
     conversation_id_for_session,
@@ -83,8 +112,10 @@ from .db import (
     deserialize_messages,
     load_plan_items,
     load_session,
+    prompt_images,
     save_session,
     user_prompt_text,
+    user_request,
 )
 from .settings import (
     get_env_value,
@@ -731,6 +762,10 @@ class ChatSidebar(Gtk.Box):
         self._busy = False
         self._idle_event = asyncio.Event()
         self._idle_event.set()
+        # Pending image attachments for the next composer dispatch — pydantic-ai
+        # BinaryContent parts, kept raw so the send path builds the multimodal
+        # prompt without a second copy of the bytes.
+        self._attachments: list[BinaryContent] = []
         # Bumped on every global Clear History. _save_history captures it before
         # dispatching its (uncancellable) worker-thread save; if a clear lands
         # while that save is in flight, the saved row is removed so a cleared
@@ -998,6 +1033,18 @@ class ChatSidebar(Gtk.Box):
         self._entry.connect("changed", lambda *_: self._update_send_sensitivity())
         self._entry.set_sensitive(False)
 
+        # Pending image attachments live as removable chips in their own row
+        # above the composer, so the entry itself stays a pure text surface.
+        self._attachment_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        self._attachment_row.set_visible(False)
+
+        self._attach_btn = Gtk.Button.new_from_icon_name(
+            "mail-attachment-symbolic", Gtk.IconSize.SMALL_TOOLBAR
+        )
+        self._attach_btn.set_tooltip_text("Attach image to message")
+        self._attach_btn.get_style_context().add_class("chat-attach-btn")
+        self._attach_btn.connect("clicked", self._on_attach_clicked)
+
         self._send_btn = Gtk.Button.new_from_icon_name(
             "media-playback-start-symbolic", Gtk.IconSize.SMALL_TOOLBAR
         )
@@ -1007,7 +1054,10 @@ class ChatSidebar(Gtk.Box):
         self._send_btn.set_sensitive(False)
 
         box.pack_start(self._entry, True, True, 0)
+        box.pack_start(self._attach_btn, False, False, 0)
         box.pack_start(self._send_btn, False, False, 0)
+        self._input_box = box
+        vbox.pack_start(self._attachment_row, False, False, 0)
         vbox.pack_start(box, False, False, 0)
 
         # Context and conversation controls share one compact row under the
@@ -1549,9 +1599,11 @@ class ChatSidebar(Gtk.Box):
     def _update_send_sensitivity(self) -> None:
         # Gate Send on non-blank input too, on top of the entry's own
         # busy/flowgraph-present sensitivity — otherwise a click on
-        # whitespace-only text is a silent no-op (see _dispatch_send).
+        # whitespace-only text is a silent no-op (see _dispatch_send). Pending
+        # image attachments alone are a valid turn, so they enable Send.
         self._send_btn.set_sensitive(
-            self._entry.get_sensitive() and bool(self._entry.get_text().strip())
+            self._entry.get_sensitive()
+            and (bool(self._entry.get_text().strip()) or bool(self._attachments))
         )
 
     def set_blocks_expanded(self, expanded: bool) -> None:
@@ -1805,7 +1857,7 @@ class ChatSidebar(Gtk.Box):
             if isinstance(msg, ModelRequest):
                 for part in msg.parts:
                     if isinstance(part, UserPromptPart):
-                        self._append_user_message(user_prompt_text(part))
+                        self._append_user_message(user_prompt_text(part), prompt_images(part))
             elif isinstance(msg, ModelResponse):
                 box = self._start_agent_message()
                 self._render_last_message_rich(box, msg)
@@ -2416,11 +2468,28 @@ class ChatSidebar(Gtk.Box):
         if btn is not None:
             btn._grc_copy_text = str(text)
 
-    def _append_user_message(self, text: str) -> None:
+    def _append_user_message(
+        self, text: str, images: Sequence[BinaryContent] = ()
+    ) -> None:
         vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
         vbox.get_style_context().add_class("chat-user-msg-box")
         vbox.set_halign(Gtk.Align.END)
         vbox.set_margin_start(40)
+
+        if images:
+            thumbs = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+            for image in images:
+                pixbuf = _pixbuf_from_bytes(image.data)
+                if pixbuf is not None:
+                    thumbs.pack_start(
+                        Gtk.Image.new_from_pixbuf(_scale_pixbuf(pixbuf, 128)),
+                        False,
+                        False,
+                        0,
+                    )
+            if thumbs.get_children():
+                thumbs.get_style_context().add_class("chat-user-msg-images")
+                vbox.pack_start(thumbs, False, False, 0)
 
         lbl = Gtk.Label(label=text)
         lbl.set_line_wrap(True)
@@ -2500,7 +2569,7 @@ class ChatSidebar(Gtk.Box):
         *,
         session_id: int | None,
         agent_mode: str,
-        fallback_text: str,
+        fallback_text: str | Sequence[UserContent],
     ) -> bool:
         """Salvage a failed turn's messages into `_message_history`.
 
@@ -2924,36 +2993,122 @@ class ChatSidebar(Gtk.Box):
 
     def _dispatch_send(self) -> None:
         text = self._entry.get_text()
-        if not text.strip() or self._busy:
+        if self._busy or (not text.strip() and not self._attachments):
             return
+        if self._attachments:
+            # Multimodal prompt per pydantic-ai's Sequence[UserContent]
+            # contract: text piece (when non-blank) + image parts, in order.
+            prompt: str | list[UserContent] = [text] if text.strip() else []
+            prompt.extend(self._attachments)
+            self._attachments = []
+            self._refresh_attachment_chips()
+        else:
+            prompt = text
         self._entry.set_text("")
         self._remove_implement_plan_action()
-        self.send_message(text)
+        self.send_message(prompt)
 
-    def send_message(self, text: str) -> bool:
-        """Send `text` as a user turn in the current session, as if it had
-        been typed into the entry and submitted. Returns False (no-op) if
-        `text` is blank or a turn is already in flight."""
-        if not text.strip() or self._busy:
+    def _on_attach_clicked(self, _btn: Gtk.Button) -> None:
+        toplevel = self.get_toplevel()
+        native = Gtk.FileChooserNative.new(
+            "Attach image",
+            toplevel if isinstance(toplevel, Gtk.Window) else None,
+            Gtk.FileChooserAction.OPEN,
+            "_Attach",
+            "_Cancel",
+        )
+        native.set_select_multiple(True)
+        file_filter = Gtk.FileFilter()
+        file_filter.set_name("Images")
+        for mime in _IMAGE_MEDIA_TYPES:
+            file_filter.add_mime_type(mime)
+        native.add_filter(file_filter)
+        native.connect("response", self._on_attach_response)
+        native.show()
+
+    def _on_attach_response(self, dialog: Any, response: int) -> None:
+        if response == Gtk.ResponseType.ACCEPT:
+            for path in dialog.get_filenames():
+                self._add_attachment(path)
+        dialog.destroy()
+
+    def _add_attachment(self, path: str) -> None:
+        """Queue one image file as a pending attachment (a chip). The chooser
+        filter already restricts to image media types; anything else that
+        reaches this seam is rejected with an explicit error bubble."""
+        media_type, _ = mimetypes.guess_type(path)
+        if media_type is None or not media_type.startswith("image/"):
+            self._append_error(f"Unsupported attachment type: {Path(path).name}")
+            return
+        self._attachments.append(BinaryContent(data=Path(path).read_bytes(), media_type=media_type))
+        self._refresh_attachment_chips()
+        self._update_send_sensitivity()
+
+    def _remove_attachment(self, index: int) -> None:
+        if 0 <= index < len(self._attachments):
+            del self._attachments[index]
+            self._refresh_attachment_chips()
+            self._update_send_sensitivity()
+
+    def _refresh_attachment_chips(self) -> None:
+        for child in self._attachment_row.get_children():
+            self._attachment_row.remove(child)
+        for index, attachment in enumerate(self._attachments):
+            self._attachment_row.pack_start(
+                self._build_attachment_chip(index, attachment), False, False, 0
+            )
+        self._attachment_row.set_visible(bool(self._attachments))
+        self._attachment_row.show_all()
+
+    def _build_attachment_chip(self, index: int, attachment: BinaryContent) -> Gtk.Widget:
+        chip = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=2)
+        chip.get_style_context().add_class("chat-attachment-chip")
+        pixbuf = _pixbuf_from_bytes(attachment.data)
+        if pixbuf is not None:
+            chip.pack_start(
+                Gtk.Image.new_from_pixbuf(_scale_pixbuf(pixbuf, 48)), False, False, 0
+            )
+        remove_btn = Gtk.Button.new_from_icon_name(
+            "window-close-symbolic", Gtk.IconSize.MENU
+        )
+        remove_btn.set_relief(Gtk.ReliefStyle.NONE)
+        remove_btn.set_focus_on_click(False)
+        remove_btn.set_tooltip_text("Remove attachment")
+        remove_btn.get_accessible().set_name("Remove attachment")
+        remove_btn.connect("clicked", lambda _b, i=index: self._remove_attachment(i))
+        chip.pack_start(remove_btn, False, False, 0)
+        return chip
+
+    def send_message(self, prompt: str | Sequence[UserContent]) -> bool:
+        """Send `prompt` as a user turn in the current session, as if it had
+        been typed into the entry and submitted. Accepts plain text or a
+        multimodal `Sequence[UserContent]` (text + image parts) per
+        pydantic-ai's user-prompt contract. Returns False (no-op) if `prompt`
+        carries neither text nor images, or a turn is already in flight."""
+        part = UserPromptPart(content=prompt)
+        text = user_prompt_text(part)
+        images = prompt_images(part)
+        if (not text.strip() and not images) or self._busy:
             return False
         # Sending a message always re-engages auto-scroll — the user wants
         # to see their message and the agent's reply, even if they had
         # scrolled up to read earlier content.
         self._auto_scroll = True
-        self._append_user_message(text)
+        self._append_user_message(text, images)
 
         self._set_busy(True)
-        self._chat_task = asyncio.ensure_future(self._run_agent_turn(text))
+        self._chat_task = asyncio.ensure_future(self._run_agent_turn(prompt))
         self._chat_task.add_done_callback(self._on_chat_task_done)
         return True
 
-    def _remember_user_message(self, text: str) -> None:
+    def _remember_user_message(self, prompt: str | Sequence[UserContent]) -> None:
         """Record the user's just-sent prompt into the canonical history on a
         failed turn, so it is persisted and survives the next render instead of
-        being wiped along with the error bubble."""
-        self._message_history = [*self._message_history, ModelRequest.user_text_prompt(text)]
+        being wiped along with the error bubble. Uses the one canonical
+        `user_request` builder so image-bearing turns are remembered whole."""
+        self._message_history = [*self._message_history, user_request(prompt)]
 
-    async def _run_agent_turn(self, text: str) -> None:  # noqa: C901
+    async def _run_agent_turn(self, prompt: str | Sequence[UserContent]) -> None:  # noqa: C901
         rich_rendered = False
         origin_page = self.current_page
         origin_gen = self._clear_generation
@@ -2984,7 +3139,7 @@ class ChatSidebar(Gtk.Box):
                     try:
                         history_with_prompt = [
                             *self._message_history,
-                            ModelRequest.user_text_prompt(text),
+                            user_request(prompt),
                         ]
                         self._active_session_id = await asyncio.to_thread(
                             save_session, None, path, history_with_prompt
@@ -3051,7 +3206,6 @@ class ChatSidebar(Gtk.Box):
             # (ToolApproved/ToolDenied) until the run reaches a final output.
             deferred_results: DeferredToolResults | None = None
             turn_required_approval = False
-            prompt = text
             while True:
                 async with self._agent.iter(
                     prompt if deferred_results is None else None,
@@ -3128,7 +3282,7 @@ class ChatSidebar(Gtk.Box):
                     active_run,
                     session_id=origin_session_id,
                     agent_mode=origin_agent_mode,
-                    fallback_text=text,
+                    fallback_text=prompt,
                 )
                 asyncio.ensure_future(self._save_history())
                 self._append_error("[aborted]", style="aborted")
@@ -3141,7 +3295,7 @@ class ChatSidebar(Gtk.Box):
                     active_run,
                     session_id=origin_session_id,
                     agent_mode=origin_agent_mode,
-                    fallback_text=text,
+                    fallback_text=prompt,
                 )
                 await self._save_history()
                 if truncated_thinking_archived:

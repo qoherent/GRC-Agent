@@ -3684,3 +3684,151 @@ def test_send_fix_when_free_waits_for_idle(tmp_path, monkeypatch):
         assert dispatched == ["Fix prompt"]
 
     asyncio.run(_test_flow())
+
+
+def _write_test_png(path) -> None:
+    """Write a real 1x1 PNG through GdkPixbuf (same loader the sidebar uses)."""
+    from gi.repository import GdkPixbuf
+
+    pixbuf = GdkPixbuf.Pixbuf.new(GdkPixbuf.Colorspace.RGB, True, 8, 1, 1)
+    pixbuf.fill(0xFF0000FF)
+    pixbuf.savev(str(path), "png", [], [])
+
+
+def _iter_widgets(widget):
+    """Yield every widget in a GTK container tree (depth-first)."""
+    from gi.repository import Gtk
+
+    stack = [widget]
+    while stack:
+        w = stack.pop()
+        yield w
+        if isinstance(w, Gtk.Container):
+            stack.extend(w.get_children())
+
+
+def test_composer_image_attachments(tmp_path):
+    """Attach flow: chips appear, sensitivity admits image-only sends, prompt
+    is built as a multimodal list, and the composer resets after dispatch."""
+    import asyncio
+
+    from grc_agent.chat_sidebar import ChatSidebar
+
+    sidebar = ChatSidebar()
+    sidebar._entry.set_sensitive(True)
+
+    img_path = tmp_path / "dot.png"
+    _write_test_png(img_path)
+
+    # No attachments: blank text keeps Send disabled.
+    sidebar._update_send_sensitivity()
+    assert not sidebar._send_btn.get_sensitive()
+
+    # Attach button exists and is wired into the composer.
+    assert sidebar._attach_btn is not None
+    assert sidebar._attach_btn in sidebar._input_box.get_children()
+
+    # Adding an attachment shows a chip and enables image-only sends.
+    sidebar._add_attachment(str(img_path))
+    assert len(sidebar._attachments) == 1
+    assert sidebar._attachments[0].media_type == "image/png"
+    assert sidebar._attachments[0].data.startswith(b"\x89PNG")
+    assert sidebar._attachment_row.get_children()
+    sidebar._update_send_sensitivity()
+    assert sidebar._send_btn.get_sensitive()
+
+    # Removing the chip restores the disabled state.
+    sidebar._remove_attachment(0)
+    assert sidebar._attachments == []
+    assert not sidebar._attachment_row.get_children()
+    sidebar._update_send_sensitivity()
+    assert not sidebar._send_btn.get_sensitive()
+
+    # Dispatch builds [text, *attachments] and clears the composer.
+    captured = {}
+
+    async def fake_turn(prompt):
+        captured["prompt"] = prompt
+
+    async def flow():
+        sidebar._run_agent_turn = fake_turn
+        sidebar._add_attachment(str(img_path))
+        sidebar._entry.set_text("what is this?")
+        sidebar._dispatch_send()
+        await asyncio.sleep(0)
+
+    asyncio.run(flow())
+    assert isinstance(captured["prompt"], list)
+    assert captured["prompt"][0] == "what is this?"
+    assert captured["prompt"][1].media_type == "image/png"
+    assert sidebar._attachments == []
+    assert sidebar._entry.get_text() == ""
+
+
+def test_send_message_multimodal_and_image_only(tmp_path):
+    """send_message accepts a multimodal prompt list, renders the user bubble
+    with a thumbnail, and allows an image-only turn with blank text."""
+    import asyncio
+    from collections.abc import Sequence
+
+    from gi.repository import Gtk
+    from pydantic_ai.messages import BinaryContent
+
+    from grc_agent.chat_sidebar import ChatSidebar
+
+    sidebar = ChatSidebar()
+    img_path = tmp_path / "dot2.png"
+    _write_test_png(img_path)
+    img = BinaryContent(data=img_path.read_bytes(), media_type="image/png")
+
+    captured = []
+
+    async def fake_turn(prompt):
+        captured.append(prompt)
+
+    async def flow():
+        sidebar._run_agent_turn = fake_turn
+        assert sidebar.send_message(["look", img])
+        for _ in range(5):
+            await asyncio.sleep(0.01)  # fake turn completes; done-callback clears busy
+        assert sidebar.send_message([img])  # image-only, blank text
+        await asyncio.sleep(0.01)
+
+    asyncio.run(flow())
+    assert len(captured) == 2
+    first = captured[0]
+    assert isinstance(first, Sequence)
+    assert not isinstance(first, str)
+    assert first[0] == "look"
+    assert isinstance(first[1], BinaryContent)
+    assert captured[1] == [img]  # image-only turn, no stray text piece
+
+    # The user bubble for a multimodal turn contains a rendered image.
+    assert any(
+        isinstance(w, Gtk.Image)
+        for row in sidebar._listbox.get_children()
+        for w in _iter_widgets(row.get_child())
+    )
+
+
+def test_render_history_multimodal(tmp_path):
+    """A reloaded session containing an image-bearing user message renders
+    the text plus a thumbnail in the user bubble."""
+    from gi.repository import Gtk
+    from pydantic_ai.messages import BinaryContent
+
+    from grc_agent.chat_sidebar import ChatSidebar
+    from grc_agent.db import user_request
+
+    sidebar = ChatSidebar()
+    img_path = tmp_path / "hist.png"
+    _write_test_png(img_path)
+    img = BinaryContent(data=img_path.read_bytes(), media_type="image/png")
+
+    sidebar._message_history = [user_request(["hello from history", img])]
+    sidebar._render_history()
+    assert any(
+        isinstance(w, Gtk.Image)
+        for row in sidebar._listbox.get_children()
+        for w in _iter_widgets(row.get_child())
+    )
