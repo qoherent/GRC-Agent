@@ -578,3 +578,287 @@ def test_fit_to_view():
     da3._set_zoom_factor.assert_not_called()
     sw3.get_hadjustment.assert_not_called()
     sw3.get_vadjustment.assert_not_called()
+
+
+# --- Zoom observation seam + sidebar font mapping (R8/R9/R11) ---
+
+
+class _FakeDrawingArea:
+    """Minimal fake of GRC's DrawingArea zoom surface, mirroring the
+    installed gnuradio grc/gui/DrawingArea.py exactly where it matters:
+    the ``zoom_factor`` attribute, ``_set_zoom_factor`` with its same-value
+    early-return (it only mutates state on a real change), and the
+    ``zoom_in``/``zoom_out``/``reset_zoom`` helpers that route through it
+    (Ctrl+scroll and the ZOOM_IN/OUT/RESET actions all land here).
+    ``grc_zoom_sets`` counts real mutations so tests can prove the native
+    method actually ran underneath the wrapper."""
+
+    def __init__(self, zoom_factor=1.0):
+        self.zoom_factor = zoom_factor
+        self.grc_zoom_sets = 0
+
+    def _set_zoom_factor(self, zoom_factor):
+        if zoom_factor != self.zoom_factor:
+            self.zoom_factor = zoom_factor
+            self.grc_zoom_sets += 1
+
+    def zoom_in(self):
+        self._set_zoom_factor(min(self.zoom_factor * 1.2, 5.0))
+
+    def zoom_out(self):
+        self._set_zoom_factor(max(self.zoom_factor / 1.2, 0.1))
+
+    def reset_zoom(self):
+        self._set_zoom_factor(1.0)
+
+    # No-op widget plumbing so NativeCanvasManager._setup_drawing_area runs.
+    def get_parent(self):
+        return None
+
+    def add_events(self, _mask):
+        pass
+
+    def connect(self, *_args):
+        pass
+
+
+def _zoom_test_manager(da):
+    """A NativeCanvasManager (via __new__, like every test in this file)
+    whose current page holds ``da``, ready for _setup_drawing_area."""
+    from types import SimpleNamespace
+
+    from grc_agent.native_canvas import NativeCanvasManager
+
+    page = SimpleNamespace(drawing_area=da)
+    cm = NativeCanvasManager.__new__(NativeCanvasManager)
+    cm.window = SimpleNamespace(current_page=page)
+    cm.on_zoom_changed = None
+    return cm
+
+
+def test_sidebar_font_multiplier_mapping_law():
+    """R9: the chat sidebar font multiplier is ONE pure, monotonic function
+    of the canvas zoom — sqrt(zoom_factor) clamped to [0.7, 1.8] — exactly
+    1.0 at zoom 1.0, with no per-surface branches."""
+    import math
+
+    import pytest
+
+    from grc_agent.native_canvas import sidebar_font_multiplier as m
+
+    # Default zoom -> exactly the theme size (no multiplier drift).
+    assert m(1.0) == 1.0
+    # The sqrt law at a non-trivial point: sqrt(1.44) = 1.2.
+    assert m(1.44) == pytest.approx(1.2)
+    # Monotonic across GRC's whole native zoom range.
+    zooms = [0.1 * (5.0 / 0.1) ** (i / 50) for i in range(51)]
+    values = [m(z) for z in zooms]
+    assert all(b >= a for a, b in zip(values, values[1:], strict=False)), (
+        "the mapping must be monotonic non-decreasing in zoom"
+    )
+    # In-range points follow sqrt exactly (zoom 0.64 -> 0.8, 2.25 -> 1.5:
+    # both sqarts lie inside the clamp window).
+    assert m(0.64) == pytest.approx(0.8)
+    assert m(2.25) == pytest.approx(1.5)
+    # Clamped at both ends — including beyond GRC's 0.1..5.0 zoom range.
+    # GRC's 0.1 zoom floor is already below the clamp window (sqrt(0.1) ≈ 0.32
+    # < 0.7), so the whole native low end clamps to 0.7; zoom 0.5 is in-range.
+    assert m(0.5) == pytest.approx(math.sqrt(0.5))
+    assert m(0.2) == 0.7  # sqrt(0.2) < 0.7 -> clamped
+    assert m(0.1) == 0.7
+    assert m(0.0) == 0.7
+    assert m(3.24) == pytest.approx(1.8)  # sqrt(3.24) = 1.8 boundary
+    assert m(4.0) == 1.8  # sqrt(4.0) = 2.0 > 1.8 -> clamped
+    assert m(10.0) == 1.8
+
+
+def test_zoom_wrapper_fires_on_real_change_only():
+    """R8: the per-page _set_zoom_factor wrapper installed at setup calls
+    GRC's native method and fires on_zoom_changed exactly once per REAL
+    change; a same-value set (GRC's early-return path) stays silent. A second
+    _setup_drawing_area on the same page (tab re-switch) must not double-wrap."""
+    from types import SimpleNamespace
+
+    da = _FakeDrawingArea(zoom_factor=1.0)
+    cm = _zoom_test_manager(da)
+    fired = []
+    cm.on_zoom_changed = fired.append
+    page = SimpleNamespace(drawing_area=da)
+
+    cm._setup_drawing_area(page)
+    cm._setup_drawing_area(page)  # _grc_agent_setup guard: no double wrap
+
+    da._set_zoom_factor(1.5)
+    assert da.zoom_factor == 1.5
+    assert da.grc_zoom_sets == 1, "GRC's native _set_zoom_factor must actually run"
+    assert fired == [1.5]
+
+    da._set_zoom_factor(1.5)  # same value -> GRC early-returns -> silent
+    assert da.grc_zoom_sets == 1
+    assert fired == [1.5], "a same-value zoom set must not fire the callback"
+
+    da._set_zoom_factor(0.5)
+    assert fired == [1.5, 0.5]
+
+
+def test_zoom_wrapper_covers_all_zoom_paths():
+    """Every canvas zoom mutation path flows through the one choke point:
+    GRC's zoom_in/zoom_out/reset_zoom (Ctrl+scroll and the ZOOM_IN/OUT/RESET
+    actions land in these) each produce exactly one callback per real change,
+    and the clamp no-ops at GRC's 0.1..5.0 extremes stay silent."""
+    da = _FakeDrawingArea(zoom_factor=1.0)
+    cm = _zoom_test_manager(da)
+    fired = []
+    cm.on_zoom_changed = fired.append
+
+    from types import SimpleNamespace
+
+    cm._setup_drawing_area(SimpleNamespace(drawing_area=da))
+
+    da.zoom_in()  # 1.0 -> 1.2
+    da.zoom_in()  # 1.2 -> 1.44
+    da.reset_zoom()  # 1.44 -> 1.0
+    da.reset_zoom()  # 1.0 -> 1.0: GRC early-return -> silent
+    assert da.zoom_factor == 1.0
+    assert fired == [1.2, 1.44, 1.0]
+
+    da.zoom_out()  # 1.0 -> 1/1.2
+    assert len(fired) == 4
+    assert fired[-1] == da.zoom_factor
+
+    # Zoom out to GRC's native 0.1 floor, then keep scrolling: the clamp makes
+    # the set same-value, so GRC early-returns and the callback stays silent.
+    while da.zoom_factor > 0.1:
+        da.zoom_out()
+    assert da.zoom_factor == 0.1
+    clamped = len(fired)
+    da.zoom_out()
+    assert da.zoom_factor == 0.1
+    assert len(fired) == clamped, "a clamped no-op zoom must not fire the callback"
+
+    # Same at the 5.0 ceiling.
+    while da.zoom_factor < 5.0:
+        da.zoom_in()
+    assert da.zoom_factor == 5.0
+    clamped = len(fired)
+    da.zoom_in()
+    assert da.zoom_factor == 5.0
+    assert len(fired) == clamped, "a clamped no-op zoom must not fire the callback"
+
+
+def test_zoom_callback_unwired_real_change_does_not_crash():
+    """on_zoom_changed is a peer of on_graphs_changed/on_sync_failed: None by
+    default (no sidebar wired — desktop_app.py assigns it after construction),
+    and a real zoom change with no callback wired must not crash."""
+    from types import SimpleNamespace
+
+    da = _FakeDrawingArea(zoom_factor=1.0)
+    cm = _zoom_test_manager(da)
+    assert cm.on_zoom_changed is None
+
+    cm._setup_drawing_area(SimpleNamespace(drawing_area=da))
+    da._set_zoom_factor(2.0)  # must not raise despite no callback
+    assert da.zoom_factor == 2.0
+
+    # Wiring after construction (the desktop_app.py pattern) works and fires.
+    fired = []
+    cm.on_zoom_changed = fired.append
+    da._set_zoom_factor(1.0)
+    assert fired == [1.0]
+
+
+def _fit_to_view_fixtures(da):
+    """Shared fake graph/viewport/scroll-window for _fit_to_view tests —
+    same shapes as test_fit_to_view above: 1000x1000 extents in a
+    1100x660 viewport -> fit zoom min(1.0, 0.6) = 0.6."""
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    adj_h = MagicMock()
+    adj_h.get_upper.return_value = 500
+    adj_h.get_lower.return_value = 0
+    adj_h.get_page_size.return_value = 200
+    adj_v = MagicMock()
+    adj_v.get_upper.return_value = 500
+    adj_v.get_lower.return_value = 0
+    adj_v.get_page_size.return_value = 200
+    sw = MagicMock()
+    sw.get_hadjustment.return_value = adj_h
+    sw.get_vadjustment.return_value = adj_v
+    viewport = SimpleNamespace(get_allocation=lambda: SimpleNamespace(width=1100, height=660))
+    da.get_parent = lambda: viewport
+    block = SimpleNamespace(name="b0", states={"coordinate": [0, 0]})
+    fg = SimpleNamespace(blocks=[block], get_extents=lambda: (0, 0, 1000, 1000))
+    return fg, sw
+
+
+def test_fit_to_view_suppresses_zoom_callback():
+    """R11: the fit-to-view auto-zoom after an agent relayout is a view
+    convenience, not a user zoom gesture — the canvas zoom really changes but
+    on_zoom_changed must NOT fire (the chat projection must not rescale). The
+    transient _zoom_is_autofit flag must be cleared afterwards, and a user
+    zoom gesture right after the fit fires normally."""
+    from types import SimpleNamespace
+
+    da = _FakeDrawingArea(zoom_factor=1.0)
+    cm = _zoom_test_manager(da)
+    fired = []
+    cm.on_zoom_changed = fired.append
+    fg, sw = _fit_to_view_fixtures(da)
+    cm._get_scrolled_window = lambda *_a: sw
+
+    cm._setup_drawing_area(SimpleNamespace(drawing_area=da))
+    cm._fit_to_view(fg)
+
+    assert da.zoom_factor == 0.6, "the fit must still zoom the canvas itself"
+    assert da.grc_zoom_sets == 1
+    assert fired == [], "fit-to-view auto-zoom must not rescale the chat projection"
+    assert cm._zoom_is_autofit is False, "the suppression flag must never stick"
+
+    # A user zoom gesture right after the autofit fires exactly once.
+    da.zoom_in()
+    assert fired == [da.zoom_factor]
+    assert len(fired) == 1
+
+
+def test_zoom_autofit_flag_cleared_when_zoom_set_raises():
+    """The _zoom_is_autofit suppression can never stick: even when the zoom
+    set inside _fit_to_view raises mid-flight, the finally-style clear runs."""
+    from unittest.mock import MagicMock
+
+    da = _FakeDrawingArea(zoom_factor=1.0)
+    da._set_zoom_factor = MagicMock(side_effect=RuntimeError("cairo exploded"))
+    cm = _zoom_test_manager(da)
+    fired = []
+    cm.on_zoom_changed = fired.append
+    fg, sw = _fit_to_view_fixtures(da)
+    cm._get_scrolled_window = lambda *_a: sw
+
+    cm._fit_to_view(fg)  # _fit_to_view's own handler catches the raise
+
+    assert cm._zoom_is_autofit is False, "suppression must be cleared even on a raise"
+    assert fired == []
+    assert da.zoom_factor == 1.0  # the raise aborted the zoom set
+
+
+def test_zoom_wrapper_after_fit_and_raised_flag_clears_before_user_zoom():
+    """R11/R8 integration: the suppression window is exactly the autofit zoom
+    set — a same-value autofit attempt leaves the callback armed, and the
+    very next user zoom fires."""
+    from types import SimpleNamespace
+
+    da = _FakeDrawingArea(zoom_factor=0.6)  # already at the fit zoom
+    cm = _zoom_test_manager(da)
+    fired = []
+    cm.on_zoom_changed = fired.append
+    fg, sw = _fit_to_view_fixtures(da)
+    cm._get_scrolled_window = lambda *_a: sw
+
+    cm._setup_drawing_area(SimpleNamespace(drawing_area=da))
+    cm._fit_to_view(fg)  # same-value set: GRC early-returns, no callback anyway
+    assert da.zoom_factor == 0.6
+    assert fired == []
+    assert cm._zoom_is_autofit is False
+
+    da.zoom_in()
+    assert len(fired) == 1 and fired[0] == da.zoom_factor

@@ -3,6 +3,7 @@ import contextlib
 import fcntl
 import hashlib
 import logging
+import math
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Literal
@@ -23,6 +24,27 @@ _FIT_ZOOM_MAX = 5.0
 # Multiplicative padding around the graph's bounding box when computing the
 # fit zoom, so blocks aren't glued to the viewport edges.
 _FIT_PAD = 1.1
+
+# R9: the chat sidebar's font multiplier is ONE monotonic mapping of the
+# canvas zoom — sqrt(zoom_factor) clamped to these bounds — exactly 1.0 at
+# zoom 1.0 (the default zoom leaves the theme size untouched). No per-surface
+# branches: every consumer applies this same pure function.
+_SIDEBAR_FONT_MULTIPLIER_MIN = 0.7
+_SIDEBAR_FONT_MULTIPLIER_MAX = 1.8
+
+
+def sidebar_font_multiplier(zoom_factor: float) -> float:
+    """Chat-sidebar font multiplier for a canvas zoom factor (R9): one pure,
+    monotonic law — ``sqrt(zoom_factor)`` clamped to
+    ``[_SIDEBAR_FONT_MULTIPLIER_MIN, _SIDEBAR_FONT_MULTIPLIER_MAX]``.
+    Exactly 1.0 at zoom 1.0, so the default canvas zoom keeps the chat at the
+    exact theme font size. Deliberately branch-free apart from the clamp: the
+    chat is a projection of the canvas zoom, never a second zoom source."""
+    multiplier = math.sqrt(zoom_factor)
+    return max(
+        _SIDEBAR_FONT_MULTIPLIER_MIN,
+        min(multiplier, _SIDEBAR_FONT_MULTIPLIER_MAX),
+    )
 
 # GRC's own undo/redo state_cache (see NativeCanvasManager._state_cache_version)
 # is a necessary-but-not-sufficient signal: (a) block-library drag-and-drop
@@ -412,6 +434,14 @@ class NativeCanvasManager:
     so the agent always sees the graph the user is looking at — no
     Browse button, no stale references."""
 
+    # R11: transient flag held only while _fit_to_view's auto-zoom set is in
+    # flight — the per-page _set_zoom_factor wrapper (see _setup_drawing_area)
+    # suppresses on_zoom_changed while it is set, because the fit-to-view
+    # zoom is a view-local convenience, not a user zoom gesture. Class-level
+    # default so the flag always exists; the instance assignment is confined
+    # to the try/finally around the zoom set, so suppression can never stick.
+    _zoom_is_autofit: bool = False
+
     def __init__(self, window: Any, platform: Any) -> None:
         self.window = window
         self.platform = platform
@@ -452,6 +482,12 @@ class NativeCanvasManager:
         self.on_graphs_changed: Callable[[], None] | None = None
         self.on_sync_failed: Callable[[str], None] | None = None
         self.on_graph_modified: Callable[[], None] | None = None
+        # Fired after every REAL canvas zoom change (R8) — GRC's same-value
+        # early-return in DrawingArea._set_zoom_factor stays silent, and the
+        # fit-to-view auto-zoom is suppressed (R11). Peer of the callbacks
+        # above; wired by desktop_app.py so the chat sidebar's font multiplier
+        # is the pure projection sidebar_font_multiplier(canvas zoom) (R9).
+        self.on_zoom_changed: Callable[[float], None] | None = None
 
     @property
     def current_page(self) -> Any:
@@ -752,7 +788,15 @@ class NativeCanvasManager:
             zoom = min(vw / (w * _FIT_PAD), vh / (h * _FIT_PAD))
             zoom = max(_FIT_ZOOM_MIN, min(zoom, _FIT_ZOOM_MAX))
             if zoom != da.zoom_factor:
-                da._set_zoom_factor(zoom)
+                # R11: the fit is an auto-zoom, not a user gesture — hold the
+                # suppression flag for exactly this zoom set so the wrapper
+                # stays silent, and clear it in a finally so it can never
+                # stick, even if the set (or anything the wrapper does) raises.
+                self._zoom_is_autofit = True
+                try:
+                    da._set_zoom_factor(zoom)
+                finally:
+                    self._zoom_is_autofit = False
             # Content size mirrors GRC's own DrawingArea._update_size()
             # (extents corner * zoom + 100) so the manually-raised adjustment
             # upper always covers what the canvas will actually request.
@@ -811,6 +855,30 @@ class NativeCanvasManager:
         # same cr, already zoom-scaled, so we draw straight in block
         # coordinates with no transform of our own.
         da.connect("draw", self._on_draw_highlight_overlay)
+
+        # R8: GRC's DrawingArea._set_zoom_factor is the single choke point
+        # every canvas zoom mutation flows through — Ctrl+scroll, the
+        # ZOOM_IN/ZOOM_OUT/ZOOM_RESET actions, and our own fit-to-view all
+        # call it, and it early-returns on same-value sets (installed
+        # gnuradio DrawingArea.py:106-110). Wrap the per-page bound method at
+        # this established per-page seam: instance-dict assignment shadows the
+        # bound method, so GRC's own zoom helpers route through the wrapper
+        # too. Call GRC's method unchanged, then fire on_zoom_changed only
+        # when the value actually moved (i.e. GRC did not early-return) and
+        # the autofit suppression isn't holding the window (R11).
+        original_set_zoom_factor = da._set_zoom_factor
+
+        def _wrapped_set_zoom_factor(zoom_factor: float) -> None:
+            previous = da.zoom_factor
+            original_set_zoom_factor(zoom_factor)
+            if (
+                da.zoom_factor != previous
+                and not self._zoom_is_autofit
+                and self.on_zoom_changed is not None
+            ):
+                self.on_zoom_changed(da.zoom_factor)
+
+        da._set_zoom_factor = _wrapped_set_zoom_factor
 
     @staticmethod
     def _state_cache_version(page: Any) -> tuple[int, int, int] | None:
