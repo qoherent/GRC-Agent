@@ -1,12 +1,12 @@
 # E310 FM Receiver
-From GNU Radio
-[Jump to navigation](https://wiki.gnuradio.org/index.php?title=E310_FM_Receiver#mw-head) [Jump to search](https://wiki.gnuradio.org/index.php?title=E310_FM_Receiver#searchInput)  
-|  **Beginner Tutorials** Introducing GNU Radio 
+
+
+|  **Beginner Tutorials** Introducing GNU Radio
   1. [What is GNU Radio?](https://wiki.gnuradio.org/index.php?title=What_Is_GNU_Radio "What Is GNU Radio")
   2. [Installing GNU Radio](https://wiki.gnuradio.org/index.php?title=InstallingGR "InstallingGR")
   3. [Your First Flowgraph](https://wiki.gnuradio.org/index.php?title=Your_First_Flowgraph "Your First Flowgraph")
 
-Flowgraph Fundamentals 
+Flowgraph Fundamentals
   1. [Python Variables in GRC](https://wiki.gnuradio.org/index.php?title=Python_Variables_in_GRC "Python Variables in GRC")
   2. [Variables in Flowgraphs](https://wiki.gnuradio.org/index.php?title=Variables_in_Flowgraphs "Variables in Flowgraphs")
   3. [Runtime Updating Variables](https://wiki.gnuradio.org/index.php?title=Runtime_Updating_Variables "Runtime Updating Variables")
@@ -16,62 +16,38 @@ Flowgraph Fundamentals
   7. [Streams and Vectors](https://wiki.gnuradio.org/index.php?title=Streams_and_Vectors "Streams and Vectors")
   8. [Hier Blocks and Parameters](https://wiki.gnuradio.org/index.php?title=Hier_Blocks_and_Parameters "Hier Blocks and Parameters")
 
-Creating and Modifying Python Blocks 
+Creating and Modifying Python Blocks
   1. [Creating Your First Block](https://wiki.gnuradio.org/index.php?title=Creating_Your_First_Block "Creating Your First Block")
   2. [Python Block With Vectors](https://wiki.gnuradio.org/index.php?title=Python_Block_with_Vectors "Python Block with Vectors")
   3. [Python Block Message Passing](https://wiki.gnuradio.org/index.php?title=Python_Block_Message_Passing "Python Block Message Passing")
   4. [Python Block Tags](https://wiki.gnuradio.org/index.php?title=Python_Block_Tags "Python Block Tags")
 
-DSP Blocks 
+DSP Blocks
   1. [Low Pass Filter Example](https://wiki.gnuradio.org/index.php?title=Low_Pass_Filter_Example "Low Pass Filter Example")
   2. [Designing Filter Taps](https://wiki.gnuradio.org/index.php?title=Designing_Filter_Taps "Designing Filter Taps")
   3. [Sample Rate Change](https://wiki.gnuradio.org/index.php?title=Sample_Rate_Change "Sample Rate Change")
   4. [Frequency Shifting](https://wiki.gnuradio.org/index.php?title=Frequency_Shifting "Frequency Shifting")
   5. [Reading and Writing Binary Files](https://wiki.gnuradio.org/index.php?title=Reading_and_Writing_Binary_Files "Reading and Writing Binary Files")
 
-SDR Hardware 
+SDR Hardware
   1. [RTL-SDR FM Receiver](https://wiki.gnuradio.org/index.php?title=RTL-SDR_FM_Receiver "RTL-SDR FM Receiver")
   2. [B200-B205mini FM Receiver](https://wiki.gnuradio.org/index.php?title=B200-B205mini_FM_Receiver "B200-B205mini FM Receiver")
   3. E310 FM Receiver
 
- |  
-| --- |  
-This tutorial describes how to receive broadcast commercial radio stations transmitting Frequency Modulated (FM) signals using the Ettus Research E310. 
-## Contents
-  * [1 USRP (E310) Setup Guide](https://wiki.gnuradio.org/index.php?title=E310_FM_Receiver#USRP_\(E310\)_Setup_Guide)
-    * [1.1 Prerequisites](https://wiki.gnuradio.org/index.php?title=E310_FM_Receiver#Prerequisites)
-      * [1.1.1 Linux versions](https://wiki.gnuradio.org/index.php?title=E310_FM_Receiver#Linux_versions)
-      * [1.1.2 GNU RADIO versions](https://wiki.gnuradio.org/index.php?title=E310_FM_Receiver#GNU_RADIO_versions)
-    * [1.2 Hardware Connection](https://wiki.gnuradio.org/index.php?title=E310_FM_Receiver#Hardware_Connection)
-    * [1.3 Initialization of the USRP](https://wiki.gnuradio.org/index.php?title=E310_FM_Receiver#Initialization_of_the_USRP)
-    * [1.4 Determine the USRP’s IP Address](https://wiki.gnuradio.org/index.php?title=E310_FM_Receiver#Determine_the_USRP%E2%80%99s_IP_Address)
-    * [1.5 Assign a Static IP Address](https://wiki.gnuradio.org/index.php?title=E310_FM_Receiver#Assign_a_Static_IP_Address)
-      * [1.5.1 Create the **static_ip.sh** Script](https://wiki.gnuradio.org/index.php?title=E310_FM_Receiver#Create_the_static_ip.sh_Script)
-      * [1.5.2 Run the Script](https://wiki.gnuradio.org/index.php?title=E310_FM_Receiver#Run_the_Script)
-    * [1.6 SSH Connection](https://wiki.gnuradio.org/index.php?title=E310_FM_Receiver#SSH_Connection)
-    * [1.7 Mount USRP Filesystem via SSHFS](https://wiki.gnuradio.org/index.php?title=E310_FM_Receiver#Mount_USRP_Filesystem_via_SSHFS)
-    * [1.8 Configure Geany IDE](https://wiki.gnuradio.org/index.php?title=E310_FM_Receiver#Configure_Geany_IDE)
-      * [1.8.1 Open Build Commands](https://wiki.gnuradio.org/index.php?title=E310_FM_Receiver#Open_Build_Commands)
-      * [1.8.2 Create the **start_usrp_script.sh** Script](https://wiki.gnuradio.org/index.php?title=E310_FM_Receiver#Create_the_start_usrp_script.sh_Script)
-      * [1.8.3 Update the Build Commands](https://wiki.gnuradio.org/index.php?title=E310_FM_Receiver#Update_the_Build_Commands)
-    * [1.9 USRP/Host Codes and flowgraphs](https://wiki.gnuradio.org/index.php?title=E310_FM_Receiver#USRP/Host_Codes_and_flowgraphs)
-      * [1.9.1 USRP Code](https://wiki.gnuradio.org/index.php?title=E310_FM_Receiver#USRP_Code)
-      * [1.9.2 Host Flowgraph](https://wiki.gnuradio.org/index.php?title=E310_FM_Receiver#Host_Flowgraph)
-    * [1.10 Running the Flow](https://wiki.gnuradio.org/index.php?title=E310_FM_Receiver#Running_the_Flow)
-    * [1.11 Additional Notes](https://wiki.gnuradio.org/index.php?title=E310_FM_Receiver#Additional_Notes)
+ |
+| --- |
+This tutorial describes how to receive broadcast commercial radio stations transmitting Frequency Modulated (FM) signals using the Ettus Research E310.
 
-
-# USRP (E310) Setup Guide
-This page provides step-by-step instructions to configure a USRP E310 for: 
+## USRP (E310) Setup Guide
+This page provides step-by-step instructions to configure a USRP E310 for:
   * Receiving signals with a Python script
   * Remote control via SSH
   * Using GNU Radio on a host machine
 
-
-Both the USRP (IP: 10.67.44.142) and the host (IP: 10.67.44.132) run Linux operating systems. 
+Both the USRP (IP: 10.67.44.142) and the host (IP: 10.67.44.132) run Linux operating systems.
 ## Prerequisites
 ### Linux versions
-Before starting, ensure you know the Linux versions running on both the host and the USRP, as this helps verify compatibility and troubleshoot potential issues. 
+Before starting, ensure you know the Linux versions running on both the host and the USRP, as this helps verify compatibility and troubleshoot potential issues.
 
 ```
 (base) host@host:~$ lsb_release -a
@@ -83,9 +59,8 @@ Codename:	bionic
 
 ```
 
-
 ```
-root@USRP:~# lsb_release -a    
+root@USRP:~# lsb_release -a
 LSB Version:	n/a
 Distributor ID:	Alchemy
 Description:	Alchemy 2021.04
@@ -110,16 +85,14 @@ This is free software, and you are welcome to redistribute it.
 ## Hardware Connection
   * Plug the antenna into the RX2-A port on the USRP. The RX2-A port is dedicated to receive (RX) operations.
 
-
   * Turn on the USRP and ensure it has a stable power supply.
 
-
 ## Initialization of the USRP
-see dedicated page 
-  
+see dedicated page
+
 
 ## Determine the USRP’s IP Address
-On your host machine (connected to the same network): 
+On your host machine (connected to the same network):
 
 ```
 sudo snap install nmap    # Install nmap if not already present
@@ -128,30 +101,30 @@ nmap -sn 10.0.0.0/24      # Scan the local subnet
 ```
     This finds the DHCP‑assigned IP of the USRP (e.g., 10.67.44.2).
 ## Assign a Static IP Address
-To simplify SSH access, give the USRP a fixed IP. 
+To simplify SSH access, give the USRP a fixed IP.
 ### Create the **static_ip.sh** Script
-SSH into the USRP (using the DHCP IP) and run: 
+SSH into the USRP (using the DHCP IP) and run:
 
 ```
 nano static_ip.sh
 
 ```
 
-Paste the following: 
+Paste the following:
 
 ```
 #!/bin/sh
 
-# 1. Flush existing IP addresses
+## 1. Flush existing IP addresses
 ip addr flush dev eth0
 
-# 2. Assign static IP and netmask
+## 2. Assign static IP and netmask
 ip addr add 10.67.44.142/24 dev eth0
 
-# 3. Bring the interface up
+## 3. Bring the interface up
 ip link set eth0 up
 
-# 4. Add default gateway
+## 4. Add default gateway
 ip route add default via 10.0.0.1
 
 ```
@@ -164,7 +137,7 @@ bash static_ip.sh
 ```
     The IP remains active until the next reboot.
 ## SSH Connection
-On the host: 
+On the host:
 
 ```
 ssh root@10.67.44.142
@@ -172,7 +145,7 @@ ssh root@10.67.44.142
 ```
     You now have remote shell access to the USRP.
 ## Mount USRP Filesystem via SSHFS
-To edit USRP files locally: 
+To edit USRP files locally:
 
 ```
 sshfs root@10.67.44.142:/ ~/remote_usrp
@@ -180,27 +153,27 @@ sshfs root@10.67.44.142:/ ~/remote_usrp
 ```
     Mounts the USRP’s root directory at `~/remote_usrp` on the host.
 ## Configure Geany IDE
-To simplify the workflow, we will use Geany, a lightweight IDE, on the host machine to: 
+To simplify the workflow, we will use Geany, a lightweight IDE, on the host machine to:
   * Edit files located on the USRP (via SSHFS)
   * Launch scripts remotely on the USRP (via SSH)
   * Centralize all development and execution within one interface
 
     This allows you to work entirely from the host, avoiding the need to manually SSH into the USRP or use a separate editor.
-  
+
 
 ### Open Build Commands
-In Geany, go to Build → Set Build Commands. 
-  
+In Geany, go to Build → Set Build Commands.
+
 
 ### Create the **start_usrp_script.sh** Script
-Before applying the static IP, prepare the Geany startup helper on the USRP: 
+Before applying the static IP, prepare the Geany startup helper on the USRP:
 
 ```
 nano /home/root/start_script_geany.sh
 
 ```
 
-Paste the following: 
+Paste the following:
 
 ```
 #!/bin/sh
@@ -218,14 +191,14 @@ python3 /home/root/RX_FM_USRP_UDP.py
 ```
     This script installs a cleanup handler that intercepts interrupt or termination signals, cleanly kills the FM‑UDP Python process, and exits. When Geany’s “Execute” command runs this script remotely, RX_FM_USRP_UDP.py is launched and properly managed.
 ### Update the Build Commands
-In "Independent Commands", to the right of "Run Remote", add: 
+In "Independent Commands", to the right of "Run Remote", add:
 
 ```
 scp "%f" root@10.67.44.142:/tmp/ && ssh root@10.67.44.142 'python3 /tmp/"%f"'
 
 ```
     This single command performs two actions back-to-back: first, it securely transfers the file you’re editing to the USRP’s temporary directory over SSH; then, once that transfer completes successfully, it opens an SSH session on the USRP and immediately invokes Python 3 to run the uploaded file from its temporary location. In other words, it bundles “copy the script over” and “execute it remotely” into one seamless operation.
-In "Execute commands", to the right of "Execute", add: 
+In "Execute commands", to the right of "Execute", add:
 
 ```
 ssh -t root@10.67.44.142 "bash -i -c '/home/root/start_script_geany.sh'"
@@ -233,13 +206,13 @@ ssh -t root@10.67.44.142 "bash -i -c '/home/root/start_script_geany.sh'"
 ```
 
 ## USRP/Host Codes and flowgraphs
-All operations are performed in a networked setup where a host PC (IP address 10.67.44.132) handles control messaging and UDP reception, and the USRP E310 (IP address 10.67.44.142) runs the GNURadio flowgraph and streams data. 
+All operations are performed in a networked setup where a host PC (IP address 10.67.44.132) handles control messaging and UDP reception, and the USRP E310 (IP address 10.67.44.142) runs the GNURadio flowgraph and streams data.
 ### USRP Code
-This script is written in Python to be more easily edited and executed remotely via Geany on the host machine, providing flexibility and rapid iteration. 
+This script is written in Python to be more easily edited and executed remotely via Geany on the host machine, providing flexibility and rapid iteration.
 
 ```
 #!/usr/bin/env python3  # Corrected for execution on host
-# -*- coding: utf-8 -*-
+## -*- coding: utf-8 -*-
 
 import time
 import signal
@@ -376,18 +349,18 @@ if __name__ == '__main__':
 
 ```
 
-This script defines and runs a headless GNU Radio flowgraph on the USRP E310 that continuously receives FM broadcasts, applies signal processing, and streams the resulting complex baseband samples over UDP to a host computer. It begins by initializing key parameters—sample rate (2 MHz), RF center frequency (e.g. 102.5 MHz), gain, mixing offset, and bandwidth—all of which can be easily adjusted in code. The script then configures the USRP source block to use these parameters (including selecting the RX2 antenna port), and constructs a processing chain that mixes the incoming RF signal down with a cosine wave, filters it with a low‑pass FIR filter to isolate the FM spectrum, and resamples it to match the network transport rate before sending it out via a UDP sink. Meanwhile, two ZeroMQ pull sockets listen for real‑time control messages from the host—one for frequency updates and one for gain adjustments. When a message arrives, custom handler blocks invoke set_freq() or set_gain() to retune the USRP or change its gain without restarting the flowgraph. The script also installs a cleanup function that traps interruption or termination signals, allowing a graceful shutdown that stops streaming and releases hardware resources. Finally, after starting the flowgraph, it enters an infinite sleep loop to keep the process alive and responsive until the user requests it to stop. 
+This script defines and runs a headless GNU Radio flowgraph on the USRP E310 that continuously receives FM broadcasts, applies signal processing, and streams the resulting complex baseband samples over UDP to a host computer. It begins by initializing key parameters—sample rate (2 MHz), RF center frequency (e.g. 102.5 MHz), gain, mixing offset, and bandwidth—all of which can be easily adjusted in code. The script then configures the USRP source block to use these parameters (including selecting the RX2 antenna port), and constructs a processing chain that mixes the incoming RF signal down with a cosine wave, filters it with a low‑pass FIR filter to isolate the FM spectrum, and resamples it to match the network transport rate before sending it out via a UDP sink. Meanwhile, two ZeroMQ pull sockets listen for real‑time control messages from the host—one for frequency updates and one for gain adjustments. When a message arrives, custom handler blocks invoke set_freq() or set_gain() to retune the USRP or change its gain without restarting the flowgraph. The script also installs a cleanup function that traps interruption or termination signals, allowing a graceful shutdown that stops streaming and releases hardware resources. Finally, after starting the flowgraph, it enters an infinite sleep loop to keep the process alive and responsive until the user requests it to stop.
 ### Host Flowgraph
-On the host PC, it’s simpler to use a GNU Radio Companion flowgraph so you can take full advantage of its graphical interface, preserving the intuitive and easy-to-use workflow. [![](https://wiki.gnuradio.org/images/1/13/---home-student-Pictures-TX_flowgraph.png)](https://wiki.gnuradio.org/index.php?title=File:---home-student-Pictures-TX_flowgraph.png)
-The following code corresponds to the flowgraph above. 
+On the host PC, it’s simpler to use a GNU Radio Companion flowgraph so you can take full advantage of its graphical interface, preserving the intuitive and easy-to-use workflow. [](https://wiki.gnuradio.org/index.php?title=File:---home-student-Pictures-TX_flowgraph.png)
+The following code corresponds to the flowgraph above.
 
 ```
 #!/usr/bin/env python2
-# -*- coding: utf-8 -*-
+## -*- coding: utf-8 -*-
 ##################################################
-# GNU Radio Python Flow Graph
-# Title: Rx Fm Host Udp
-# Generated: Thu Jun 26 14:44:45 2025
+## GNU Radio Python Flow Graph
+## Title: Rx Fm Host Udp
+## Generated: Thu Jun 26 14:44:45 2025
 ##################################################
 
 from distutils.version import StrictVersion
@@ -419,7 +392,6 @@ import pmt
 import sip
 import sys
 from gnuradio import qtgui
-
 
 class RX_FM_Host_UDP(gr.top_block, Qt.QWidget):
 
@@ -573,7 +545,6 @@ class RX_FM_Host_UDP(gr.top_block, Qt.QWidget):
         self.bw = bw
         self.qtgui_freq_sink_x_0.set_frequency_range(self.var_freq_MHz, self.bw)
 
-
 def main(top_block_cls=RX_FM_Host_UDP, options=None):
 
     if StrictVersion("4.5.0") <= StrictVersion(Qt.qVersion()) < StrictVersion("5.0.0"):
@@ -591,7 +562,6 @@ def main(top_block_cls=RX_FM_Host_UDP, options=None):
     qapp.aboutToQuit.connect(quitting)
     qapp.exec_()
 
-
 if __name__ == '__main__':
     main()
 
@@ -603,9 +573,9 @@ if __name__ == '__main__':
   3. On your host, launch GNU Radio Companion and run `fm_receiver_host_udp.py` to receive the UDP stream.
 
     The USRP script streams FM over UDP; GNU Radio handles it on the host side.
-[![](https://wiki.gnuradio.org/images/b/b5/-home-student-Pictures-View_TX_flowgraph.png)](https://wiki.gnuradio.org/index.php?title=File:-home-student-Pictures-View_TX_flowgraph.png)
-  
-This is the console output you see when you execute the GNU Radio flowgraph on the USRP. 
+[](https://wiki.gnuradio.org/index.php?title=File:-home-student-Pictures-View_TX_flowgraph.png)
+
+This is the console output you see when you execute the GNU Radio flowgraph on the USRP.
 
 ```
 root@10.67.44.142's password:
@@ -623,25 +593,22 @@ DDODDDDOODDODOODDOODDDDODDDDDDODDDDDODDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD
 
 ```
 
-  
+
 
 ## Additional Notes
   * To make the IP configuration persistent, consider adding `static_ip.sh` to `/etc/rc.local` or creating a `systemd` service.
   * Verify compatibility of Python and GNU Radio versions between the USRP and host.
   * IP addresses have been anonymized, but this obviously needs to be adapted to the use case.
 
-
 Last updated: 30 June 2025
-Retrieved from "[https://wiki.gnuradio.org/index.php?title=E310_FM_Receiver&oldid=16024](https://wiki.gnuradio.org/index.php?title=E310_FM_Receiver&oldid=16024)"
+
 ## Navigation menu
 ###  Personal tools
   * [Log in](https://wiki.gnuradio.org/index.php?title=Special:UserLogin&returnto=E310+FM+Receiver "You are encouraged to log in; however, it is not mandatory \[alt-shift-o\]")
 
-
 ###  Namespaces
   * [Page](https://wiki.gnuradio.org/index.php?title=E310_FM_Receiver "View the content page \[alt-shift-c\]")
   * [Discussion](https://wiki.gnuradio.org/index.php?title=Talk:E310_FM_Receiver&action=edit&redlink=1 "Discussion about the content page \(page does not exist\) \[alt-shift-t\]")
-
 
 English
 ###  Views
@@ -649,7 +616,6 @@ English
   * [View source](https://wiki.gnuradio.org/index.php?title=E310_FM_Receiver&action=edit "This page is protected.
 You can view its source \[alt-shift-e\]")
   * [View history](https://wiki.gnuradio.org/index.php?title=E310_FM_Receiver&action=history "Past revisions of this page \[alt-shift-h\]")
-
 
 More
 ### Search
@@ -660,18 +626,15 @@ More
   * [FAQ](https://wiki.gnuradio.org/index.php?title=FAQ)
   * [Get a Wiki Account](https://wiki.gnuradio.org/index.php?title=Wiki_account)
 
-
 ###  Guides
   * [Tutorials](https://wiki.gnuradio.org/index.php?title=Tutorials)
   * [Installing GNU Radio](https://wiki.gnuradio.org/index.php?title=InstallingGR)
   * [Contributing](https://wiki.gnuradio.org/index.php?title=Development)
 
-
 ###  Wiki Tools
   * [Recent changes](https://wiki.gnuradio.org/index.php?title=Special:RecentChanges "A list of recent changes in the wiki \[alt-shift-r\]")
   * [Random page](https://wiki.gnuradio.org/index.php?title=Special:Random "Load a random page \[alt-shift-x\]")
   * [Help](https://www.mediawiki.org/wiki/Special:MyLanguage/Help:Contents "The place to find out")
-
 
 ###  Tools
   * [What links here](https://wiki.gnuradio.org/index.php?title=Special:WhatLinksHere/E310_FM_Receiver "A list of all wiki pages that link here \[alt-shift-j\]")
@@ -681,17 +644,12 @@ More
   * [Permanent link](https://wiki.gnuradio.org/index.php?title=E310_FM_Receiver&oldid=16024 "Permanent link to this revision of this page")
   * [Page information](https://wiki.gnuradio.org/index.php?title=E310_FM_Receiver&action=info "More information about this page")
 
-
   * This page was last edited on 6 March 2026, at 04:03.
   * Content is available under [Creative Commons Attribution-ShareAlike](http://creativecommons.org/licenses/by-sa/3.0/) unless otherwise noted.
-
 
   * [Privacy policy](https://wiki.gnuradio.org/index.php?title=GNU_Radio:Privacy_policy)
   * [About GNU Radio](https://wiki.gnuradio.org/index.php?title=GNU_Radio:About)
   * [Disclaimers](https://wiki.gnuradio.org/index.php?title=GNU_Radio:General_disclaimer)
 
-
   * [![Creative Commons Attribution-ShareAlike](https://wiki.gnuradio.org/resources/assets/licenses/cc-by-sa.png)](http://creativecommons.org/licenses/by-sa/3.0/)
   * [![Powered by MediaWiki](https://wiki.gnuradio.org/resources/assets/poweredby_mediawiki.svg)](https://www.mediawiki.org/)
-
-

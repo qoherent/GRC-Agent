@@ -1,7 +1,5 @@
 # Packet Framing Concepts
 
-From GNU Radio
-
 A burst transmission carries data of *yet-to-determine length*: something at
 the front of each packet has to tell the receiver how much data follows and
 where the payload begins. GNU Radio packets express that boundary either as **a

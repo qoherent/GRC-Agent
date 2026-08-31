@@ -1,7 +1,5 @@
 # QT GUI Sinks
 
-From GNU Radio
-
 The `qtgui_*` sink blocks draw live plots of the running flowgraph in a QT
 window. All streaming sinks in this family share one declaration model, and
 one parameter on them accounts for the most common GRC graph error: **Number

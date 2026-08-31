@@ -1,21 +1,21 @@
 # Flowgraph Python Code
-From GNU Radio
-[Jump to navigation](https://wiki.gnuradio.org/index.php?title=Flowgraph_Python_Code#mw-head) [Jump to search](https://wiki.gnuradio.org/index.php?title=Flowgraph_Python_Code#searchInput)
+
+
 ## Dial Tone Flowgraph
-The following example flowgraph implements a dial-tone: 
+The following example flowgraph implements a dial-tone:
 ![tutorial_three_1.png](https://raw.githubusercontent.com/gnuradio/gr-tutorial/master/examples/tutorial3/images/tutorial_three_1.png)
-When we click the **Generate** button from within GRC, the terminal tells us that it produced a "tutorial_three_1.py" file, so let's open it to examine the code. 
+When we click the **Generate** button from within GRC, the terminal tells us that it produced a "tutorial_three_1.py" file, so let's open it to examine the code.
 
 ```
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
+## -*- coding: utf-8 -*-
 
 #
-# SPDX-License-Identifier: GPL-3.0
+## SPDX-License-Identifier: GPL-3.0
 #
-# GNU Radio Python Flow Graph
-# Title: tutorial_three_1
-# GNU Radio version: 3.8.0.0
+## GNU Radio Python Flow Graph
+## Title: tutorial_three_1
+## GNU Radio version: 3.8.0.0
 
 from distutils.version import StrictVersion
 
@@ -86,8 +86,6 @@ class tutorial_three_1(gr.top_block, Qt.QWidget):
         self.analog_sig_source_x_1 = analog.sig_source_f(samp_rate, analog.GR_COS_WAVE, 350, 0.1, 0, 0)
         self.analog_sig_source_x_0 = analog.sig_source_f(samp_rate, analog.GR_COS_WAVE, 440, 0.1, 0, 0)
 
-
-
         ##################################################
         # Connections
         ##################################################
@@ -106,8 +104,6 @@ class tutorial_three_1(gr.top_block, Qt.QWidget):
         self.samp_rate = samp_rate
         self.analog_sig_source_x_0.set_sampling_freq(self.samp_rate)
         self.analog_sig_source_x_1.set_sampling_freq(self.samp_rate)
-
-
 
 def main(top_block_cls=tutorial_three_1, options=None):
 
@@ -136,25 +132,24 @@ def main(top_block_cls=tutorial_three_1, options=None):
     qapp.aboutToQuit.connect(quitting)
     qapp.exec_()
 
-
 if __name__ == '__main__':
     main()
 
 ```
 
-Once GRC has created a Python file, the user is free to modify it in any desired manner, such as changing parameters, sample rate, and even connections among the blocks. 
-To execute this file from a terminal, enter:  
+Once GRC has created a Python file, the user is free to modify it in any desired manner, such as changing parameters, sample rate, and even connections among the blocks.
+To execute this file from a terminal, enter:
 `python3 tutorial_three_1.py`
 **Warning:** After the Python file has been modified, running GRC again with that flowgraph will wipe out your changes!
 ## Dial Tone Python Code Dissected
-Let's examine pertinent lines of the code: 
+Let's examine pertinent lines of the code:
 
 ```
 #!/usr/bin/env python3
 
 ```
 
-This tells the shell to use the Python3 interpreter to run this file. 
+This tells the shell to use the Python3 interpreter to run this file.
 
 ```
 from gnuradio import analog
@@ -163,35 +158,35 @@ from gnuradio import gr
 
 ```
 
-These tell Python what modules to include. We must always have **gr** to run GNU Radio applications. The audio sink is included in the audio module and the signal source is included in the analog module. 
+These tell Python what modules to include. We must always have **gr** to run GNU Radio applications. The audio sink is included in the audio module and the signal source is included in the analog module.
 
 ```
 class tutorial_three_1(gr.top_block, Qt.QWidget):
 
 ```
 
-Define a class called "tutorial_three_1" which is derived from another class, **gr.top_block**. This class is basically a container for the flow graph. By deriving from gr.top_block, we get all the hooks and functions we need to add blocks and interconnect them. 
+Define a class called "tutorial_three_1" which is derived from another class, **gr.top_block**. This class is basically a container for the flow graph. By deriving from gr.top_block, we get all the hooks and functions we need to add blocks and interconnect them.
 
 ```
 def __init__(self):
 
 ```
 
-Only one member function is defined for this class: the function "_init_()", which is the constructor of this class. 
+Only one member function is defined for this class: the function "_init_()", which is the constructor of this class.
 
 ```
 gr.top_block.__init__(self, "tutorial_three_1")
 
 ```
 
-The parent constructor is called. 
+The parent constructor is called.
 
 ```
 self.samp_rate = samp_rate = 32000
 
 ```
 
-Variable declaration for sample rate. 
+Variable declaration for sample rate.
 
 ```
 self.connect((self.analog_sig_source_x_0, 0), (self.audio_sink_0, 0))
@@ -199,10 +194,10 @@ self.connect((self.analog_sig_source_x_1, 0), (self.audio_sink_0, 1))
 
 ```
 
-There are 2 inputs to the **Audio Sink** block. The first line connects the only output of analog_sig_source_x_0 (440 Hz waveform) to the first input of audio_sink_0. The second line connects the only output of analog_sig_source_x_1 (350 Hz waveform) to the second input of audio_sink_0. 
+There are 2 inputs to the **Audio Sink** block. The first line connects the only output of analog_sig_source_x_0 (440 Hz waveform) to the first input of audio_sink_0. The second line connects the only output of analog_sig_source_x_1 (350 Hz waveform) to the second input of audio_sink_0.
 ## GNU Radio Flowgraph in Lisp
-Can this be done in Lisp? 
-Yes, if the Lisp is [Hy](http://hylang.org/) - which has very tight coupling to Python. 
+Can this be done in Lisp?
+Yes, if the Lisp is [Hy](http://hylang.org/) - which has very tight coupling to Python.
 
 ```
 (import [gnuradio [gr]]
@@ -229,22 +224,19 @@ Yes, if the Lisp is [Hy](http://hylang.org/) - which has very tight coupling to 
         (.connect self src1 [dst 1])))
 
 (defmain [&rest args]
- (try 
+ (try
   (.run (my_top_block))
   (except [KeyboardInterrupt])))
 
 ```
 
-Retrieved from "[https://wiki.gnuradio.org/index.php?title=Flowgraph_Python_Code&oldid=8791](https://wiki.gnuradio.org/index.php?title=Flowgraph_Python_Code&oldid=8791)"
 ## Navigation menu
 ###  Personal tools
   * [Log in](https://wiki.gnuradio.org/index.php?title=Special:UserLogin&returnto=Flowgraph+Python+Code "You are encouraged to log in; however, it is not mandatory \[o\]")
 
-
 ###  Namespaces
   * [Page](https://wiki.gnuradio.org/index.php?title=Flowgraph_Python_Code "View the content page \[c\]")
   * [Discussion](https://wiki.gnuradio.org/index.php?title=Talk:Flowgraph_Python_Code&action=edit&redlink=1 "Discussion about the content page \(page does not exist\) \[t\]")
-
 
 English
 ###  Views
@@ -252,7 +244,6 @@ English
   * [View source](https://wiki.gnuradio.org/index.php?title=Flowgraph_Python_Code&action=edit "This page is protected.
 You can view its source \[e\]")
   * [View history](https://wiki.gnuradio.org/index.php?title=Flowgraph_Python_Code&action=history "Past revisions of this page \[h\]")
-
 
 More
 ### Search
@@ -263,18 +254,15 @@ More
   * [FAQ](https://wiki.gnuradio.org/index.php?title=FAQ)
   * [Get a Wiki Account](https://wiki.gnuradio.org/index.php?title=Wiki_account)
 
-
 ###  Guides
   * [Tutorials](https://wiki.gnuradio.org/index.php?title=Tutorials)
   * [Installing GNU Radio](https://wiki.gnuradio.org/index.php?title=InstallingGR)
   * [Contributing](https://wiki.gnuradio.org/index.php?title=Development)
 
-
 ###  Wiki Tools
   * [Recent changes](https://wiki.gnuradio.org/index.php?title=Special:RecentChanges "A list of recent changes in the wiki \[r\]")
   * [Random page](https://wiki.gnuradio.org/index.php?title=Special:Random "Load a random page \[x\]")
   * [Help](https://www.mediawiki.org/wiki/Special:MyLanguage/Help:Contents "The place to find out")
-
 
 ###  Tools
   * [What links here](https://wiki.gnuradio.org/index.php?title=Special:WhatLinksHere/Flowgraph_Python_Code "A list of all wiki pages that link here \[j\]")
@@ -284,17 +272,12 @@ More
   * [Permanent link](https://wiki.gnuradio.org/index.php?title=Flowgraph_Python_Code&oldid=8791 "Permanent link to this revision of this page")
   * [Page information](https://wiki.gnuradio.org/index.php?title=Flowgraph_Python_Code&action=info "More information about this page")
 
-
   * This page was last edited on 27 September 2021, at 03:53.
   * Content is available under [Creative Commons Attribution-ShareAlike](http://creativecommons.org/licenses/by-sa/3.0/) unless otherwise noted.
-
 
   * [Privacy policy](https://wiki.gnuradio.org/index.php?title=GNU_Radio:Privacy_policy)
   * [About GNU Radio](https://wiki.gnuradio.org/index.php?title=GNU_Radio:About)
   * [Disclaimers](https://wiki.gnuradio.org/index.php?title=GNU_Radio:General_disclaimer)
 
-
   * [![Creative Commons Attribution-ShareAlike](https://wiki.gnuradio.org/resources/assets/licenses/cc-by-sa.png)](http://creativecommons.org/licenses/by-sa/3.0/)
   * [![Powered by MediaWiki](https://wiki.gnuradio.org/resources/assets/poweredby_mediawiki.svg)](https://www.mediawiki.org/)
-
-
