@@ -25,6 +25,7 @@ Rules and architectural commandments for AI coding agents working on this codeba
 - **Evidence Before Assertions**: Every claim must cite verified runtime observations. A green unit test or successful exit code is necessary but not sufficient — verify the underlying data flow, payload shapes, and state transitions.
 - **Never Trust Memory for APIs — Always Use Context7 & Skills**:
   - When working with external libraries, frameworks, SDKs, or tools (even well-known ones like Pydantic, PyGObject, GNU Radio, FastAPI, AnyIO), unconditionally query current documentation via `context7` MCP or specialized agent skills.
+  - Always check and use the specialized project skills in `/home/mahmoud/Desktop/AI_Projects/qoherent/GRC_Agent/.agents` (`building-pydantic-ai-agents`, `pydantic-ai-harness`, `hermes-subagent`).
   - Never rely on internal training memory, which may be outdated or hallucinated.
 - **Empirical & Collaborative Decisions**: Stop and ask for clarification when requirements are ambiguous or when a major decision (e.g. library selection, backend architecture, destructive migration) needs to be made.
 

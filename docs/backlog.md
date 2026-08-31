@@ -22,13 +22,13 @@ Active feature requests, architectural improvements, and planned capabilities. C
 
 ### 2. Data-Plane Capture & Multimodal RF / File Visualization
 * **Status**: 🔄 Proposed
-* **Objective**: Enable the agent to directly observe, inspect, and visually diagnose live flowgraph streaming data and multimodal project files without flooding its context window with raw numbers or large text dumps.
+* **Objective**: Enable the agent to directly observe, inspect, and visually diagnose live flowgraph streaming data, numerical plot telemetry, and multimodal project files without flooding its context window with raw numbers or large text dumps.
 * **Supported Formats & Modality Handling**:
-  1. **Binary RF Stream Data (`.bin`, `.dat`, `.raw`, `.iq`)**:
+  1. **Binary RF Stream Data & Decimated Plot Telemetry (`.bin`, `.dat`, `.raw`, `.iq`, probe streams)**:
      - *Source*: Output files from `blocks_file_sink` or probe taps.
-     - *Processing*: Sample parsing via `numpy.fromfile` (complex64, float32, int16).
-     - *Visualization*: Generates spectral power density (FFT), I/Q constellation diagrams, eye diagrams, or time-domain waterfall plots via matplotlib/PIL.
-     - *Return*: Returns image payload (`image/png`) to vision LLMs; provides concise statistical metrics (estimated SNR, RMS power, peak frequencies, DC offset) as fallback or companion data.
+     - *Processing*: Sample parsing via `numpy.fromfile` (complex64, float32, int16). Never dumps raw binary samples into LLM context.
+     - *Bounded Numerical Telemetry (Tier 1)*: Returns lightweight, strictly decimated statistics (peak $X/Y$ frequency, estimated SNR, RMS power, min/max/mean, DC offset, 16–32 decimated points) consuming < 100 tokens.
+     - *Multimodal Visualization (Tier 2)*: Generates spectral power density (FFT), I/Q constellation diagrams, eye diagrams, or time-domain waterfall plots via matplotlib/PIL and returns `BinaryContent(data=png_bytes, media_type='image/png')` to vision LLMs when requested or when numerical stats indicate ambiguity.
   2. **Direct Image Files (`.png`, `.jpg`, `.jpeg`, `.svg`)**:
      - *Handling*: Direct binary reading and multimodal passthrough for flowgraph plot captures, UI diagrams, and schematic images in the project directory.
   3. **Tabular & Register Spreadsheets (`.xlsx`, `.csv`, `.tsv`)**:
@@ -38,7 +38,17 @@ Active feature requests, architectural improvements, and planned capabilities. C
 
 ---
 
-### 3. Project Document File-RAG (Large Document Retrieval)
+### 3. Curated SigMF Test Dataset Catalog & Virtual RF Assets
+* **Status**: 🔄 Proposed
+* **Objective**: Provide a built-in curated catalog of standard, lightweight SigMF (Signal Metadata Format) over-the-air RF recordings (e.g. broadcast FM, ADS-B, LoRa, FSK, ISM remotes) enabling the agent to test real-world demodulator and decoder flowgraphs offline without physical SDR hardware.
+* **Architecture & Mechanics**:
+  - **Catalog Index**: Lightweight JSON index of curated SigMF captures with standard RF metadata (`core:sample_rate`, `core:frequency`, `core:datatype`, `core:description`, capture byte size).
+  - **Metadata-Driven Auto-Configuration**: Automatically configures the flowgraph's `samp_rate` and center frequency variables to match the selected SigMF file's metadata upon insertion, preventing sample-rate mismatch bugs.
+  - **On-Demand Downloader**: Downloads small, bounded capture files (e.g. 2–10 MB) into the local project directory on-demand.
+
+---
+
+### 4. Project Document File-RAG (Large Document Retrieval)
 * **Status**: 🔄 Proposed
 * **Objective**: Provide a dedicated semantic retrieval tool (`query_project_documents` / `file_rag`) enabling the agent to search through very large project assets (datasheets, hardware manuals, RF register maps, RFC specifications, IEEE standards, PDFs, and large text/code archives) without flooding or exhausting its limited context window.
 * **Key Distinctions**:
@@ -50,14 +60,14 @@ Active feature requests, architectural improvements, and planned capabilities. C
 
 ---
 
-### 4. Knowledge Base & Corpus Expansion
+### 5. Knowledge Base & Corpus Expansion
 * **Status**: 🔄 Partial (Hybrid RRF and SWIG docstrings shipped; expansion and cleanup active)
-* **4.1 Wiki Corpus Expansion**:
+* **5.1 Wiki Corpus Expansion**:
   - Expand local knowledge corpus beyond the initial 94 wiki pages to close domain gaps identified in forensic audits:
     - *QT GUI Sinks*: Detailed parameter guides, internal FFT behaviors, trigger modes, and vector lengths for `qtgui_sink_x`, `qtgui_freq_sink_x`, `qtgui_time_sink_x`, `qtgui_waterfall_sink_x`.
     - *SDR Hardware Recipes*: Hardware setup guides, antenna selections, gain staging, and buffer tuning for UHD/USRP, RTL-SDR, HackRF, bladeRF, and ADALM-PLUTO.
     - *Digital Synchronization & Modulation*: Practical recipes for Costas loops, Polyphase Clock Sync, Mueller & Müller clock recovery, symbol timing, and framing/deframing.
-* **4.2 Corpus De-duplication & Hygiene**:
+* **5.2 Corpus De-duplication & Hygiene**:
   - De-duplicate overlapping wiki articles (e.g. `Binary_Files_for_DSP.md` duplicates 43 of 63 long lines in `Reading_and_Writing_Binary_Files.md`).
   - Eliminate synthetic stub pages containing `Provenance:` and `Aliases:` meta-text that dilute ranking mass in lexical and vector indexes.
 * **4.3 Truncation Density Monitoring**:
