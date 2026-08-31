@@ -77,7 +77,7 @@ Active feature requests, architectural improvements, and planned capabilities. C
   - *Observation*: Regex `\$\([^)]+\)` escalates on benign jQuery boilerplate (`$(document)` ×2) in official GNU Radio Doxygen web pages, triggering false-positive injection withholding.
   - *Planned Resolution*: Submit upstream issue to `stackone-defender` proposing exclusions for benign JS identifiers or configurable sensitivity thresholds.
 * **5.4 Catalog Distance Semantics**:
-  - Make `distance` field nullable or omitted for non-vector lexical rows to eliminate confusion where `distance: 0.0` was misinterpreted as a perfect vector distance match.
+  - *Status*: ✅ Completed. The `distance` field is omitted on non-vector lexical rows (`distance is None`) rather than emitting a fabricated `0.0`, eliminating confusion with perfect vector matches.
 * **5.5 ConversationSearch Snapshot Recovery for Interrupted Runs**:
   - Engage with upstream harness to allow recovery of user-interrupted tool calls (`state=interrupted`) during session history analysis.
 

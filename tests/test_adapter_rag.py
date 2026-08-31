@@ -267,10 +267,10 @@ def test_render_catalog_block_exposes_vlen():
     query_knowledge can show vector ports (fft_vxx vlen 1024) vs scalar."""
     from grc_agent.adapter import render_catalog_block
 
-    r = render_catalog_block("fft_vxx", 0.0)
+    r = render_catalog_block("fft_vxx")
     assert r is not None
     assert r["inputs"][0].get("vlen") not in (None, 1, "1", "")
-    r2 = render_catalog_block("blocks_float_to_complex", 0.0)
+    r2 = render_catalog_block("blocks_float_to_complex")
     assert r2 is not None
     for p in r2["inputs"] + r2["outputs"]:
         assert "vlen" not in p
@@ -284,13 +284,13 @@ def test_render_catalog_block_carries_implementation_doc():
     carry an empty doc (no resolvable SWIG class)."""
     from grc_agent.adapter import render_catalog_block
 
-    r = render_catalog_block("analog_pll_carriertracking_cc", 0.0)
+    r = render_catalog_block("analog_pll_carriertracking_cc")
     assert r is not None
     assert "radians per sample" in r["doc"]
-    r2 = render_catalog_block("blocks_keep_m_in_n", 0.0)
+    r2 = render_catalog_block("blocks_keep_m_in_n")
     assert r2 is not None
     assert "offset" in r2["doc"]
-    r3 = render_catalog_block("analog_sig_source_x", 0.0)
+    r3 = render_catalog_block("analog_sig_source_x")
     assert r3 is not None
     assert r3["doc"] == ""
 
@@ -374,7 +374,7 @@ def test_stock_variable_render_stderr_is_quiet():
     for block_id in _STOCK_NOISY_VARIABLE_BLOCKS:
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
-            r = render_catalog_block(block_id, 0.0)
+            r = render_catalog_block(block_id)
         assert r is not None and r["block_id"] == block_id
         assert r["params"], "variable blocks must still expose params"
         assert "Failed to evaluate variable block" not in err.getvalue(), (
@@ -388,7 +388,7 @@ def test_unrendered_block_id_returns_none():
     AttributeError-ing on the None block."""
     from grc_agent.adapter import render_catalog_block
 
-    assert render_catalog_block("no_such_block_anywhere", 0.0) is None
+    assert render_catalog_block("no_such_block_anywhere") is None
 
 
 def test_quiet_context_manager_restores_grc_logger_level():
@@ -519,3 +519,16 @@ def test_render_without_distance_omits_key():
     assert r is not None
     assert "distance" not in r
     assert r["params"] and r["doc"]
+
+
+def test_render_with_distance_includes_rounded_key():
+    """render_catalog_block with explicit distance includes the rounded distance key."""
+    from grc_agent.adapter import render_catalog_block
+
+    r = render_catalog_block("blocks_throttle", distance=0.12345)
+    assert r is not None
+    assert r["distance"] == 0.123
+    r_zero = render_catalog_block("blocks_throttle", distance=0.0)
+    assert r_zero is not None
+    assert r_zero["distance"] == 0.0
+

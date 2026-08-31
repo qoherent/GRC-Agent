@@ -92,7 +92,7 @@ def ingest_catalog(  # noqa: C901
 
     for i, block_id in enumerate(block_ids):
         try:
-            rendered = render_catalog_block(block_id, distance=0.0)
+            rendered = render_catalog_block(block_id)
             if rendered:
                 text = _compose_catalog_text(rendered)
                 fts_rows.append((block_id, text))
