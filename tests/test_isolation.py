@@ -874,8 +874,11 @@ def test_system_prompt_keeps_unobservable_contracts():
         # Environment permission quirks: lock both so a future prompt
         # streamlining pass cannot silently drop either rule.
         "install the driver udev rules package",
+        "tun_alloc, TUNSETIFF",
         "CAP_NET_ADMIN",
         "ip tuntap add dev tap0 mode tap user $USER",
+        "run once, outside the app",
+        "persists across flowgraph restarts but not reboots",
         "Do not advise running the app as root or setcap-ing the interpreter",
     ):
         assert fragment in prompt, f"lost an unobservable contract: {fragment!r}"

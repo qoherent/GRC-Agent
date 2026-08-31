@@ -189,8 +189,9 @@ lexical automatically with a notice.
   Creating a named tun/tap interface requires the `CAP_NET_ADMIN` capability —
   a world-accessible `/dev/net/tun` is not enough, so a non-root run fails with
   an `EPERM` from `tun_alloc`/`TUNSETIFF`. The flowgraph is fine; pre-create a
-  persistent interface owned by your user, once and outside the app (substitute
-  the block's `ifname`, e.g. `tap0`):
+  persistent interface owned by your user, once and outside the app (match the
+  block's `ifname` and mode — the default is `tap0` in tap mode for Ethernet
+  frames; use `mode tun` for TUN/IP-packet blocks):
   ```bash
   sudo ip tuntap add dev tap0 mode tap user $USER
   ```
