@@ -27,13 +27,15 @@ from __future__ import annotations
 
 import json
 import logging
+import mimetypes
 import os
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, get_args
 
 from pydantic_ai.capabilities import AbstractCapability
+from pydantic_ai.messages import BinaryContent, ImageMediaType
 from pydantic_ai.tools import AgentDepsT
 
 # Private-but-stable helpers of the harness toolset: the error taxonomy
@@ -172,6 +174,12 @@ _WRITE_GRC_MSG = (
 )
 
 
+# Derived from pydantic-ai's ImageMediaType — the same upstream source the
+# chat sidebar derives its set from, so the file tool's image passthrough and
+# the composer's attachment gate cannot drift apart by construction.
+_IMAGE_MEDIA_TYPES: tuple[str, ...] = get_args(ImageMediaType)
+
+
 def _is_grc_name(name: str) -> bool:
     """One uniform flowgraph-name rule: any name containing `.grc` (case-insensitive).
 
@@ -265,8 +273,8 @@ class GrcFileSystemToolset(FileSystemToolset[AgentDepsT]):
     # -- read_file with .grc routing ---------------------------------------
 
     @_recoverable
-    async def read_file(self, path: str, *, offset: int = 0, limit: int | None = None) -> str:
-        """Read a text file with line numbers.
+    async def read_file(self, path: str, *, offset: int = 0, limit: int | None = None) -> str | BinaryContent:
+        """Read a file with line numbers; image files pass through whole.
 
         `.grc` files are never returned as raw XML — reading one yields the
         same structural inspection as the inspect_graph tool (topology,
@@ -275,19 +283,30 @@ class GrcFileSystemToolset(FileSystemToolset[AgentDepsT]):
         in the folder is loaded from disk. Use inspect_graph when you need a
         per-block (targets) view of the active graph.
 
+        Image files (pydantic-ai's `ImageMediaType` set, derived via
+        `get_args` so it cannot drift) are returned as `BinaryContent` so
+        vision-capable models receive the actual pixels in their multimodal
+        context — pydantic-ai's `ToolReturnContent` carries them natively —
+        instead of the parent's binary-placeholder string.
+
         Args:
             path: File path relative to the project directory.
             offset: Zero-based line offset to start reading from.
             limit: Maximum number of lines to return (default: 1000).
 
         Returns:
-            File content with line numbers, plus metadata header.
+            File content with line numbers, or the image as `BinaryContent`.
         """
         resolved = self._safe_resolve(path)
         if _is_grc_name(resolved.name):
             if not resolved.is_file():
                 raise FileNotFoundError(f"File not found: {path}")
             return self._inspect_grc_file(resolved)
+        media_type, _ = mimetypes.guess_type(resolved.name)
+        if media_type in _IMAGE_MEDIA_TYPES:
+            if not resolved.is_file():
+                raise FileNotFoundError(f"File not found: {path}")
+            return BinaryContent(data=resolved.read_bytes(), media_type=media_type)
         return await super().read_file(path, offset=offset, limit=limit)
 
     def _inspect_grc_file(self, resolved: Path) -> str:

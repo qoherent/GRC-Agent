@@ -585,3 +585,41 @@ def test_explicit_project_directory_without_open_graph(toolset, tmp_path, monkey
     out = read(toolset, "saved.grc")
     assert "structural view via the inspect_graph engine" in out
     assert "source: file on disk" in out
+
+
+def _png_bytes() -> bytes:
+    """Minimal valid 1x1 PNG built with the standard library (hermetic)."""
+    import struct
+    import zlib
+
+    def chunk(tag: bytes, data: bytes) -> bytes:
+        return (
+            struct.pack(">I", len(data)) + tag + data
+            + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF)
+        )
+
+    ihdr = struct.pack(">IIBBBBB", 1, 1, 8, 6, 0, 0, 0)
+    return (
+        b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr)
+        + chunk(b"IDAT", zlib.compress(b"\x00\xff\x00\x00\xff")) + chunk(b"IEND", b"")
+    )
+
+
+def test_read_file_image_passthrough(toolset, _saved, tmp_path):
+    """Reading an image returns BinaryContent (multimodal passthrough for
+    vision models), not the binary-placeholder string."""
+    from pydantic_ai.messages import BinaryContent
+
+    png = tmp_path / "spectrum.png"
+    png.write_bytes(_png_bytes())
+    result = read(toolset, "spectrum.png")
+    assert isinstance(result, BinaryContent)
+    assert result.media_type == "image/png"
+    assert result.data.startswith(b"\x89PNG")
+
+
+def test_read_file_image_missing_raises_filenotfound(toolset, _saved):
+    """Missing image paths raise the same ModelRetry('File not found') shape
+    as every other read_file path (uniform error contract)."""
+    with pytest.raises(ModelRetry, match="File not found"):
+        read(toolset, "missing.png")

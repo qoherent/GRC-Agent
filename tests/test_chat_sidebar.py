@@ -3836,3 +3836,27 @@ def test_render_history_multimodal(tmp_path):
         for row in sidebar._listbox.get_children()
         for w in _iter_widgets(row.get_child())
     )
+
+
+def test_drag_drop_registration_and_batch_attach(tmp_path):
+    """The sidebar is a URI-list drop target, and _attach_paths queues a whole
+    batch of files with one refresh (the same seam the chooser and drag use)."""
+    from gi.repository import Gdk
+
+    from grc_agent.chat_sidebar import ChatSidebar
+
+    sidebar = ChatSidebar()
+    targets = sidebar.drag_dest_get_target_list()
+    assert targets is not None
+    assert targets.find(Gdk.atom_intern("text/uri-list", False))
+
+    img_a, img_b = tmp_path / "a.png", tmp_path / "b.png"
+    _write_test_png(img_a)
+    _write_test_png(img_b)
+
+    sidebar._entry.set_sensitive(True)
+    sidebar._attach_paths([str(img_a), str(img_b)])
+    assert len(sidebar._attachments) == 2
+    assert len(sidebar._attachment_row.get_children()) == 2
+    sidebar._update_send_sensitivity()
+    assert sidebar._send_btn.get_sensitive()  # image-only send enabled

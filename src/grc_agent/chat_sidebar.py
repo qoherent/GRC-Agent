@@ -85,6 +85,10 @@ assert {_SUMMARY_ACTIONS_FIELD, _SUMMARY_EXPLANATION_FIELD} <= set(GrcAgentRespo
 # drift).
 _IMAGE_MEDIA_TYPES: tuple[str, ...] = get_args(ImageMediaType)
 
+# Target info id for the sidebar's uri-list drop target (single registered
+# target, so the id is a constant, not an index into a list).
+_DROP_TARGET_INFO = 0
+
 
 def _pixbuf_from_bytes(data: bytes, max_height: int | None = None) -> GdkPixbuf.Pixbuf | None:
     """Decode image bytes through GdkPixbuf's streaming loader (the standard
@@ -726,6 +730,16 @@ class ChatSidebar(Gtk.Box):
         super().__init__(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
         _apply_css()
         self.get_style_context().add_class("chat-sidebar")
+        # File-manager drag-and-drop: dropped files queue as pending image
+        # attachments through the same seam as the paperclip button. GTK3's
+        # widget-method DND API (drag_dest_set) with DestDefaults.ALL handles
+        # highlight + drop acceptance; drag-data-received does the work.
+        self.drag_dest_set(
+            Gtk.DestDefaults.ALL,
+            [Gtk.TargetEntry.new("text/uri-list", Gtk.TargetFlags.OTHER_APP, _DROP_TARGET_INFO)],
+            Gdk.DragAction.COPY,
+        )
+        self.connect("drag-data-received", self._on_drag_data_received)
         self._agent: Agent[Any, Any] | None = None
         self._executor_agent: Agent[Any, Any] | None = None
         self._planner_agent: Agent[Any, Any] | None = None
@@ -3036,13 +3050,43 @@ class ChatSidebar(Gtk.Box):
 
     def _on_attach_response(self, dialog: Gtk.FileChooserNative, response: int) -> None:
         if response == Gtk.ResponseType.ACCEPT:
-            for path in dialog.get_filenames():
-                self._add_attachment(path)
-            # One refresh per batch — _add_attachment only validates and
-            # queues, so multi-select costs one chip-row rebuild.
-            self._refresh_attachment_chips()
-            self._update_send_sensitivity()
+            self._attach_paths(dialog.get_filenames())
         dialog.destroy()
+
+    def _on_drag_data_received(
+        self,
+        _widget: Any,
+        _context: Any,
+        _x: int,
+        _y: int,
+        data: Gtk.SelectionData,
+        info: int,
+        _time: int,
+    ) -> None:
+        """Queue dropped files as pending attachments through the same
+        admission rule as the attach button. Non-file URIs (http, etc.) are
+        skipped — only local files can be attached; non-image files surface
+        the standard error bubble via _add_attachment."""
+        if info != _DROP_TARGET_INFO:
+            return
+        paths: list[str] = []
+        for uri in data.get_uris():
+            try:
+                path, _host = GLib.filename_from_uri(uri)
+            except (GLib.Error, ValueError):
+                continue
+            paths.append(path)
+        if paths:
+            self._attach_paths(paths)
+
+    def _attach_paths(self, paths: Sequence[str]) -> None:
+        """Queue a batch of image attachments — validation in
+        _add_attachment, exactly one chip-row refresh and sensitivity update
+        for the whole batch (chooser multi-select and drag-drop share it)."""
+        for path in paths:
+            self._add_attachment(path)
+        self._refresh_attachment_chips()
+        self._update_send_sensitivity()
 
     def _add_attachment(self, path: str) -> None:
         """Queue one image file as a pending attachment (validated, not yet

@@ -30,6 +30,7 @@ Active feature requests, architectural improvements, and planned capabilities. C
      - *Bounded Numerical Telemetry (Tier 1)*: Returns lightweight, strictly decimated statistics (peak $X/Y$ frequency, estimated SNR, RMS power, min/max/mean, DC offset, 16–32 decimated points) consuming < 100 tokens.
      - *Multimodal Visualization (Tier 2)*: Generates spectral power density (FFT), I/Q constellation diagrams, eye diagrams, or time-domain waterfall plots via matplotlib/PIL and returns `BinaryContent(data=png_bytes, media_type='image/png')` to vision LLMs when requested or when numerical stats indicate ambiguity.
   2. **Direct Image Files (`.png`, `.jpg`, `.jpeg`, `.svg`)**:
+     - *Status*: ✅ Partially shipped (`Unreleased`) — `read_file` passes project-dir `png/jpeg/gif/webp` through as `BinaryContent` into multimodal context (see Shipped Milestones). Remaining: `.svg` (not in pydantic-ai's `ImageMediaType`; needs rasterization or text fallback).
      - *Handling*: Direct binary reading and multimodal passthrough for flowgraph plot captures, UI diagrams, and schematic images in the project directory.
   3. **Tabular & Register Spreadsheets (`.xlsx`, `.csv`, `.tsv`)**:
      - *Handling*: Specialized structural parser that extracts sheet metadata, column schemas, and targeted row slices, or renders summary heatmap plots rather than dumping massive raw CSV text into prompt context.
@@ -107,7 +108,7 @@ Active feature requests, architectural improvements, and planned capabilities. C
 | **Unified Flowgraph Execution** | `0.4.0` / `0.5.0` | Unified `run_flowgraph(action='start'\|'stop')` tool, bounded runtime `stop_after_seconds`, GRC console streaming, and `exec_monitor` log retention. |
 | **Hybrid RAG & Catalog Docstring Enrichment** | `0.5.0` / `Unreleased` | Reciprocal Rank Fusion (RRF $k=60$) vector + FTS5 search, embedded C++ SWIG docstrings for parameter units, silenced ingestion log noise. |
 | **Prompt Streamlining & C++ Catalog Default** | `Unreleased` | ~42% prompt token reduction, C++ catalog default prioritization, NumPy/SciPy vectorization rules for EPBs, and safe udev permissions guidance. |
-| **Chat Image Input (Multimodal Prompts)** | `Unreleased` | Composer attach button + thumbnail chips, pydantic-ai `Sequence[UserContent]`/`BinaryContent` user prompts into `agent.iter()`, base64 session round-trip via the existing TypeAdapter store, and bubble/history thumbnails decoded at target scale. |
+| **Chat Image Input (Multimodal Prompts)** | `Unreleased` | Composer attach button + drag-and-drop with thumbnail chips, pydantic-ai `Sequence[UserContent]`/`BinaryContent` user prompts into `agent.iter()`, `read_file` image passthrough from the project dir into multimodal context, base64 session round-trip via the existing TypeAdapter store, and bubble/history thumbnails decoded at target scale. |
 
 ---
 
