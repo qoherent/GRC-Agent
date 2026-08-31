@@ -21,6 +21,7 @@ from grc_agent.adapter import (
     preview_flowgraph_py,
     set_param,
 )
+from grc_agent.adapter.graph import resolve_save_target, sanitize_id_stem
 from grc_agent.agent import inspect_graph_func
 
 
@@ -733,4 +734,95 @@ def test_change_graph_pre_existing_errors_not_penalized(temp_dial_tone):
     assert res_new_err["ok"] is False
     assert res_new_err["error_type"] == "validation_failed"
     assert any("bad_syntax_abc" in e["message"] for e in res_new_err["errors"])
+
+
+# ---------------------------------------------------------------------------
+# resolve_save_target / sanitize_id_stem — the pure, display-free naming
+# authority for flowgraph save targets (R3: derivation never clobbers; R5:
+# no project directory -> actionable directive error).
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_save_target_default_id_empty_dir(tmp_path):
+    path, stem = resolve_save_target(tmp_path, "default", None)
+    assert path == tmp_path / "untitled.grc"
+    assert stem == "untitled"
+
+
+def test_resolve_save_target_counters_avoid_clobbering(tmp_path):
+    (tmp_path / "untitled.grc").touch()
+    path1, stem1 = resolve_save_target(tmp_path, "default", None)
+    assert path1 == tmp_path / "untitled(1).grc"
+    assert stem1 == "untitled_1"  # pinned AE2: untitled(1).grc -> id untitled_1
+    (tmp_path / "untitled(1).grc").touch()
+    path2, stem2 = resolve_save_target(tmp_path, "default", None)
+    assert path2 == tmp_path / "untitled(2).grc"
+    assert stem2 == "untitled_2"
+
+
+def test_resolve_save_target_counter_takes_smallest_free_slot(tmp_path):
+    # untitled(1) was moved/deleted: the counter must take the smallest
+    # untitled(<n>).grc that is not present, not append past the gap.
+    (tmp_path / "untitled.grc").touch()
+    (tmp_path / "untitled(2).grc").touch()
+    path, _ = resolve_save_target(tmp_path, "default", None)
+    assert path == tmp_path / "untitled(1).grc"
+
+
+def test_resolve_save_target_non_default_id(tmp_path):
+    path, stem = resolve_save_target(tmp_path, "receiver", None)
+    assert path == tmp_path / "receiver.grc"
+    assert stem == "receiver"
+    # R3: derivation never clobbers — an existing same-stem file must not be
+    # overwritten by a derived untitled-page target either.
+    (tmp_path / "receiver.grc").touch()
+    path2, stem2 = resolve_save_target(tmp_path, "receiver", None)
+    assert path2 == tmp_path / "receiver(1).grc"
+    assert stem2 == "receiver_1"
+
+
+def test_resolve_save_target_titled_page_saves_in_place(tmp_path):
+    existing = tmp_path / "my_radio.grc"
+    existing.touch()
+    (tmp_path / "untitled.grc").touch()  # would-be derived name must be ignored
+    path, stem = resolve_save_target(tmp_path, "my_radio", existing)
+    assert path == existing  # identical path returned, nothing derived
+    assert stem is None  # no id rename for titled pages
+
+
+def test_resolve_save_target_derives_without_writing(tmp_path):
+    # Pure derivation: choosing a target must not create or modify any file.
+    before = sorted(p.name for p in tmp_path.iterdir())
+    resolve_save_target(tmp_path, "default", None)
+    assert sorted(p.name for p in tmp_path.iterdir()) == before
+
+
+@pytest.mark.parametrize("project_dir", [None, ""])
+def test_resolve_save_target_without_project_dir_raises_directive_error(project_dir):
+    # R5: the same actionable directive the fs tools raise when no project
+    # folder is configured (mirrors fs_tools._NO_ACTIVE_GRAPH_MSG).
+    with pytest.raises(ValueError, match="Select a Project directory"):
+        resolve_save_target(project_dir, "default", None)
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        ("untitled(1)", "untitled_1"),  # pinned AE2: invalid chars collapse at edges
+        ("receiver", "receiver"),  # valid id passes through unchanged
+        ("samp_rate_0", "samp_rate_0"),  # valid id passes through unchanged
+        ("_private_id", "_private_id"),  # edge underscores of a VALID id survive
+        ("1st_order", "_1st_order"),  # leading digit prefixed
+        ("my-flow", "my_flow"),  # invalid char -> underscore
+        ("a((--b", "a_b"),  # runs of invalid chars collapse to one underscore
+        ("untitled((2))", "untitled_2"),  # collapse + edge invalid chars dropped
+    ],
+)
+def test_sanitize_id_stem(raw, expected):
+    assert sanitize_id_stem(raw) == expected
+
+
+def test_sanitize_id_stem_is_idempotent():
+    for raw in ["untitled(1)", "receiver", "1st_order", "my-flow", "samp_rate_0", "_private_id"]:
+        assert sanitize_id_stem(sanitize_id_stem(raw)) == sanitize_id_stem(raw)
 

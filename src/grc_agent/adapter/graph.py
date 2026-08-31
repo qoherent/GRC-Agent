@@ -795,6 +795,85 @@ def _atomic_write_text(payload: str, path: Path) -> None:
         raise
 
 
+# GRC's DEFAULT_FLOW_GRAPH_ID (gnuradio.grc.core.Constants) — inlined as a
+# literal so this naming authority stays importable headless without pulling
+# gnuradio (adapter's gnuradio imports are lazy by contract, see get_platform).
+_DEFAULT_FLOW_GRAPH_ID = "default"
+
+# Directive wording mirrored from fs_tools._NO_ACTIVE_GRAPH_MSG (same gating
+# condition, same actionable fix). A module-level import of the constant is
+# impossible: fs_tools imports this module, so reaching back would be a
+# circular import — the wording is pinned by test instead.
+_NO_PROJECT_DIR_MSG = (
+    "No project directory is set or saved to disk, so there is no project folder to "
+    "operate in. Select a Project directory in the sidebar or save the flowgraph first."
+)
+
+
+def sanitize_id_stem(stem: str) -> str:
+    """Map a file stem to a GRC-safe options id (a Python identifier).
+
+    One uniform rule, applied identically to every stem: invalid identifier
+    characters at the edges are dropped, interior runs of them collapse to a
+    single underscore, and a leading digit is prefixed with ``_``. Valid
+    identifiers (including ones with edge underscores) pass through
+    unchanged, which makes the mapping idempotent — so re-deriving the id
+    from an already-derived id is a no-op.
+
+    The edge-dropping is what pins the SAVE_COPY-parity outcome
+    ``untitled(1).grc`` -> id ``untitled_1``: the trailing ``)`` sits at the
+    edge and is dropped, the interior ``(`` collapses to ``_``.
+    """
+    stem = re.sub(r"^[^0-9A-Za-z_]+|[^0-9A-Za-z_]+$", "", stem)
+    stem = re.sub(r"[^0-9A-Za-z_]+", "_", stem)
+    stem = re.sub(r"_+", "_", stem)
+    if stem[:1].isdigit():
+        stem = "_" + stem
+    return stem
+
+
+def resolve_save_target(
+    project_dir: str | Path | None,
+    options_id: str,
+    file_path: str | Path | None,
+) -> tuple[Path, str | None]:
+    """Resolve where an active flowgraph page saves, and the id it takes.
+
+    Pure, display-free naming authority (R3/R5): no GTK, no flowgraph object;
+    the only side effect allowed is filesystem *existence* checks — nothing
+    is created or written.
+
+    - Titled page (``file_path`` non-empty): re-saves in place. The existing
+      path is returned unchanged and the id stem is ``None`` — a titled page
+      derives nothing and takes no SAVE_AS-parity id rename.
+    - Untitled page: derives the target from the options id. GRC's default
+      id (``'default'``) names ``untitled.grc``; a non-default id names
+      ``<id>.grc`` (a GRC id already equals its file stem). Whenever the
+      candidate exists, the smallest ``<stem>(<n>).grc`` that is not present
+      wins (GRC's SAVE_COPY counter precedent) — derivation never clobbers.
+
+    Returns ``(path, id_stem)`` where ``id_stem`` is the sanitized id-safe
+    stem of the *chosen* file for the caller to apply via GRC's
+    SAVE_AS-parity options-id rename (``untitled(1)`` -> ``untitled_1``).
+
+    Raises:
+        ValueError: with the fs-tool directive wording when no project
+            directory is configured (same gate as the filesystem tools).
+    """
+    if not project_dir:
+        raise ValueError(_NO_PROJECT_DIR_MSG)
+    if file_path:
+        return Path(file_path), None
+    root = Path(project_dir)
+    stem = "untitled" if options_id == _DEFAULT_FLOW_GRAPH_ID else options_id
+    candidate = root / f"{stem}.grc"
+    n = 1
+    while candidate.exists():
+        candidate = root / f"{stem}({n}).grc"
+        n += 1
+    return candidate, sanitize_id_stem(candidate.stem)
+
+
 
 def _sanitize_data(data: Any) -> Any:
     """Recursively normalize non-breaking spaces (U+00A0) in strings, lists, and dicts."""
