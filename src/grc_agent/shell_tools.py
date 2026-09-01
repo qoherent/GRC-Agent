@@ -52,11 +52,8 @@ from pydantic_ai_harness.shell import LLM_API_KEY_ENV_PATTERNS
 from pydantic_ai_harness.shell._capability import _DEFAULT_DENIED_COMMANDS
 from pydantic_ai_harness.shell._toolset import ShellToolset, _recoverable
 
-from grc_agent.fs_tools import (
-    _NO_ACTIVE_GRAPH_MSG,
-    active_grc_path,
-    active_project_dir,
-)
+from grc_agent.adapter.graph import _NO_ACTIVE_GRAPH_MSG
+from grc_agent.fs_tools import active_grc_path, active_project_dir
 
 _log = logging.getLogger(__name__)
 

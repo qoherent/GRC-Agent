@@ -4,6 +4,7 @@ from grc_agent.adapter.block_library import (
 )
 from grc_agent.adapter.graph import (
     _atomic_write_text,
+    _fsync_directory,
     _serialize_flow_graph,
     change_graph,
     flow_graph_content_hash,
@@ -52,6 +53,7 @@ __all__ = [
     "LayoutModel",
     "_EMBEDDING_DIM_CACHE",
     "_atomic_write_text",
+    "_fsync_directory",
     "_cap_words",
     "_compute_layout_model",
     "_corpus_version",

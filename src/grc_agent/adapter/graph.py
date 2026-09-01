@@ -763,6 +763,24 @@ def inspect_graph(  # noqa: C901
     }
 
 
+def _fsync_directory(path: Path) -> None:
+    """Durably commit a just-replaced file entry in its containing directory
+    (the rename is not persistent until the directory entry itself is fsynced).
+    Best-effort on non-POSIX platforms (no os.O_DIRECTORY) and on transient
+    failures — the debug log carries the reason."""
+    try:
+        dir_fd = os.open(str(path), os.O_DIRECTORY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+    except AttributeError:
+        # os.O_DIRECTORY not available on non-POSIX platforms.
+        pass
+    except OSError as exc:
+        _log.debug("directory fsync failed for %s: %s", path, exc)
+
+
 def _atomic_write_text(payload: str, path: Path) -> None:
     """Atomically replace ``path``'s content with ``payload`` (temp → fsync →
     os.replace → directory fsync). Does NOT take a lock — callers that need
@@ -778,17 +796,7 @@ def _atomic_write_text(payload: str, path: Path) -> None:
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp, path)
-        try:
-            dir_fd = os.open(str(path.parent), os.O_DIRECTORY)
-            try:
-                os.fsync(dir_fd)
-            finally:
-                os.close(dir_fd)
-        except AttributeError:
-            # os.O_DIRECTORY not available on non-POSIX platforms.
-            pass
-        except OSError as exc:
-            _log.debug("directory fsync failed for %s: %s", path.parent, exc)
+        _fsync_directory(path.parent)
     except Exception:
         if os.path.exists(tmp):
             os.unlink(tmp)
@@ -800,11 +808,10 @@ def _atomic_write_text(payload: str, path: Path) -> None:
 # gnuradio (adapter's gnuradio imports are lazy by contract, see get_platform).
 _DEFAULT_FLOW_GRAPH_ID = "default"
 
-# Directive wording mirrored from fs_tools._NO_ACTIVE_GRAPH_MSG (same gating
-# condition, same actionable fix). A module-level import of the constant is
-# impossible: fs_tools imports this module, so reaching back would be a
-# circular import — the wording is pinned by test instead.
-_NO_PROJECT_DIR_MSG = (
+# Directive for every tool gated on an active project directory: the fs and
+# shell toolsets raise this same message (imported from here), so the wording
+# has exactly one source and cannot drift between tool families.
+_NO_ACTIVE_GRAPH_MSG = (
     "No project directory is set or saved to disk, so there is no project folder to "
     "operate in. Select a Project directory in the sidebar or save the flowgraph first."
 )
@@ -826,7 +833,6 @@ def sanitize_id_stem(stem: str) -> str:
     """
     stem = re.sub(r"^[^0-9A-Za-z_]+|[^0-9A-Za-z_]+$", "", stem)
     stem = re.sub(r"[^0-9A-Za-z_]+", "_", stem)
-    stem = re.sub(r"_+", "_", stem)
     if stem[:1].isdigit():
         stem = "_" + stem
     return stem
@@ -861,7 +867,7 @@ def resolve_save_target(
             directory is configured (same gate as the filesystem tools).
     """
     if not project_dir:
-        raise ValueError(_NO_PROJECT_DIR_MSG)
+        raise ValueError(_NO_ACTIVE_GRAPH_MSG)
     if file_path:
         return Path(file_path), None
     root = Path(project_dir)

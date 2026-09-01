@@ -65,6 +65,7 @@ _POLL_FULL_CHECK_EVERY = 10  # ~15s at the 1.5s poll interval
 
 from grc_agent.adapter import (
     _atomic_write_text,
+    _fsync_directory,
     _serialize_flow_graph,
     flow_graph_content_hash,
     get_blocks_panel_visibility,
@@ -549,17 +550,7 @@ class NativeFlowgraphProxy:
             with contextlib.suppress(OSError):
                 tmp.unlink()
             raise
-        try:
-            dir_fd = os.open(str(target.parent), os.O_DIRECTORY)
-            try:
-                os.fsync(dir_fd)
-            finally:
-                os.close(dir_fd)
-        except AttributeError:
-            # os.O_DIRECTORY not available on non-POSIX platforms.
-            pass
-        except OSError as exc:
-            _log.debug("directory fsync failed for %s: %s", target.parent, exc)
+        _fsync_directory(target.parent)
 
     @staticmethod
     def _finish_save(cm: Any, page: Any, fg: Any, target: Path, *, first_naming: bool) -> None:

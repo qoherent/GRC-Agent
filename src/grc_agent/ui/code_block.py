@@ -165,16 +165,6 @@ class CodeBlock(Gtk.Box):
         # realized preferred height exactly (verified: 322+12 == 334).
         # WrapMode.NONE means the height is width-independent, so this never
         # fights the horizontal scrollbar.
-        # construction pin is best-effort and the FIRST size-allocate re-pin
-        # is authoritative: this block is constructed UNPARENTED by
-        # MarkdownView.render and packed only afterwards, so the
-        # construction-time style context cannot see hierarchy-scoped CSS
-        # (the sidebar's zoom projection) — a block created while a
-        # projection is active would pin with the stale theme font and clip
-        # rows (verified live: pin 273 vs true content 363 at 1.5x). The
-        # first size-allocate necessarily happens after packing, when the
-        # style font is resolved, so the one-shot re-pin below re-measures
-        # with the authoritative font before the row is ever shown clipped.
         self._sw = sw
         self._tv = tv
         self._pinned_font_str = self.get_style_context().get_font(
@@ -242,8 +232,8 @@ class CodeBlock(Gtk.Box):
         unparented style context at that, so it is best-effort only); a
         mid-session rescale of the projected chat font (sidebar
         ``set_zoom_projection``) leaves it stale, which clips rows. The
-        style-updated font-watch, the first packing pass, and the sidebar's
-        projection sweeps all route through here, so every rendered block
+        style-updated font-watch and the sidebar's projection sweeps both
+        route through here, so every rendered block
         measures the font its packed style context actually resolves to."""
         height = self._measure_body_height()
         self._sw.set_size_request(-1, height)

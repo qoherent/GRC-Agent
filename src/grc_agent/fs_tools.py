@@ -56,7 +56,12 @@ from pydantic_ai_harness.filesystem._toolset import (
     _recoverable,
 )
 
-from grc_agent.adapter.graph import _atomic_write_text, inspect_graph, load_flow_graph
+from grc_agent.adapter.graph import (
+    _NO_ACTIVE_GRAPH_MSG,
+    _atomic_write_text,
+    inspect_graph,
+    load_flow_graph,
+)
 
 _log = logging.getLogger(__name__)
 
@@ -114,11 +119,6 @@ def active_project_dir() -> Path | None:
 
 # Placeholder root used only while no flowgraph or project folder is saved.
 _UNSAVED_ROOT = Path("/grc-agent-unsaved-root")
-
-_NO_ACTIVE_GRAPH_MSG = (
-    "No project directory is set or saved to disk, so there is no project folder to "
-    "operate in. Select a Project directory in the sidebar or save the flowgraph first."
-)
 
 # Read access is denied outright (the harness's own protected list only makes
 # these read-only): the project root may be a repo checkout whose .env holds
