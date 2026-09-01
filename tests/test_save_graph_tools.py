@@ -7,6 +7,7 @@ are duplicated here with the same shapes; the save-specific harness
 with its tests unchanged.
 """
 
+import stat
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -191,6 +192,31 @@ def test_save_no_project_dir_gives_fs_tool_directive(tmp_path, monkeypatch):
     with pytest.raises(ValueError, match="Select a Project directory"):
         asyncio.run(proxy.save_graph())
     assert seen == []
+
+
+def test_save_preserves_existing_target_file_mode(tmp_path, monkeypatch):
+    """R2 (review finding #11): mkstemp creates the temp file 0600, but a
+    native Ctrl+S open-w write preserves an existing target's mode — the
+    agent save must be mode-indistinguishable too."""
+    import os
+
+    events = []
+    platform, _ = _fake_platform(events)
+    target = tmp_path / "untitled.grc"
+    target.write_text("previous content")
+    os.chmod(target, 0o644)
+    page = _save_page(file_path=str(target), options_id="untitled")
+    proxy, *_ = _make_save_proxy(page, tmp_path, monkeypatch, events, platform)
+    # Not the hash-equal path: force the real write (sibling tests patch the
+    # same pair for the same reason — the real serializer imports gnuradio).
+    monkeypatch.setattr(
+        "grc_agent.native_canvas.flow_graph_content_hash", lambda _fg: "different"
+    )
+    import asyncio
+
+    result = asyncio.run(proxy.save_graph())
+    assert result["path"] == str(target)
+    assert (stat.S_IMODE(os.stat(target).st_mode)) == 0o644
 
 
 def test_save_untitled_happy_path_atomic_write_and_surface_tail(tmp_path, monkeypatch):

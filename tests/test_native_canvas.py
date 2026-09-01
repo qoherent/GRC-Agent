@@ -862,3 +862,30 @@ def test_zoom_wrapper_after_fit_and_raised_flag_clears_before_user_zoom():
 
     da.zoom_in()
     assert len(fired) == 1 and fired[0] == da.zoom_factor
+
+
+def test_page_switch_refires_projection_with_new_page_zoom():
+    """R8 (review finding #5): GRC stores zoom per DrawingArea and a tab
+    switch never runs the _set_zoom_factor wrapper, so the sidebar's
+    projection must be re-fired from the switch handler with the newly
+    foregrounded page's zoom — otherwise the chat keeps projecting the
+    PREVIOUS page's zoom."""
+    from types import SimpleNamespace
+
+    from grc_agent.native_canvas import NativeCanvasManager
+
+    def fake_da(zoom):
+        return SimpleNamespace(zoom_factor=zoom, _set_zoom_factor=lambda *_: None)
+
+    da2 = fake_da(2.25)
+    page2 = SimpleNamespace(drawing_area=da2)
+    cm = NativeCanvasManager.__new__(NativeCanvasManager)
+    cm.window = SimpleNamespace(current_page=page2)
+    cm._highlight_block_name = None
+    cm._setup_drawing_area = lambda *_a: None  # property resolves via current_page
+    cm._sync_page_baselines = lambda: None
+    cm.on_graphs_changed = None
+    fired = []
+    cm.on_zoom_changed = fired.append
+    cm._on_page_switched(None, None, 1)
+    assert fired == [2.25]

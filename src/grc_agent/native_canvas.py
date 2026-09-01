@@ -5,6 +5,7 @@ import hashlib
 import logging
 import math
 import os
+import stat
 import tempfile
 from collections.abc import Callable
 from pathlib import Path
@@ -411,9 +412,11 @@ class NativeFlowgraphProxy:
         }
 
     async def save_graph(self) -> dict:
-        """Save the active flowgraph into the project directory through GRC's
-        native platform serializer — the agent-side equivalent of Ctrl+S, with
-        no modal dialog and no user interaction.
+        """Save the active flowgraph through GRC's native platform
+        serializer — the agent-side equivalent of Ctrl+S, with no modal
+        dialog and no user interaction. An untitled page is named by the
+        pure derivation rules and lands in the project directory; a titled
+        page saves in place at its existing path.
 
         Naming (titled in place vs derived untitled target), collision
         avoidance, and the project-directory gate are the pure U1 rules
@@ -452,8 +455,12 @@ class NativeFlowgraphProxy:
             raise ValueError(f"Could not save {target.name}: {reason}")
 
         # Guard (1), reused from the U1 helper: no project directory is the
-        # filesystem tools' gating error, verbatim. Every save lands inside
-        # the project sandbox — titled pages included.
+        # filesystem tools' gating error, verbatim. UNTITLED derivations land
+        # inside the project sandbox; a TITLED page saves in place at its
+        # existing path (native Ctrl+S semantics per the naming law), which
+        # CAN lie outside the sandbox — the fs/shell toolsets' containment
+        # does not apply to in-place saves, and the per-graph lock directory
+        # (.grc_agent/) is created beside such targets deliberately.
         options_id = fg.options_block.params["id"].get_value()
         target, id_stem = resolve_save_target(
             fs_tools.active_project_dir(), options_id, page.file_path
@@ -545,6 +552,16 @@ class NativeFlowgraphProxy:
             cm.platform.save_flow_graph(str(tmp), fg)
             with open(tmp, "r+b") as f:
                 os.fsync(f.fileno())
+            # Ctrl+S file-mode parity (R2): mkstemp creates the temp file
+            # 0600, but GRC's native open-w preserves an existing target's
+            # mode and applies the umask for new files. Mirror both so an
+            # agent-saved .grc is byte- AND mode-indistinguishable.
+            if target.exists():
+                os.chmod(tmp, stat.S_IMODE(os.stat(target).st_mode))
+            else:
+                umask = os.umask(0)
+                os.umask(umask)
+                os.chmod(tmp, 0o666 & ~umask)
             os.replace(tmp, target)
         except BaseException:
             with contextlib.suppress(OSError):
@@ -1108,6 +1125,14 @@ class NativeCanvasManager:
         self._highlight_block_name = None
         self._setup_drawing_area()
         self._sync_page_baselines()
+        # GRC stores zoom per DrawingArea and a tab switch never runs the
+        # _set_zoom_factor wrapper (its single fire site), so the sidebar's
+        # projection would keep showing the PREVIOUS page's zoom. Re-fire
+        # the callback with the newly foregrounded page's zoom (R8: the
+        # projection always mirrors the canvas the user is looking at).
+        da = getattr(self, "drawing_area", None)
+        if da is not None and self.on_zoom_changed is not None:
+            self.on_zoom_changed(getattr(da, "zoom_factor", 1.0))
         if self.on_graphs_changed:
             self.on_graphs_changed()
 

@@ -4218,3 +4218,41 @@ def test_chat_ctrl_scroll_zooms_canvas_and_consumes_gesture():
     assert scroll_event(Gdk.ScrollDirection.SMOOTH, Gdk.ModifierType.CONTROL_MASK) is False
     cm.drawing_area.zoom_in.assert_called_once()
     win.destroy()
+
+
+def test_zoom_projection_same_multiplier_is_noop():
+    """R9 (review finding #8): the canvas clamp band is wider than the
+    sidebar's, so real zoom changes at the clamped tails can project an
+    IDENTICAL multiplier — the second application must be a pure no-op (no
+    CSS reload)."""
+    import gi
+
+    gi.require_version("Gtk", "3.0")
+    from gi.repository import Gtk
+
+    from grc_agent.chat_sidebar import ChatSidebar
+
+    sidebar = ChatSidebar()
+    win = Gtk.OffscreenWindow()
+    win.set_default_size(400, 300)
+    win.add(sidebar)
+    win.show_all()
+    _settle_events()
+
+    sidebar.set_zoom_projection(2.25)  # sqrt(2.25) = 1.5 (inside clamp)
+    _settle_events()
+    assert sidebar._zoom_css_provider is not None
+
+    reloads = []
+    orig = sidebar._zoom_css_provider.load_from_data
+    sidebar._zoom_css_provider.load_from_data = lambda data: (
+        reloads.append(data) or orig(data)
+    )
+    # The applied multiplier is 1.5 (from zoom 2.25). Repeating 2.25 no-ops;
+    # 4.0 clamps to 1.8 (a REAL multiplier change -> exactly one reload);
+    # 4.84 also clamps to 1.8 -> no-op again.
+    sidebar.set_zoom_projection(2.25)
+    sidebar.set_zoom_projection(4.0)
+    sidebar.set_zoom_projection(4.84)
+    assert len(reloads) == 1
+    win.destroy()

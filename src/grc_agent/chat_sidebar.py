@@ -782,6 +782,12 @@ class ChatSidebar(Gtk.Box):
         # never persisted and never written by the canvas side.
         self._zoom_css_provider: Gtk.CssProvider | None = None
         self._zoom_css_base_px: float | None = None
+        # Last multiplier actually applied (R9): the canvas clamp band is
+        # wider than the sidebar's, so zoom steps at the clamped tails fire
+        # on_zoom_changed with a REAL canvas zoom change whose projected
+        # multiplier is identical — reload + sweeps would be pure no-op work
+        # on every wheel tick there.
+        self._zoom_css_last_multiplier: float | None = None
         # The anchor-preserving settle idle below can outlive a destroyed
         # window (tests destroy their windows immediately after a
         # projection; the idle source holds the sidebar alive). One destroy
@@ -3768,6 +3774,12 @@ class ChatSidebar(Gtk.Box):
         load_from_data (no remove/re-add), always on the unified main loop —
         this runs on GTK's default GMainContext, exactly where
         on_zoom_changed fires."""
+        # Same-value early return (mirrors GRC's own _set_zoom_factor
+        # discipline): the projection is a pure function of the multiplier,
+        # so re-applying an identical one is a no-op — skip the reload, the
+        # metric flush, the re-pin sweep, and the anchor idle entirely.
+        if multiplier == self._zoom_css_last_multiplier:
+            return
         # Snapshot the near-bottom anchor BEFORE the CSS lands (plan
         # Approach 2): a font inflate changes the list geometry mid-stream,
         # and the snapshot has to describe the pre-relayout viewport.
@@ -3789,6 +3801,7 @@ class ChatSidebar(Gtk.Box):
             f".chat-sidebar {{ font-size: {self._zoom_css_base_px * multiplier:.4f}px; }}"
         )
         self._zoom_css_provider.load_from_data(css.encode("utf-8"))
+        self._zoom_css_last_multiplier = multiplier
         # Anchor-preserving re-pin lands after the reload, on one idle.
         GLib.idle_add(self._settle_projection_layout, was_near_bottom)
 
