@@ -26,15 +26,12 @@ _log = logging.getLogger(__name__)
 # of them as visible regardless. Replicating that collapsing correctly would
 # mean hardcoding which params group together and how, per block family —
 # exactly the "no hand-picked heuristics" this codebase avoids elsewhere. A
-# single, generously-sized constant is the more honest fix: it costs some
-# wasted canvas space for simple blocks, in exchange for not silently
-# overlapping busier ones (live-reproduced: a Signal Source with 6 visible
-# rows — samp_rate/waveform/freq/amp/offset/phase — placed exactly
-# BLOCK_FOOTPRINT_H=100 above a newly-added sink rendered tall enough to
-# visibly overlap it, since 100 was sized for a near-empty block).
-BLOCK_FOOTPRINT_W = 300
-BLOCK_FOOTPRINT_H = 220
-BLOCK_SPACING = 60
+# single, calibrated constant is the more honest fix: it minimizes
+# wasted canvas space while not silently overlapping busier ones (e.g.
+# a Signal Source with 6 visible rows renders ~160px tall).
+BLOCK_FOOTPRINT_W = 200
+BLOCK_FOOTPRINT_H = 168
+BLOCK_SPACING = 32
 
 # One grid step in each axis — a block's footprint plus the spacing gap.
 # Used by the full-relayout grid in compute_full_layout/_place_flow_components.
