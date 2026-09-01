@@ -3022,6 +3022,21 @@ class ChatSidebar(Gtk.Box):
             if isinstance(toplevel, Gtk.Window):
                 toplevel.set_focus(None)
             return True
+        if (
+            event.state & Gdk.ModifierType.CONTROL_MASK
+            and event.keyval in (Gdk.KEY_v, Gdk.KEY_V)
+        ):
+            # Clipboard-first paste: a copied IMAGE (screenshot, copy-image)
+            # never reaches the TextView's text paste path, so intercept it
+            # here and queue it as a pending attachment. Text clipboards fall
+            # through to the default paste (return False).
+            clipboard = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
+            if clipboard.wait_is_image_available():
+                pixbuf = clipboard.wait_for_image()
+                if pixbuf is not None:
+                    self._attach_pixbuf(pixbuf)
+                    return True
+            return False
         if event.keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter):
             if event.state & Gdk.ModifierType.SHIFT_MASK:
                 pos = self._entry.get_position()
@@ -3059,24 +3074,31 @@ class ChatSidebar(Gtk.Box):
         self.send_message(prompt)
 
     def _on_attach_clicked(self, _btn: Gtk.Button) -> None:
-        toplevel = self.get_toplevel()
-        native = Gtk.FileChooserNative.new(
-            "Attach image",
-            toplevel if isinstance(toplevel, Gtk.Window) else None,
-            Gtk.FileChooserAction.OPEN,
-            "_Attach",
-            "_Cancel",
+        """In-app file chooser (the same Gtk.FileChooserDialog pattern the
+        Project-directory picker uses). FileChooserNative was rejected here:
+        under Wayland it round-trips through xdg-desktop-portal, and when
+        that fails it presents NOTHING — silently. A plain dialog always
+        renders in-app on both X11 and Wayland."""
+        top = self.get_toplevel()
+        parent_win = top if isinstance(top, Gtk.Window) else None
+        dialog = Gtk.FileChooserDialog(
+            title="Attach image",
+            parent=parent_win,
+            action=Gtk.FileChooserAction.OPEN,
         )
-        native.set_select_multiple(True)
+        dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
+        dialog.add_button("_Attach", Gtk.ResponseType.ACCEPT)
+        dialog.set_default_response(Gtk.ResponseType.ACCEPT)
+        dialog.set_select_multiple(True)
         file_filter = Gtk.FileFilter()
         file_filter.set_name("Images")
         for mime in _IMAGE_MEDIA_TYPES:
             file_filter.add_mime_type(mime)
-        native.add_filter(file_filter)
-        native.connect("response", self._on_attach_response)
-        native.show()
+        dialog.add_filter(file_filter)
+        dialog.connect("response", self._on_attach_response)
+        dialog.show()
 
-    def _on_attach_response(self, dialog: Gtk.FileChooserNative, response: int) -> None:
+    def _on_attach_response(self, dialog: Gtk.Dialog, response: int) -> None:
         if response == Gtk.ResponseType.ACCEPT:
             self._attach_paths(dialog.get_filenames())
         dialog.destroy()
@@ -3106,6 +3128,23 @@ class ChatSidebar(Gtk.Box):
             paths.append(path)
         if paths:
             self._attach_paths(paths)
+
+    def _attach_pixbuf(self, pixbuf: GdkPixbuf.Pixbuf) -> None:
+        """Queue a clipboard image as a pending attachment.
+
+        The pixbuf is written to a timestamped PNG in the platform temp dir
+        (BinaryContent reads from a path), then routed through the same
+        admission seam as the paperclip button, and the status bar confirms
+        it — paste has no other visible surface."""
+        import datetime
+        import os
+        import tempfile
+
+        stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+        path = os.path.join(tempfile.gettempdir(), f"chat-paste-{stamp}.png")
+        pixbuf.savev(path, "png", [], [])
+        self._attach_paths([path])
+        self.set_status("Image pasted — attached to the next message.")
 
     def _attach_paths(self, paths: Sequence[str]) -> None:
         """Queue a batch of image attachments — validation in

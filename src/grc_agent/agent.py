@@ -82,7 +82,7 @@ def build_scenario_model(provider: str, model_name: str | None = None) -> Any:
     if provider == "ollama_cloud":
         key = os.environ.get("OLLAMA_CLOUD_API_KEY", "")
         return OllamaModel(
-            model_name or os.environ.get("OLLAMA_CLOUD_MODEL", "glm-5.3-flash:cloud"),
+            model_name or os.environ.get("OLLAMA_CLOUD_MODEL", "deepseek-v4-flash:0731"),
             provider=OllamaProvider(
                 base_url="https://ollama.com/v1",
                 api_key=key,

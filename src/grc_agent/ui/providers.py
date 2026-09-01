@@ -90,7 +90,7 @@ assert all(PROVIDER_API_KEY.get(p) for p in PROVIDER_KEY_OPTIONAL), (
 
 PROVIDER_MODEL_PLACEHOLDER = {
     "ollama_local": "qwen3.8:latest",
-    "ollama_cloud": "glm-5.3-flash:cloud — click Load to list yours",
+    "ollama_cloud": "deepseek-v4-flash:0731 — click Load to list yours",
     "openrouter": "z-ai/glm-5.3-flash, anthropic/claude-sonnet-5…",
     "openai": "gpt-5.6-terra — click Load to list yours",
     "openai_compatible": "model id served by your endpoint",

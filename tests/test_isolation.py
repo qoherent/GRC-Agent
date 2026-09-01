@@ -134,11 +134,11 @@ def test_build_model_isolation(tmp_path, monkeypatch):
     upsert_env_key("OLLAMA_API_KEY", "dummy-test-key")
     cfg = {
         "provider": "ollama_cloud",
-        "model": "glm-5.3-flash:cloud",
+        "model": "deepseek-v4-flash:0731",
     }
     m = _build_model(cfg, http_client)
     assert isinstance(m, OllamaModel)
-    assert m.model_name == "glm-5.3-flash:cloud"
+    assert m.model_name == "deepseek-v4-flash:0731"
 
     cfg = {
         "provider": "openai_compatible",
@@ -157,9 +157,9 @@ def test_scenario_model_builder_uses_provider(monkeypatch):
     ollama = build_scenario_model("ollama")
     assert isinstance(ollama, OllamaModel)
 
-    ollama_cloud = build_scenario_model("ollama_cloud", "glm-5.3-flash:cloud")
+    ollama_cloud = build_scenario_model("ollama_cloud", "deepseek-v4-flash:0731")
     assert isinstance(ollama_cloud, OllamaModel)
-    assert ollama_cloud.model_name == "glm-5.3-flash:cloud"
+    assert ollama_cloud.model_name == "deepseek-v4-flash:0731"
 
     openrouter = build_scenario_model("openrouter", "z-ai/glm-5.3-flash")
     assert isinstance(openrouter, OpenAIChatModel)
@@ -246,7 +246,7 @@ def test_build_model_ollama_cloud_raises_on_missing_api_key(tmp_path, monkeypatc
         _build_model(
             {
                 "provider": "ollama_cloud",
-                "model": "glm-5.3-flash:cloud",
+                "model": "deepseek-v4-flash:0731",
                 "ollama_base_url": "https://ollama.com/v1",
             },
             http_client,
@@ -786,11 +786,11 @@ def test_ollama_cloud_model_builds_and_runs():
     # constructor here, or a regression in _build_model's cloud path would
     # pass unnoticed.
     model = _build_model(
-        {"provider": "ollama_cloud", "model": "glm-5.3-flash:cloud"},
+        {"provider": "ollama_cloud", "model": "deepseek-v4-flash:0731"},
         _retrying_http_client(),
     )
     assert isinstance(model, OllamaModel)
-    assert model.model_name == "glm-5.3-flash:cloud"
+    assert model.model_name == "deepseek-v4-flash:0731"
 
     # Run a real agent turn against Ollama Cloud
     import asyncio
@@ -929,7 +929,7 @@ def test_build_agents_from_cfg_produces_correct_model_type_per_provider(tmp_path
     )
 
     # ollama (remote/cloud)
-    save_settings("ollama_cloud", "glm-5.3-flash:cloud")
+    save_settings("ollama_cloud", "deepseek-v4-flash:0731")
     upsert_env_key("OLLAMA_API_KEY", "dummy-key-for-build-test")
     agent_cloud = build_agents_from_cfg(load_settings()).executor
     assert isinstance(agent_cloud.model, OllamaModel), (
@@ -1028,7 +1028,7 @@ def test_live_swap_rebuilds_agent_with_new_provider(tmp_path, monkeypatch):
     # 1. Boot with ollama cfg + a dummy key. We never send a real
     #    request on this agent, so the dummy key is fine — it just exercises
     #    the build path and gives us a baseline agent to "swap away from".
-    save_settings("ollama_cloud", "glm-5.3-flash:cloud")
+    save_settings("ollama_cloud", "deepseek-v4-flash:0731")
     upsert_env_key("OLLAMA_API_KEY", "dummy-boot-key-not-used")
     agent1 = build_agents_from_cfg(load_settings()).executor
     assert isinstance(agent1.model, OllamaModel)
@@ -2472,7 +2472,7 @@ def test_hybrid_fusion_when_both_indexes_present(tmp_path, monkeypatch):
 def test_ollama_cloud_has_dedicated_model_slot(tmp_path, monkeypatch):
     """Local and cloud Ollama keep separate model settings: switching provider
     preserves each one's saved name, the cloud default is the cloud-tier
-    glm-5.3-flash:cloud (not the local quantized default), and Save writes
+    deepseek-v4-flash:0731 (not the local quantized default), and Save writes
     OLLAMA_CLOUD_MODEL — not OLLAMA_CHAT_MODEL — when cloud is active."""
     env = tmp_path / ".env"
     monkeypatch.setenv("GRC_AGENT_ENV", str(env))
@@ -2480,23 +2480,23 @@ def test_ollama_cloud_has_dedicated_model_slot(tmp_path, monkeypatch):
     # Defaults: each slot starts from its own tier-appropriate default.
     cfg = load_settings()
     assert cfg["ollama_model"] == "qwen3.8:latest"
-    assert cfg["ollama_cloud_model"] == "glm-5.3-flash:cloud"
+    assert cfg["ollama_cloud_model"] == "deepseek-v4-flash:0731"
 
     # Save a local model, then switch to cloud with a cloud model.
     save_settings("ollama_local", "qwen3.6:35b-a3b-q4_K_M")
-    save_settings("ollama_cloud", "glm-5.3-flash:cloud")
+    save_settings("ollama_cloud", "deepseek-v4-flash:0731")
     cfg = load_settings()
     assert cfg["provider"] == "ollama_cloud"
-    assert cfg["model"] == "glm-5.3-flash:cloud"
-    assert cfg["ollama_cloud_model"] == "glm-5.3-flash:cloud"
+    assert cfg["model"] == "deepseek-v4-flash:0731"
+    assert cfg["ollama_cloud_model"] == "deepseek-v4-flash:0731"
     # The local slot is untouched by the cloud save.
     assert cfg["ollama_model"] == "qwen3.6:35b-a3b-q4_K_M"
 
     content = env.read_text(encoding="utf-8")
-    assert "OLLAMA_CLOUD_MODEL=glm-5.3-flash:cloud" in content
+    assert "OLLAMA_CLOUD_MODEL=deepseek-v4-flash:0731" in content
 
     # Switching back to local restores the local name — no shared-key bleed.
     save_settings("ollama_local", cfg["ollama_model"])
     cfg = load_settings()
     assert cfg["model"] == "qwen3.6:35b-a3b-q4_K_M"
-    assert cfg["ollama_cloud_model"] == "glm-5.3-flash:cloud"  # preserved
+    assert cfg["ollama_cloud_model"] == "deepseek-v4-flash:0731"  # preserved

@@ -52,7 +52,7 @@ pytestmark = [
     ),
 ]
 
-_CLOUD_MODEL = os.getenv("OLLAMA_CLOUD_MODEL", "glm-5.3-flash:cloud")
+_CLOUD_MODEL = os.getenv("OLLAMA_CLOUD_MODEL", "deepseek-v4-flash:0731")
 _DIAL_TONE = str(Path("tests/data/dial_tone.grc").resolve())
 _EMPTY = str(Path("tests/data/empty.grc").resolve())
 

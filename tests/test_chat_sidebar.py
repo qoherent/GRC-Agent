@@ -4256,3 +4256,97 @@ def test_zoom_projection_same_multiplier_is_noop():
     sidebar.set_zoom_projection(4.84)
     assert len(reloads) == 1
     win.destroy()
+
+
+def test_attach_button_opens_in_app_file_chooser():
+    """The paperclip opens an in-app Gtk.FileChooserDialog (always renders,
+    no xdg-desktop-portal round-trip) with multi-select and the image
+    filter — the FileChooserNative portal path previously presented
+    nothing at all on Wayland sessions."""
+    import gi
+
+    gi.require_version("Gtk", "3.0")
+    from gi.repository import Gtk
+
+    from grc_agent.chat_sidebar import ChatSidebar
+
+    sidebar = ChatSidebar()
+    win = Gtk.OffscreenWindow()
+    win.set_default_size(400, 300)
+    win.add(sidebar)
+    win.show_all()
+    _settle_events()
+
+    sidebar._attach_btn.emit("clicked")
+    _settle_events()
+
+    dialogs = [w for w in Gtk.Window.list_toplevels()
+               if isinstance(w, Gtk.FileChooserDialog)]
+    assert dialogs, "no file chooser appeared after clicking attach"
+    dialog = dialogs[0]
+    assert dialog.get_select_multiple()
+    filters = dialog.list_filters()
+    assert filters and any(f.get_name() == "Images" for f in filters)
+    dialog.destroy()
+    win.destroy()
+
+
+def test_ctrl_v_with_clipboard_image_attaches_png():
+    """Ctrl+V with a copied IMAGE queues it as a pending attachment (chip
+    row visible) and consumes the keystroke; a text clipboard falls through
+    (returns False) so normal paste keeps working."""
+    import time
+
+    import gi
+
+    gi.require_version("Gtk", "3.0")
+    from gi.repository import Gdk, GdkPixbuf, Gtk
+
+    from grc_agent.chat_sidebar import ChatSidebar
+
+    sidebar = ChatSidebar()
+    win = Gtk.OffscreenWindow()
+    win.set_default_size(420, 320)
+    win.add(sidebar)
+    win.show_all()
+    _settle_events()
+
+    pixbuf = GdkPixbuf.Pixbuf.new(GdkPixbuf.Colorspace.RGB, True, 8, 12, 8)
+    clipboard = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
+    # store() ownership negotiation is asynchronous and racy under load —
+    # re-assert ownership each round until the content is actually readable.
+    for _ in range(150):
+        clipboard.set_image(pixbuf)
+        clipboard.store()
+        _settle_events()
+        if clipboard.wait_is_image_available():
+            break
+        time.sleep(0.02)
+
+    # Synthesize a Ctrl+V key event: a raw Gdk event with the fields the
+    # handler reads.
+    ev = Gdk.EventKey()
+    ev.type = Gdk.EventType.KEY_PRESS
+    ev.keyval = Gdk.KEY_v
+    ev.state = Gdk.ModifierType.CONTROL_MASK
+    handled = sidebar._on_entry_key_press(sidebar._entry, ev)
+    assert handled is True
+    assert len(sidebar._attachments) == 1
+    assert sidebar._attachments[0].media_type == "image/png"
+    assert sidebar._attachment_row.get_visible()
+
+    # Text clipboard: falls through (default text paste), nothing attached.
+    for _ in range(150):
+        clipboard.set_text("plain note", -1)
+        clipboard.store()
+        _settle_events()
+        if not clipboard.wait_is_image_available():
+            break
+        time.sleep(0.02)
+    ev2 = Gdk.EventKey()
+    ev2.type = Gdk.EventType.KEY_PRESS
+    ev2.keyval = Gdk.KEY_v
+    ev2.state = Gdk.ModifierType.CONTROL_MASK
+    assert sidebar._on_entry_key_press(sidebar._entry, ev2) is False
+    assert len(sidebar._attachments) == 1
+    win.destroy()

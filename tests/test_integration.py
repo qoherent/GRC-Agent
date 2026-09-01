@@ -125,7 +125,7 @@ def _build_model_for_backend(backend: str):
         return build_scenario_model(backend, _OPENROUTER_DEFAULT_MODEL)
     if backend == "ollama_cloud":
         return build_scenario_model(
-            "ollama_cloud", os.getenv("OLLAMA_CLOUD_MODEL", "glm-5.3-flash:cloud")
+            "ollama_cloud", os.getenv("OLLAMA_CLOUD_MODEL", "deepseek-v4-flash:0731")
         )
     return build_scenario_model("ollama")
 
@@ -435,7 +435,7 @@ def test_scenario_lexical_fallback_ollama_cloud_only(monkeypatch):
     with _broken_embedding_env(monkeypatch):
         try:
             model = build_scenario_model(
-                "ollama_cloud", os.getenv("OLLAMA_CLOUD_MODEL", "glm-5.3-flash:cloud")
+                "ollama_cloud", os.getenv("OLLAMA_CLOUD_MODEL", "deepseek-v4-flash:0731")
             )
             agent = Agent(
                 model,

@@ -17,7 +17,7 @@ Env vars (resolved by env_path(): GRC_AGENT_ENV override -> repo-root `.env`
                             (default: lexical)
   OLLAMA_CHAT_MODEL         Ollama chat model (local daemon)
   OLLAMA_CLOUD_MODEL        Ollama Cloud chat model (cloud-tier names like
-                            glm-5.3-flash:cloud — separate from local)
+                            deepseek-v4-flash:0731 — separate from local)
   OPENROUTER_MODEL          OpenRouter chat model
   OPENAI_MODEL              OpenAI API chat model
   OPENAI_COMPATIBLE_MODEL   other OpenAI-compatible chat model
@@ -97,7 +97,7 @@ _PROVIDER_MODEL_KEY = {
 
 _DEFAULT_MODELS = {
     "ollama_model": "qwen3.8:latest",
-    "ollama_cloud_model": "glm-5.3-flash:cloud",
+    "ollama_cloud_model": "deepseek-v4-flash:0731",
     "openrouter_model": "z-ai/glm-5.3-flash",
     "openai_model": "gpt-5.6-terra",
     "openai_compatible_model": "deepseek/deepseek-v4-flash",
