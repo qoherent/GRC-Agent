@@ -1018,3 +1018,135 @@ def test_tool_description_budget_and_omission_convention():
     assert "omitted_" in inspect_desc, (
         "inspect_graph must state that a missing omission counter means nothing was hidden"
     )
+
+
+def test_change_graph_reports_whether_it_persisted(temp_dial_tone):
+    """ok:true on an unsaved page must not read as "written to disk"."""
+    fg = load_flow_graph(str(temp_dial_tone))
+    res = change_graph(fg, update_params=[{"instance_name": "samp_rate", "params": {"value": "48000"}}])
+    assert res["ok"] is True and res["persisted"] is True
+
+    # An in-memory-only graph (no file path) mutates but persists nothing.
+    from grc_agent.adapter.graph import get_platform
+
+    memfg = get_platform().make_flow_graph()
+    memfg.grc_file_path = ""
+    res = change_graph(
+        memfg,
+        add_blocks=[{"block_id": "blocks_null_sink", "instance_name": "sink_0"}],
+        force=True,
+    )
+    assert res["ok"] is True
+    assert res["persisted"] is False, "an unwritten mutation must say so"
+
+
+def test_rollback_reports_a_partial_restore(temp_dial_tone, monkeypatch):
+    """import_data reports a partial restore by return value, not by raising.
+
+    GNU Radio's own docstring: "any blocks or connections in error will be
+    ignored", returning connection_error. Discarding that made a rollback
+    that silently dropped wiring look identical to a clean one.
+    """
+    from grc_agent.adapter import graph as graph_mod
+
+    fg = load_flow_graph(str(temp_dial_tone))
+    initial = fg.export_data()
+
+    def partial_import(self, data):  # noqa: ARG001
+        return True  # GNU Radio's "connection_error" signal
+
+    monkeypatch.setattr(type(fg), "import_data", partial_import, raising=False)
+    err = graph_mod._revert_flow_graph(fg, initial)
+    assert err is not None and "dropped" in err.lower()
+
+
+def test_rollback_reports_a_disk_reload_substitution(temp_dial_tone, monkeypatch):
+    """Falling back to the on-disk file is not a clean revert.
+
+    The file is not initial_data: any unsaved manual canvas edit made before
+    the call is destroyed by the reload, and reporting success hid that.
+    """
+    from grc_agent.adapter import graph as graph_mod
+
+    fg = load_flow_graph(str(temp_dial_tone))
+    initial = fg.export_data()
+
+    calls = {"n": 0}
+
+    def flaky_import(self, data):  # noqa: ARG001
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("in-memory restore blew up")
+        return False
+
+    monkeypatch.setattr(type(fg), "import_data", flaky_import, raising=False)
+    err = graph_mod._revert_flow_graph(fg, initial)
+    assert err is not None
+    assert "reloaded from" in err and "unsaved manual edits" in err
+
+
+def test_relayout_flag_is_false_when_the_layout_threw(temp_dial_tone, monkeypatch):
+    """relayout was derived from the request, so a failed layout still
+    claimed one happened and the canvas fitted a view to stale coordinates."""
+    from grc_agent.adapter import graph as graph_mod
+
+    def boom(*_a, **_k):
+        raise RuntimeError("grandalf exploded")
+
+    monkeypatch.setattr(graph_mod, "compute_full_layout", boom, raising=False)
+    import grc_agent.adapter.layout as layout_mod
+
+    monkeypatch.setattr(layout_mod, "compute_full_layout", boom, raising=False)
+
+    fg = load_flow_graph(str(temp_dial_tone))
+    res = change_graph(
+        fg,
+        add_blocks=[{"block_id": "blocks_null_sink", "instance_name": "layout_probe"}],
+        force=True,
+    )
+    assert res["ok"] is True
+    assert res["relayout"] is False, "a layout that threw must not be reported as done"
+
+
+def test_save_refuses_symlinks_and_hard_links(temp_dial_tone, tmp_path):
+    """The two link guards on the save path had no test at all.
+
+    A reordering that moved the symlink check after resolve() -- which the
+    code comment explicitly warns against, since resolve() follows symlinks --
+    would let an approved change_graph write through a planted link and escape
+    the project directory, with a fully green suite.
+    """
+    import os
+
+    real = Path(temp_dial_tone)
+
+    # Symlink: refused, and the target is left untouched.
+    link = real.parent / "alias.grc"
+    os.symlink(real, link)
+    fg = load_flow_graph(str(real))
+    fg.grc_file_path = str(link)
+    before = real.read_bytes()
+    res = change_graph(
+        fg,
+        add_blocks=[{"block_id": "blocks_null_sink", "instance_name": "sym_probe"}],
+        force=True,
+    )
+    assert res["ok"] is False and res["error_type"] == "save_failed"
+    assert "symlink" in str(res["errors"]).lower()
+    assert real.read_bytes() == before, "a refused save must not touch the target"
+
+    # Hard link: refused for the same reason -- another name for these bytes.
+    hard = tmp_path / "hard.grc"
+    os.link(real, hard)
+    assert hard.stat().st_nlink > 1
+    fg2 = load_flow_graph(str(real))
+    fg2.grc_file_path = str(hard)
+    before2 = hard.read_bytes()
+    res2 = change_graph(
+        fg2,
+        add_blocks=[{"block_id": "blocks_null_sink", "instance_name": "hard_probe"}],
+        force=True,
+    )
+    assert res2["ok"] is False and res2["error_type"] == "save_failed"
+    assert "hard-linked" in str(res2["errors"]).lower()
+    assert hard.read_bytes() == before2

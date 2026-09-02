@@ -996,8 +996,19 @@ def _revert_flow_graph(flow_graph: Any, initial_data: Any) -> str | None:
     swallowed.
     """
     try:
-        flow_graph.import_data(initial_data)
+        # import_data reports a partial restore by RETURN VALUE, not by
+        # raising: GNU Radio's own docstring says "any blocks or connections
+        # in error will be ignored" and it returns connection_error. Ignoring
+        # that return made a rollback that silently dropped connections
+        # indistinguishable from a clean one.
+        had_connection_errors = bool(flow_graph.import_data(initial_data))
         flow_graph.rewrite()
+        if had_connection_errors:
+            return (
+                "rollback restored the flowgraph but GNU Radio dropped one or more "
+                "connections while re-importing it; the graph may be missing wiring "
+                "that was present before this call"
+            )
         return None
     except Exception as exc:
         grc_file_path = getattr(flow_graph, "grc_file_path", "")
@@ -1007,9 +1018,20 @@ def _revert_flow_graph(flow_graph: Any, initial_data: Any) -> str | None:
                 disk_data = platform.parse_flow_graph(str(grc_file_path))
                 flow_graph.import_data(disk_data)
                 flow_graph.rewrite()
-                return None
-            except Exception:
-                pass
+                # NOT a clean revert: the on-disk file is not initial_data.
+                # Any unsaved manual canvas edit the user made before this
+                # call is gone, and reporting success here hid that.
+                return (
+                    f"in-memory rollback failed ({exc}); the flowgraph was reloaded from "
+                    f"{grc_file_path} instead, so any unsaved manual edits made before "
+                    "this call have been lost"
+                )
+            except Exception as reload_exc:
+                return (
+                    f"rollback failed ({exc}) and reloading from disk also failed "
+                    f"({type(reload_exc).__name__}: {reload_exc}); the flowgraph is "
+                    "left mutated"
+                )
         return f"rollback failed, flowgraph may be left mutated: {exc}"
 
 
@@ -1250,6 +1272,10 @@ def change_graph(  # noqa: C901
                     if pos is not None:
                         b.states["coordinate"] = list(pos)
             except Exception as exc:
+                # relayout was derived from the REQUEST, so a layout that threw
+                # still reported relayout:true and the canvas fitted a view to
+                # coordinates that were never recomputed. Report what happened.
+                relayout = False
                 _log.warning("Full layout computation failed during change_graph: %s", exc)
 
         # Phase 4: update_params
@@ -1473,6 +1499,7 @@ def change_graph(  # noqa: C901
     # it, is_valid() reports "valid" regardless of actual state (confirmed
     # live: removing a required connection without force=True was silently
     # accepted, leaving a genuinely broken graph persisted to disk).
+    still_invalid = False
     try:
         flow_graph.validate()
         valid = bool(flow_graph.is_valid())
@@ -1495,6 +1522,12 @@ def change_graph(  # noqa: C901
             new_errors = [
                 e for e in validation_errors if e["message"] not in pre_existing_errors
             ]
+            if not new_errors:
+                # Every remaining error was already there before this call, so
+                # the edit is not blamed for them — but the graph IS still
+                # invalid and is about to be committed. ok:true alone read as
+                # "valid now"; still_invalid says otherwise.
+                still_invalid = True
             if new_errors:
                 revert_error = _revert_flow_graph(flow_graph, initial_data)
                 if revert_error:
@@ -1522,10 +1555,15 @@ def change_graph(  # noqa: C901
         }
 
     # Write atomically with lock and backup
+    committed = False
     try:
         grc_file_path = getattr(flow_graph, "grc_file_path", "")
         if not grc_file_path or Path(grc_file_path).is_dir():
-            res = {"ok": True, "relayout": relayout}
+            # The in-memory graph IS mutated, but nothing was written. Saying
+            # so explicitly stops the caller reading ok:true as "persisted".
+            res = {"ok": True, "relayout": relayout, "persisted": False}
+            if still_invalid:
+                res["still_invalid"] = True
             if pre_existing_errors:
                 res["pre_existing_errors"] = pre_existing_errors
             return res
@@ -1564,9 +1602,24 @@ def change_graph(  # noqa: C901
                     shutil.copy2(target_path, backup_path)
                     _prune_old_backups(backup_dir)
                 _atomic_write_text(_serialize_flow_graph(flow_graph), target_path)
+                committed = True
             finally:
                 fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
     except Exception as exc:
+        if committed:
+            # The bytes are already on disk. Reverting memory now would leave
+            # disk holding the new graph and memory the old one — the two
+            # silently disagreeing is worse than the failure being reported.
+            _log.warning("change_graph: failed after committing to disk: %s", exc)
+            res = {"ok": True, "relayout": relayout, "persisted": True}
+            if still_invalid:
+                res["still_invalid"] = True
+            res["post_commit_warning"] = (
+                f"The edit was written to disk, but finalising afterwards failed: {exc}"
+            )
+            if pre_existing_errors:
+                res["pre_existing_errors"] = pre_existing_errors
+            return res
         save_errors = [
             {"code": "save_failed", "message": f"Failed to commit changes atomically: {exc}"}
         ]
@@ -1580,7 +1633,9 @@ def change_graph(  # noqa: C901
             "rollback_failed": bool(revert_error),
         }
 
-    res = {"ok": True, "relayout": relayout}
+    res = {"ok": True, "relayout": relayout, "persisted": True}
+    if still_invalid:
+        res["still_invalid"] = True
     if pre_existing_errors:
         res["pre_existing_errors"] = pre_existing_errors
     return res
