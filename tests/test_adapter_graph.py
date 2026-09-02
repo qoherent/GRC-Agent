@@ -76,7 +76,7 @@ async def test_inspect_graph_func_raises_model_retry_on_unknown_target(temp_dial
     ctx.deps = fg
 
     with pytest.raises(ModelRetry) as exc:
-        await inspect_graph_func(ctx, targets="no_such_block")
+        await inspect_graph_func(ctx, targets=["no_such_block"])
     msg = str(exc.value)
     assert "no_such_block" in msg
     assert "samp_rate" in msg, "the valid-block list must survive into the retry text"
@@ -90,13 +90,14 @@ async def test_inspect_graph_func_wrapper(temp_dial_tone):
     ctx = MagicMock()
     ctx.deps = fg
 
-    # Test passing a string "all"
-    res_raw = await inspect_graph_func(ctx, targets="all")
+    # The magic "everything" target still works through the list form.
+    res_raw = await inspect_graph_func(ctx, targets=["all"])
     res = json.loads(res_raw)
     assert res["ok"] is True
 
-    # Test passing a string "samp_rate"
-    res_raw_scoped = await inspect_graph_func(ctx, targets="samp_rate")
+    # A single name is a one-element list: the tool no longer accepts a bare
+    # string, so the schema has one array branch instead of three.
+    res_raw_scoped = await inspect_graph_func(ctx, targets=["samp_rate"])
     res_scoped = json.loads(res_raw_scoped)
     assert res_scoped["ok"] is True
     assert len(res_scoped["graph"]["blocks"]) == 1
@@ -907,3 +908,63 @@ def test_inspect_graph_connection_order_is_deterministic(temp_dial_tone):
 
     conns = inspect_graph(fg)["graph"]["connections"]
     assert conns == sorted(conns)
+
+
+def test_tool_argument_bounds_live_in_the_schema():
+    """Out-of-range and malformed arguments are rejected by validation.
+
+    Previously query_knowledge silently clamped k into 1-20 and
+    generate_python passed any k straight through, so a model asking for 500
+    results got 20 and was never told. A malformed connection string reached
+    the mutation engine and cost a domain retry. All three are now schema
+    constraints the model can see and validation enforces before the tool
+    body runs.
+    """
+    import pydantic
+
+    from grc_agent.agent import grc_tools
+
+    by_name = {t.name: t for t in grc_tools()}
+
+    k_schema = by_name["query_knowledge"].function_schema.json_schema["properties"]["k"]
+    assert k_schema["minimum"] == 1 and k_schema["maximum"] == 20
+    gen_k = by_name["generate_python"].function_schema.json_schema["properties"]["k"]
+    assert gen_k["minimum"] == 1 and gen_k["maximum"] == 20
+
+    for tool, args in (
+        ("query_knowledge", {"query": "x", "domain": "catalog", "k": 500}),
+        ("query_knowledge", {"query": "x", "domain": "catalog", "k": 0}),
+        ("generate_python", {"k": 500}),
+    ):
+        validator = by_name[tool].function_schema.validator
+        with pytest.raises(pydantic.ValidationError):
+            validator.validate_python(args)
+
+    # change_graph's connection strings carry parse_conn's rule as a pattern.
+    cg = by_name["change_graph"].function_schema
+    conn_schema = cg.json_schema["properties"]["add_connections"]
+    assert "pattern" in conn_schema["items"]
+    for malformed in ("src_0:0-sink_0:0", "src_0->sink_0", "a:0->b:0->c:0", "a:0:1->b:0"):
+        with pytest.raises(pydantic.ValidationError):
+            cg.validator.validate_python({"reason": "r", "add_connections": [malformed]})
+    # ...and a well-formed one still validates.
+    cg.validator.validate_python({"reason": "r", "add_connections": ["src_0:0->sink_0:0"]})
+
+
+def test_change_graph_list_arguments_carry_no_null_branch():
+    """An empty batch means the same as an absent one, so the six list
+    arguments are plain arrays rather than array-or-null unions."""
+    from grc_agent.agent import grc_tools
+
+    cg = [t for t in grc_tools() if t.name == "change_graph"][0]
+    props = cg.function_schema.json_schema["properties"]
+    for arg in (
+        "add_blocks",
+        "remove_blocks",
+        "update_params",
+        "update_states",
+        "add_connections",
+        "remove_connections",
+    ):
+        assert "anyOf" not in props[arg], f"{arg} still widens to a null branch"
+        assert props[arg]["type"] == "array"

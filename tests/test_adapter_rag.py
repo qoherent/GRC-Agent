@@ -138,8 +138,12 @@ def test_query_knowledge_func_raises_model_retry_on_failure(monkeypatch):
 
 
 def test_query_knowledge_func_passes_through_k(monkeypatch):
-    """The model can control how many results come back via k (default 5,
-    clamped 1-20) — no live LLM/backend needed, just verifying the plumbing."""
+    """The model controls how many results come back via k (default 5).
+
+    The 1-20 bound is a schema constraint now, not a clamp in the body: this
+    calls the function directly, bypassing validation, so a raw value reaches
+    the engine unchanged. That the schema rejects out-of-range values is
+    pinned in tests/test_adapter_graph.py."""
 
     from grc_agent.agent import query_knowledge_func
 
@@ -162,17 +166,17 @@ def test_query_knowledge_func_passes_through_k(monkeypatch):
     asyncio.run(query_knowledge_func(None, "stream tags", "docs"))
     assert seen_calls[-1] == ("stream tags", 5), "default k must still be 5"
 
-    # Out-of-range k is clamped, not passed through raw or rejected.
+    # No clamp in the body: an unvalidated call passes k straight through,
+    # so nothing silently rewrites the model's request behind its back.
     asyncio.run(query_knowledge_func(None, "x", "catalog", k=1000))
-    assert seen_calls[-1] == ("x", 20)
-    asyncio.run(query_knowledge_func(None, "x", "catalog", k=0))
-    assert seen_calls[-1] == ("x", 1)
+    assert seen_calls[-1] == ("x", 1000)
 
 
 def test_generate_python_func_passes_through_k_and_wraps_valueerror(monkeypatch):
     """Mirrors test_query_knowledge_func_passes_through_k for generate_python_func:
-    k (default 5) reaches preview_flowgraph_py correctly (the engine clamps
-    1-20 internally), and a ValueError from it (invalid/hb/cpp graph) becomes
+    k (default 5) reaches preview_flowgraph_py verbatim (the 1-20 bound is a
+    schema constraint, not an engine clamp), and a ValueError from it
+    (invalid/hb/cpp graph) becomes
     a ModelRetry, not a raw exception — no live LLM/backend or real gnuradio
     flowgraph needed."""
     from types import SimpleNamespace
@@ -196,8 +200,9 @@ def test_generate_python_func_passes_through_k_and_wraps_valueerror(monkeypatch)
     asyncio.run(generate_python_func(ctx))
     assert seen_calls[-1] == (ctx.deps, 5), "default k must still be 5"
 
-    # The wrapper passes k through verbatim — the 1-20 clamp lives in the
-    # engine (preview_flowgraph_py), not here.
+    # Passed through verbatim end to end: neither the wrapper nor the engine
+    # rewrites it. The bound is declared in the schema and enforced by
+    # validation before either is reached.
     asyncio.run(generate_python_func(ctx, k=1000))
     assert seen_calls[-1] == (ctx.deps, 1000)
 

@@ -3,7 +3,7 @@ import contextlib
 import json
 import logging
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, Field
 from pydantic_ai import (
@@ -165,11 +165,11 @@ prompt_injection_cap = PromptInjectionDefender(
     on_detection=_log_injection_detection,
 )
 # Module-level tool functions
-async def inspect_graph_func(ctx: RunContext[Any], targets: list[str] | str | None = None) -> str:
+async def inspect_graph_func(ctx: RunContext[Any], targets: list[str] | None = None) -> str:
     """Read-only inspection of the active graph. Returns topology, block instances, connections, parameter values, and validation status.
 
     Args:
-        targets: Block/variable instance name(s) to scope inspection to (e.g. ["samp_rate", "blocks_head_0"] or "samp_rate"). Omit or pass null to inspect the full graph.
+        targets: Block/variable instance names to scope inspection to (e.g. ["samp_rate", "blocks_head_0"]). Omit to inspect the full graph.
     """
     result = inspect_graph(ctx.deps, targets=targets)
     if not result.get("ok", True):
@@ -177,15 +177,34 @@ async def inspect_graph_func(ctx: RunContext[Any], targets: list[str] | str | No
     return json.dumps(result)
 
 
-_QUERY_KNOWLEDGE_MIN_K = 1
-_QUERY_KNOWLEDGE_MAX_K = 20
+# Bounds live in the schema, not in a clamp. The model sees minimum/maximum
+# and an out-of-range value is rejected by argument validation before the tool
+# body runs, instead of being silently rewritten behind its back.
+_K_DESCRIPTION = (
+    "How many results to return (1-20, default 5). Raise it for broader recall; "
+    "lower it when you already know the target."
+)
+ResultCount = Annotated[int, Field(ge=1, le=20, description=_K_DESCRIPTION)]
+
+# Exactly one '->' and exactly one ':' on each side — the same rule parse_conn
+# enforces, moved into the schema so a malformed string is an argument-
+# validation error the model can correct cheaply, rather than a burned
+# domain retry after the mutation engine has already started.
+_CONNECTION_PATTERN = r"^[^:>]+:[^:>]+->[^:>]+:[^:>]+$"
+ConnectionSpec = Annotated[
+    str,
+    Field(
+        pattern=_CONNECTION_PATTERN,
+        description="'src_block:src_port->dst_block:dst_port', e.g. 'source_0:0->sink_0:0'.",
+    ),
+]
 
 
 async def query_knowledge_func(
     ctx: RunContext[Any],  # noqa: ARG001
     query: str,
     domain: Literal["catalog", "docs"],
-    k: int = 5,
+    k: ResultCount = 5,
 ) -> str:
     """Answer GNU Radio knowledge questions from two domains: catalog (block IDs, port names, parameter keys, and each block's implementation docstring with parameter units/semantics) or docs (concepts).
 
@@ -194,11 +213,8 @@ async def query_knowledge_func(
     Args:
         query: The search text.
         domain: "catalog" for block lookups, "docs" for conceptual/how-to questions.
-        k: How many results to return (1-20, default 5). Raise toward 20 for
-            broader recall or when comparing several candidates; lower to 2-3
-            when you only need the top match.
+        k: How many results to return.
     """
-    k = max(_QUERY_KNOWLEDGE_MIN_K, min(_QUERY_KNOWLEDGE_MAX_K, k))
     engine = query_catalog if domain == "catalog" else query_docs
     res = await asyncio.to_thread(engine, query, k)
     if not res.get("ok", True):
@@ -208,7 +224,7 @@ async def query_knowledge_func(
     return json.dumps(res)
 
 
-async def generate_python_func(ctx: RunContext[Any], k: int = 5) -> str:
+async def generate_python_func(ctx: RunContext[Any], k: ResultCount = 5) -> str:
     """Render the Python source GNU Radio would generate from the current graph. Read-only — never writes to disk or runs the flowgraph.
 
     Returns one entry per generated file: the main flowgraph script plus one
@@ -218,9 +234,7 @@ async def generate_python_func(ctx: RunContext[Any], k: int = 5) -> str:
     flowgraphs — fix the graph with change_graph and retry.
 
     Args:
-        k: Max number of block-source files to include alongside the main
-            script. Defaults to 5; raise it (up to 20) only when you need to
-            see every block's source in one call.
+        k: Max number of block-source files to include alongside the main script.
     """
     try:
         result = preview_flowgraph_py(ctx.deps, k=k)
@@ -232,12 +246,12 @@ async def generate_python_func(ctx: RunContext[Any], k: int = 5) -> str:
 async def change_graph_func(
     ctx: RunContext[Any],
     reason: str,
-    add_blocks: list[BlockAdd] | None = None,
-    remove_blocks: list[str] | None = None,
-    update_params: list[ParamUpdate] | None = None,
-    update_states: list[StateUpdate] | None = None,
-    add_connections: list[str] | None = None,
-    remove_connections: list[str] | None = None,
+    add_blocks: Annotated[list[BlockAdd], Field(default_factory=list)],
+    remove_blocks: Annotated[list[str], Field(default_factory=list)],
+    update_params: Annotated[list[ParamUpdate], Field(default_factory=list)],
+    update_states: Annotated[list[StateUpdate], Field(default_factory=list)],
+    add_connections: Annotated[list[ConnectionSpec], Field(default_factory=list)],
+    remove_connections: Annotated[list[ConnectionSpec], Field(default_factory=list)],
     force: bool = False,
 ) -> str:
     """Apply a batch of structural graph edits as one atomic transaction.
@@ -257,9 +271,8 @@ async def change_graph_func(
         remove_blocks: Instance names of blocks to delete.
         update_params: Parameter updates for existing (or just-added) blocks.
         update_states: enabled/disabled/bypass updates for existing (or just-added) blocks.
-        add_connections: New connections, each formatted
-            'src_block:src_port->dst_block:dst_port' (e.g. 'source_0:0->sink_0:0').
-        remove_connections: Connections to remove, same format as add_connections.
+        add_connections: New connections to make.
+        remove_connections: Connections to remove.
         force: Bypass GNU Radio's own validation failures (e.g. an
             intentionally unconnected port mid-edit). Does not bypass this
             tool's own argument errors (unknown param, missing block).
@@ -267,20 +280,21 @@ async def change_graph_func(
     # Engine phase order (fixed regardless of argument order, backend detail
     # the model does not need): remove_connections, remove_blocks, add_blocks,
     # update_params, resolve 'auto' types, update_states, add_connections.
-    add_blocks_dict = [b.model_dump(exclude_none=True) for b in add_blocks] if add_blocks else None
-    update_params_dict = (
-        [p.model_dump(exclude_none=True) for p in update_params] if update_params else None
-    )
-    update_states_dict = [s.model_dump() for s in update_states] if update_states else None
+    # The engine treats an empty batch and a missing one identically, so an
+    # empty list collapses to None rather than widening every argument's
+    # schema with a null branch.
+    add_blocks_dict = [b.model_dump(exclude_none=True) for b in add_blocks] or None
+    update_params_dict = [p.model_dump(exclude_none=True) for p in update_params] or None
+    update_states_dict = [s.model_dump() for s in update_states] or None
 
     res = change_graph(
         ctx.deps,
         add_blocks=add_blocks_dict,
-        remove_blocks=remove_blocks,
+        remove_blocks=remove_blocks or None,
         update_params=update_params_dict,
         update_states=update_states_dict,
-        add_connections=add_connections,
-        remove_connections=remove_connections,
+        add_connections=add_connections or None,
+        remove_connections=remove_connections or None,
         force=force,
     )
     if not res.get("ok"):

@@ -1624,9 +1624,9 @@ def preview_flowgraph_py(flow_graph: Any, k: int = 5) -> dict[str, Any]:
     unbounded) block-source entries are included alongside it. Excess
     entries are dropped from the end of that block-source list (arbitrarily,
     since GNU Radio doesn't order them meaningfully) and counted in the
-    returned "omitted_files", never silently. `k` is clamped to 1-20.
+    returned "omitted_files", never silently. Callers are responsible for
+    bounding `k`; the model-facing tool declares 1-20 in its schema.
     """
-    k = max(1, min(20, k))
     _check_codegen_preconditions(flow_graph)
 
     grc_file_path = getattr(flow_graph, "grc_file_path", "")
