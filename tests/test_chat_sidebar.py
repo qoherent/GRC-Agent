@@ -10,30 +10,101 @@ from conftest import _count_sessions_for_path, _seed_session
 
 
 def test_change_summary_formatter():
-    """The approval card's uniform change_graph-JSON → Markdown formatter."""
+    """The approval card's change_graph-JSON -> Markdown formatter.
+
+    The payloads are built from the tool's own argument models rather than
+    hand-written dicts: change_graph dumps BlockAdd/ParamUpdate/StateUpdate
+    with model_dump(exclude_none=True) and the card renders that verbatim, so
+    a hand-written shape lets the renderer read keys the tool never sends.
+    """
+    from grc_agent.agent import BlockAdd, ParamUpdate, StateUpdate
     from grc_agent.ui.approval_card import format_change_summary
 
     text = format_change_summary(
         {
             "add_blocks": [
-                {
-                    "name": "lpf_0",
-                    "block_id": "filter_low_pass_filter_x",
-                    "params": {"cutoff": "19e3"},
-                }
+                BlockAdd(
+                    block_id="filter_low_pass_filter_x",
+                    instance_name="lpf_0",
+                    params={"cutoff": "19e3"},
+                ).model_dump(exclude_none=True)
             ],
             "add_connections": ["src:0->lpf_0:0"],
             "force": True,
         }
     )
     assert "**Add blocks:**" in text and "`lpf_0` (`filter_low_pass_filter_x`)" in text
+    assert "cutoff=19e3" in text
     assert "src:0 → lpf_0:0" in text  # cosmetic arrow
     assert "force" in text and "bypasses" in text
+    assert "?" not in text
+
+    # A block added already disabled must say so — the user is approving that
+    # state too, and BlockAdd carries it.
+    text = format_change_summary(
+        {
+            "add_blocks": [
+                BlockAdd(
+                    block_id="analog_noise_source_x",
+                    instance_name="noise_0",
+                    state="disabled",
+                ).model_dump(exclude_none=True)
+            ]
+        }
+    )
+    assert "`noise_0`" in text and "disabled" in text
+    # ...and a block added without an explicit state must not invent one.
+    text = format_change_summary(
+        {
+            "add_blocks": [
+                BlockAdd(
+                    block_id="analog_sig_source_x", instance_name="tone_0"
+                ).model_dump(exclude_none=True)
+            ]
+        }
+    )
+    assert "`tone_0`" in text
+    assert "enabled" not in text and "disabled" not in text
 
     text = format_change_summary(
-        {"update_params": [{"name": "samp_rate", "param": "value", "value": "48000"}]}
+        {
+            "update_params": [
+                ParamUpdate(
+                    instance_name="samp_rate", params={"value": "48000"}
+                ).model_dump(exclude_none=True)
+            ]
+        }
     )
     assert "`samp_rate.value` = `48000`" in text
+    assert "?" not in text
+
+    # Every parameter in a multi-param update stays legible.
+    text = format_change_summary(
+        {
+            "update_params": [
+                ParamUpdate(
+                    instance_name="sig_0",
+                    params={"freq": "440", "amp": "0.5", "waveform": "analog.GR_SIN_WAVE"},
+                ).model_dump(exclude_none=True)
+            ]
+        }
+    )
+    for frag in ("`sig_0.freq` = `440`", "`sig_0.amp` = `0.5`",
+                 "`sig_0.waveform` = `analog.GR_SIN_WAVE`"):
+        assert frag in text
+
+    text = format_change_summary(
+        {
+            "update_states": [
+                StateUpdate(instance_name="noise_0", state="disabled").model_dump()
+            ]
+        }
+    )
+    assert "`noise_0`" in text and "disabled" in text
+    assert "?" not in text
+
+    # A genuinely absent instance name must not raise.
+    assert format_change_summary({"add_blocks": [{"block_id": "x"}]})
     assert format_change_summary({}) == "_No changes in this batch._"
 
 

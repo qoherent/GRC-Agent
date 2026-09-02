@@ -27,18 +27,43 @@ def _arrow(text: str) -> str:
     return text.replace("->", " → ")
 
 
+# The card renders `change_graph`'s arguments exactly as the tool dumps them:
+# BlockAdd/ParamUpdate/StateUpdate.model_dump(exclude_none=True). Read those
+# field names, not invented ones — a key the tool never sends renders as "?"
+# and the user approves a change they cannot read.
 def _add_blocks_lines(add_blocks: list[Any] | None) -> list[str]:
     lines = []
     for b in add_blocks or []:
         b = b or {}
-        name = b.get("name") or "?"
+        name = b.get("instance_name") or "?"
         block_id = b.get("block_id") or "?"
         params = b.get("params") or {}
         line = f"- `{name}` (`{block_id}`)"
+        # Only present when the model asked for a non-default state; absent
+        # means 'enabled' and inventing that word would be noise.
+        state = b.get("state")
+        if state:
+            line += f" [{state}]"
         param_text = ", ".join(f"{k}={v}" for k, v in params.items())
         if param_text:
             line += f" — {param_text}"
         lines.append(line)
+    return lines
+
+
+def _update_params_lines(update_params: list[Any] | None) -> list[str]:
+    """One bullet per parameter, not per block.
+
+    ParamUpdate carries ``params`` as a dict, so a block changing three
+    parameters is three legible lines rather than one opaque one.
+    """
+    lines = []
+    for p in update_params or []:
+        if not p:
+            continue
+        name = p.get("instance_name") or "?"
+        for key, value in (p.get("params") or {}).items():
+            lines.append(f"- `{name}.{key}` = `{value}`")
     return lines
 
 
@@ -73,20 +98,12 @@ def format_change_summary(args: dict[str, Any]) -> str:
         "**Remove connections:**",
         [f"- `{_arrow(str(c))}`" for c in args.get("remove_connections") or []],
     )
-    _add_group(
-        groups,
-        "**Update parameters:**",
-        [
-            f"- `{p.get('name', '?')}.{p.get('param', '?')}` = `{p.get('value', '')}`"
-            for p in args.get("update_params") or []
-            if p
-        ],
-    )
+    _add_group(groups, "**Update parameters:**", _update_params_lines(args.get("update_params")))
     _add_group(
         groups,
         "**Update states:**",
         [
-            f"- `{s.get('name', '?')}` → {s.get('state', '?')}"
+            f"- `{s.get('instance_name', '?')}` → {s.get('state', '?')}"
             for s in args.get("update_states") or []
             if s
         ],
