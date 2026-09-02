@@ -64,7 +64,12 @@ def test_executor_and_planner_have_disjoint_mutation_surfaces():
 
     assert {"change_graph", "save_block", "write_file", "edit_file"} <= executor_tools
     assert not ({"write_plan", "read_plan", "add_task", "update_task_status"} & executor_tools)
-    assert {"write_plan", "read_plan", "inspect_graph", "read_file"} <= planner_tools
+    assert {"write_plan", "inspect_graph", "read_file"} <= planner_tools
+    # read_plan is deliberately NOT registered: Planning already appends the
+    # full rendered plan to every request, so a tool to fetch it would be a
+    # second copy of a feature that is already on — and registering it trips
+    # the harness into instructing the planner to call task tools it lacks.
+    assert "read_plan" not in planner_tools
     assert not (
         {"change_graph", "save_block", "write_file", "edit_file", "create_directory"}
         & planner_tools
@@ -184,3 +189,37 @@ def test_executor_receives_durable_plan_as_ephemeral_read_only_handoff(tmp_path)
     assert "<execution-plan>" in seen_text
     assert "Inspect, then change the graph" in seen_text
     assert "<execution-plan>" not in persisted_text
+
+
+def test_planner_guidance_enumerates_no_tools():
+    """AGENTS.md section 4: prompts must not enumerate tools.
+
+    The Planning guidance used to be hand-written and named `read_plan` and
+    `write_plan` explicitly, to work around a harness gate that would
+    otherwise instruct the planner to call task tools it does not have.
+    Narrowing the registered tools to write_plan alone lets the harness
+    assemble correct guidance itself, so the hand-written string is gone.
+    """
+    from pydantic_ai_harness.planning import Planning
+
+    guidance = Planning(tools=["write_plan"]).get_instructions() or ""
+    assert guidance, "the harness must still supply write-plan guidance"
+    for absent in ("read_plan", "add_task", "update_task_status", "update_task_statuses"):
+        assert absent not in guidance, f"guidance names a tool the planner lacks: {absent!r}"
+
+
+def test_executor_keeps_its_read_only_plan_framing():
+    """The executor's plan reminder must stay read-only.
+
+    Swapping it for Planning's own injection would have appended the harness's
+    hardcoded "keep it updated with the planning tools" line to every executor
+    request -- pointing the executor at tools it deliberately lacks -- and
+    dropped the framing that stops it acting on a stored plan unprompted.
+    """
+    import inspect
+
+    from grc_agent import agent_factory
+
+    reminder = inspect.getsource(agent_factory._execution_plan_reminder)
+    assert "read-only" in reminder.lower()
+    assert "explicitly asks" in reminder

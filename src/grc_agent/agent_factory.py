@@ -104,7 +104,6 @@ _PLANNER_FUNCTION_TOOLS = frozenset(
         "web_search",  # defensive: native tools bypass PrepareTools today
         "web_fetch",
         "write_plan",
-        "read_plan",
     }
     | READ_ONLY_TOOL_NAMES
 )
@@ -855,18 +854,19 @@ def build_agents_from_cfg(cfg: dict) -> AgentBundle:
             ),
             Planning(
                 store_resolver=_plan_store_resolver,
-                tools=["write_plan", "read_plan"],
-                # Explicit, because the auto-assembled default is wrong for this
-                # narrowed tool set: Planning.get_instructions gates its granular
-                # sentence on `registered & {'read_plan', 'add_task',
-                # 'update_task_status', 'update_task_statuses'}`, so registering
-                # `read_plan` alone trips it and the planner is told to call three
-                # tools it does not have. `guidance` is used verbatim.
-                guidance=(
-                    "You have two planning tools. Call `read_plan` to see the current plan, and "
-                    "`write_plan` to replace it atomically with the complete plan — pass every step "
-                    "each time, marking at most one step `in_progress`."
-                ),
+                # write_plan only. read_plan was redundant: Planning already
+                # appends the full rendered plan as an ephemeral tail on every
+                # request (inject defaults True), so a tool to fetch it is a
+                # second copy of a feature that is already on.
+                #
+                # Dropping it also removes the need for a hand-written
+                # `guidance`. The default is assembled from the registered
+                # tools, and the granular sentence is gated on read_plan and
+                # the task tools — with write_plan alone the harness emits
+                # only _WRITE_PLAN_GUIDANCE, which is correct. The explicit
+                # string existed to work around that gate and enumerated the
+                # tools by name, which AGENTS.md section 4 forbids.
+                tools=["write_plan"],
             ),
             _build_compaction_capability(cfg, agent_name="grc_planner"),
             web_search_cap,

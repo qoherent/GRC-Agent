@@ -855,10 +855,11 @@ def test_prompts_do_not_enumerate_tools():
 def test_system_prompt_keeps_unobservable_contracts():
     """Deleting the tool inventory must not take the behavioural rules with it.
 
-    These describe harness contracts and GRC platform quirks the model has no
-    other way to observe (turn-end validation, the EPB call-ordering quirk,
-    force=True splitting, auto dtype resolution, environment permission
-    quirks like SDR udev rules and TUN/TAP CAP_NET_ADMIN)."""
+    What belongs in the prompt is what the model has no other way to observe:
+    turn-end validation, the EPB call-ordering quirk, force=True splitting,
+    auto dtype resolution. Retrievable domain knowledge does not — see
+    test_runtime_permission_recipes_live_in_the_corpus.
+    """
     from grc_agent.prompts import build_system_prompt
 
     prompt = build_system_prompt()
@@ -868,30 +869,61 @@ def test_system_prompt_keeps_unobservable_contracts():
         "no add_blocks in that same call",
         "'auto' never resolves from another 'auto' block",
         "Never enumerate or reconstruct a block schema from memory",
-        # Environment permission quirks: lock both so a future prompt
-        # streamlining pass cannot silently drop either rule.
-        "install the driver udev rules package",
-        "tun_alloc, TUNSETIFF",
-        "CAP_NET_ADMIN",
-        "ip tuntap add dev tap0 mode tap user $USER",
-        "run once, outside the app",
-        "persists across flowgraph restarts but not reboots",
-        "Do not advise running the app as root or setcap-ing the interpreter",
     ):
         assert fragment in prompt, f"lost an unobservable contract: {fragment!r}"
 
 
+def test_runtime_permission_recipes_live_in_the_corpus_not_the_prompt():
+    """Troubleshooting recipes are retrievable knowledge, not harness contract.
+
+    The prompt used to carry the full SDR udev and TUN/TAP CAP_NET_ADMIN
+    remediations, including their exact shell commands, on every single
+    request. AGENTS.md section 1 forbids prompt folklore and section 4 limits
+    the prompt to unobservable contracts and platform quirks; these are
+    neither, and the agent already has a tool for looking things up. The
+    prompt now states the *class* of failure and points at query_knowledge.
+    """
+    from pathlib import Path
+
+    from grc_agent.prompts import build_planner_prompt, build_system_prompt
+
+    for prompt in (build_system_prompt(), build_planner_prompt()):
+        for recipe in (
+            "udevadm control --reload-rules",
+            "ip tuntap add",
+            "CAP_NET_ADMIN",
+            "LIBUSB_ERROR_ACCESS",
+            "blocks_probe_rate",
+            "setcap",
+        ):
+            assert recipe not in prompt, f"remediation recipe still in a prompt: {recipe!r}"
+
+    # ...but the agent must still be able to reach them.
+    corpus = Path("docs/wiki_gnuradio_org")
+    text = "\n".join(
+        p.read_text(encoding="utf-8")
+        for p in corpus.glob("*.md")
+        if "Permission" in p.name or "Probes" in p.name
+    )
+    for recipe in (
+        "udevadm control --reload-rules",
+        "ip tuntap add dev tap0 mode tap user $USER",
+        "CAP_NET_ADMIN",
+        "LIBUSB_ERROR_ACCESS",
+        "blocks_probe_rate",
+    ):
+        assert recipe in text, f"recipe missing from the corpus: {recipe!r}"
+
+    # The prompt keeps the pointer that sends the model to look them up.
+    assert "query_knowledge" in build_system_prompt()
+
+
 def test_execution_environment_quirks_stay_out_of_planner_prompt():
-    """The planner is a read-only planning role and shares no execution
-    diagnostics surface with the executor — runtime remediation commands
-    (udev reload, TUN/TAP creation) belong only in the executor prompt."""
+    """The planner is read-only and shares no execution-diagnostics surface."""
     from grc_agent.prompts import build_planner_prompt
 
     prompt = build_planner_prompt()
-    for fragment in (
-        "sudo udevadm control --reload-rules",
-        "ip tuntap add",
-    ):
+    for fragment in ("sudo udevadm control --reload-rules", "ip tuntap add"):
         assert fragment not in prompt, (
             f"planner prompt gained execution-diagnostics quirk: {fragment!r}"
         )
