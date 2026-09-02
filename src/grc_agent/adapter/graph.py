@@ -526,6 +526,14 @@ def set_block_state(block: Any, state: str) -> None:
     block.state = canonical
 
 
+def _is_enum(param: Any) -> bool:
+    """GRC's own enum test, with a dtype fallback for doubles that lack it."""
+    is_enum = getattr(param, "is_enum", None)
+    if callable(is_enum):
+        return bool(is_enum())
+    return str(getattr(param, "dtype", "") or "") == "enum"
+
+
 def keep_param(  # noqa: C901
     param_key: str,
     param: Any,
@@ -566,7 +574,7 @@ def keep_param(  # noqa: C901
         if not (is_custom or is_var_ref):
             return False
 
-    if dtype == "enum":
+    if _is_enum(param):
         return bool(value != default or is_structural_enum)
 
     if value != default:
@@ -616,7 +624,8 @@ def classify_role(b: Any) -> str:
         return "snippet"
     if is_virtual_or_pad:
         return "virtual_or_pad"
-    if getattr(b, "key", "") == "options":
+    parent = getattr(b, "parent_flowgraph", None)
+    if parent is not None and b is getattr(parent, "options_block", None):
         return "options"
     if has_sources and not has_sinks:
         return "source"
@@ -1047,8 +1056,16 @@ def change_graph(  # noqa: C901
 ) -> dict[str, Any]:
     from grc_agent.adapter.layout import _compute_layout_model, compute_full_layout
 
+    # Normalise every argument family, not two of five. A non-breaking space
+    # is a common artefact in model-generated text, and one inside a
+    # connection string used to survive into parse_conn and surface as
+    # connection_not_found rather than being cleaned up like the rest.
     add_blocks = _sanitize_data(add_blocks)
+    remove_blocks = _sanitize_data(remove_blocks)
     update_params = _sanitize_data(update_params)
+    update_states = _sanitize_data(update_states)
+    add_connections = _sanitize_data(add_connections)
+    remove_connections = _sanitize_data(remove_connections)
 
     # Whether this batch will relayout the whole graph (the layout hook's
     # gate, computed here from the same sanitized values so the success

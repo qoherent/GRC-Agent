@@ -1,5 +1,7 @@
+import ast
 import contextlib
 import hashlib
+import importlib
 import logging
 import os
 import re
@@ -790,24 +792,64 @@ def _catalog_port_info(p: Any) -> dict[str, Any]:
 
 
 def _block_class_doc(b: Any) -> str:
-    """The implementation class's own docstring, resolved through the block's
-    native code templates: imports are exec'd exactly as GRC's generator runs
-    them, and ``templates.make``'s leading dotted name is resolved against that
-    namespace to reach the installed SWIG/Python class. This is where parameter
-    units and semantics live (e.g. the analog PLL blocks document frequencies
-    as "in radians per sample, NOT HERTZ" — the fact session 150 could not get
-    from the docs corpus because it has no carriertracking page). Returns ""
-    when the target is not resolvable (templated ``*_x`` blocks, variables,
-    options) — honest absence, never a guess."""
+    """The implementation class's own docstring, resolved from the block's
+    native code templates.
+
+    This is where parameter units and semantics live (the analog PLL blocks
+    document frequencies as "in radians per sample, NOT HERTZ", which the docs
+    corpus has no page for). Returns "" when the target is not resolvable —
+    templated ``*_x`` blocks, variables, options — which is honest absence,
+    never a guess.
+
+    The import lines are parsed with ``ast`` and only genuine ``import`` /
+    ``from ... import`` statements are honoured, resolved through
+    ``importlib``. They used to be ``exec``'d, which meant a read-only
+    ``query_knowledge`` call executed whatever text sat in a block
+    definition's imports template — including blocks the agent itself had
+    just written into the hier-block library via ``save_block``, outside the
+    filesystem sandbox. Importing the named module is what GRC's own
+    generator does; running arbitrary statements is not.
+    """
     ns: dict[str, Any] = {}
     for line in str(b.templates.get("imports") or "").splitlines():
         line = line.strip()
         if not line:
             continue
         try:
-            exec(line, ns)  # noqa: S102 - the block's own static import lines, same lines GRC's generator runs
-        except Exception:
+            parsed = ast.parse(line)
+        except SyntaxError:
             return ""
+        for node in parsed.body:
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    module = _safe_import(alias.name)
+                    if module is None:
+                        return ""
+                    ns[alias.asname or alias.name.split(".")[0]] = (
+                        module
+                        if alias.asname
+                        else _safe_import(alias.name.split(".")[0]) or module
+                    )
+            elif isinstance(node, ast.ImportFrom):
+                module = _safe_import(node.module or "")
+                if module is None:
+                    return ""
+                for alias in node.names:
+                    attr = getattr(module, alias.name, None)
+                    if attr is None:
+                        return ""
+                    ns[alias.asname or alias.name] = attr
+            else:
+                # Not an import. GRC's generator only ever emits imports here;
+                # anything else is refused rather than run.
+                _log.warning(
+                    "block %r: refusing to evaluate a non-import line in its imports "
+                    "template: %.80s",
+                    getattr(b, "key", "?"),
+                    line,
+                )
+                return ""
+
     m = re.match(r"\s*([A-Za-z_][\w.]*)\s*\(", str(b.templates.get("make") or ""))
     if not m:
         return ""
@@ -817,6 +859,17 @@ def _block_class_doc(b: Any) -> str:
         if obj is None:
             return ""
     return str(getattr(obj, "__doc__", "") or "").strip()
+
+
+def _safe_import(name: str) -> Any | None:
+    """Import a module by name, or None when it cannot be imported."""
+    if not name:
+        return None
+    try:
+        return importlib.import_module(name)
+    except Exception as exc:
+        _log.debug("catalog docstring: could not import %r: %s", name, exc)
+        return None
 
 
 @contextlib.contextmanager

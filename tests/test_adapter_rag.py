@@ -609,3 +609,42 @@ def test_both_disclosures_survive_when_both_apply():
     clean: dict = {}
     _attach_notices(clean, {"query_capped": False, "search_mode": "hybrid", "embed_error": None})
     assert "notices" not in clean and "message" not in clean
+
+
+def test_catalog_docstring_resolution_never_executes_block_code():
+    """query_knowledge must not run code from the block library.
+
+    Resolving a block's implementation docstring used to exec() every line of
+    its imports template. That path is reachable from the read-only
+    query_knowledge tool, while save_block writes agent-authored Python into
+    ~/.grc_gnuradio -- outside the filesystem sandbox -- so a catalog query
+    executed code the agent itself had written. Import lines are now parsed
+    with ast and only genuine imports are honoured.
+    """
+    from grc_agent.adapter import rag
+
+    class HostileBlock:
+        key = "hostile_block"
+        templates = {
+            "imports": "raise RuntimeError('this must never run')",
+            "make": "anything.at_all(",
+        }
+
+    assert rag._block_class_doc(HostileBlock()) == ""
+
+    class SideEffectBlock:
+        key = "side_effect_block"
+        templates = {
+            "imports": "import grc_agent.adapter.rag as _r; _r.__dict__['PWNED'] = True",
+            "make": "x.y(",
+        }
+
+    assert rag._block_class_doc(SideEffectBlock()) == ""
+    assert not hasattr(rag, "PWNED"), "a non-import statement was executed"
+
+    # The capability it exists for still works: a real block resolves the
+    # docstring carrying its parameter units.
+    doc = rag._block_class_doc_for_id("analog_pll_carriertracking_cc") if hasattr(
+        rag, "_block_class_doc_for_id"
+    ) else (rag.render_catalog_block("analog_pll_carriertracking_cc", None) or {}).get("doc", "")
+    assert "radian" in doc.lower(), "the PLL units docstring must still resolve"

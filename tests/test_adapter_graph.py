@@ -1150,3 +1150,66 @@ def test_save_refuses_symlinks_and_hard_links(temp_dial_tone, tmp_path):
     assert res2["ok"] is False and res2["error_type"] == "save_failed"
     assert "hard-linked" in str(res2["errors"]).lower()
     assert hard.read_bytes() == before2
+
+
+def test_nbsp_is_normalised_in_every_argument_family(temp_dial_tone):
+    """One normalisation rule, applied to all five argument families.
+
+    A non-breaking space is a common artefact in model-generated text.
+    _sanitize_data turns U+00A0 into a plain space, and parse_conn strips the
+    parts -- but it was only applied to add_blocks and update_params, so an
+    NBSP in a connection string survived into the parser and surfaced as
+    invalid_connection_format or connection_not_found instead.
+    """
+    from grc_agent.adapter.graph import _sanitize_data
+
+    NBSP = "\u00a0"
+    assert _sanitize_data(f"a{NBSP}b") == "a b", "the rule itself is NBSP -> space"
+
+    fg = load_flow_graph(str(temp_dial_tone))
+    res = change_graph(
+        fg,
+        add_blocks=[
+            {
+                "block_id": "blocks_null_sink",
+                "instance_name": "nb_sink",
+                "params": {"type": "float"},
+            }
+        ],
+        force=True,
+    )
+    assert res["ok"] is True
+
+    # A connection string carrying an NBSP either side of the arrow resolves.
+    res = change_graph(
+        fg,
+        add_connections=[f"analog_sig_source_x_0:0{NBSP}->{NBSP}nb_sink:0"],
+        force=True,
+    )
+    assert res["ok"] is True, res.get("errors")
+    assert any(
+        c.endswith("->nb_sink:0") for c in inspect_graph(fg)["graph"]["connections"]
+    ), "the NBSP connection did not land"
+
+    # ...and so does a removal naming the block with one.
+    res = change_graph(fg, remove_connections=[f"analog_sig_source_x_0:0->nb_sink:0{NBSP}"], force=True)
+    assert res["ok"] is True, res.get("errors")
+
+
+def test_block_role_and_enum_use_gnu_radio_s_own_apis(temp_dial_tone):
+    """classify_role identified the options block by hardcoded key string, and
+    enum-ness was a dtype string comparison. Both have native equivalents that
+    AGENTS.md section 4 names."""
+    fg = load_flow_graph(str(temp_dial_tone))
+    payload = inspect_graph(fg)
+    roles = {b["instance_name"]: b["role"] for b in payload["graph"]["blocks"]}
+    options_name = fg.options_block.name
+    assert roles[options_name] == "options"
+
+    from grc_agent.adapter.graph import _is_enum
+
+    opts = fg.options_block
+    for key, param in opts.params.items():
+        native = param.is_enum() if callable(getattr(param, "is_enum", None)) else None
+        if native is not None:
+            assert _is_enum(param) == native, f"{key}: disagreed with Param.is_enum()"
