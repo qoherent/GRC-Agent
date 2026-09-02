@@ -43,7 +43,6 @@ from grc_agent.adapter.rag import (
     query_docs,
     render_catalog_block,
 )
-from grc_agent.adapter.snapshots import push_undo_snapshot
 
 __all__ = [
     "BLOCK_FOOTPRINT_H",
@@ -76,7 +75,6 @@ __all__ = [
     "install_untitled_save_folder_provider",
     "load_flow_graph",
     "preview_flowgraph_py",
-    "push_undo_snapshot",
     "query_catalog",
     "query_docs",
     "register_execution_messenger",

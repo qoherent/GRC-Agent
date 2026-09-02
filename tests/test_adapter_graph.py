@@ -826,3 +826,66 @@ def test_sanitize_id_stem_is_idempotent():
     for raw in ["untitled(1)", "receiver", "1st_order", "my-flow", "samp_rate_0", "_private_id"]:
         assert sanitize_id_stem(sanitize_id_stem(raw)) == sanitize_id_stem(raw)
 
+
+
+def test_save_writes_one_backup_and_no_undo_stack(temp_dial_tone):
+    """A committed change_graph leaves exactly two artifacts on disk: the
+    updated target and one timestamped backup of the pre-write bytes.
+
+    The undo stack that used to be pushed alongside every save was write-only
+    -- nothing in the codebase ever read the numbered .grc files or the
+    cursor it maintained -- so it is gone. The backups are NOT: they are
+    plain .grc copies a person opens in a file manager, and they are the only
+    pre-image of the flowgraph that survives an app restart.
+    """
+    from pathlib import Path
+
+    target = Path(temp_dial_tone)
+    before = target.read_bytes()
+
+    fg = load_flow_graph(str(target))
+    res = change_graph(
+        fg,
+        add_blocks=[
+            {
+                "block_id": "blocks_throttle2",
+                "instance_name": "backup_probe",
+                "params": {"type": "float"},
+            }
+        ],
+        force=True,
+    )
+    assert res["ok"] is True
+
+    assert target.read_bytes() != before, "the save must have rewritten the target"
+
+    backup_dir = target.parent / ".grc_agent" / "backups"
+    backups = sorted(backup_dir.iterdir())
+    assert len(backups) == 1, f"expected exactly one backup, got {[p.name for p in backups]}"
+    assert backups[0].read_bytes() == before, "the backup must hold the pre-write bytes"
+
+    undo_dir = target.parent / ".grc_agent" / (target.name + ".undo")
+    assert not undo_dir.exists(), "the write-only undo stack must not be recreated"
+    assert not list((target.parent / ".grc_agent").glob("**/cursor.json"))
+
+
+def test_backup_pruning_bounds_the_directory(tmp_path):
+    """_prune_old_backups keeps the newest MAX_BACKUPS_PER_DIR by name.
+
+    Backup filenames lead with a UTC timestamp, so name order is age order.
+    """
+    from grc_agent.adapter.graph import MAX_BACKUPS_PER_DIR, _prune_old_backups
+
+    backup_dir = tmp_path / "backups"
+    backup_dir.mkdir()
+    total = MAX_BACKUPS_PER_DIR + 7
+    for i in range(total):
+        (backup_dir / f"{i:05d}-deadbeef.grc").write_text("x", encoding="utf-8")
+
+    _prune_old_backups(backup_dir)
+
+    remaining = sorted(p.name for p in backup_dir.iterdir())
+    assert len(remaining) == MAX_BACKUPS_PER_DIR
+    # The oldest 7 went; the newest survived.
+    assert remaining[0] == f"{total - MAX_BACKUPS_PER_DIR:05d}-deadbeef.grc"
+    assert remaining[-1] == f"{total - 1:05d}-deadbeef.grc"

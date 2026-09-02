@@ -70,7 +70,6 @@ from grc_agent.adapter import (
     _serialize_flow_graph,
     flow_graph_content_hash,
     get_blocks_panel_visibility,
-    push_undo_snapshot,
     set_blocks_panel_visibility,
 )
 
@@ -829,7 +828,6 @@ class NativeCanvasManager:
                     _atomic_write_text(_serialize_flow_graph(fg), Path(self.path))
                     self.last_disk_hash = _sha256_file(self.path)
                     self.last_synced_export_hash = flow_graph_content_hash(fg)
-                    push_undo_snapshot(fg, Path(self.path))
                     if self.on_graph_modified:
                         self.on_graph_modified()
                 finally:

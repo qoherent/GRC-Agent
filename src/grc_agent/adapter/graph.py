@@ -197,6 +197,26 @@ def _serialize_flow_graph(flow_graph: Any) -> str:
     return _grc_yaml.dump(flow_graph.export_data())
 
 
+MAX_BACKUPS_PER_DIR = 50
+
+
+def _prune_old_backups(backup_dir: Path) -> None:
+    """Bound the per-directory backup set.
+
+    Every save copies the previous file into ``backup_dir``; left alone that
+    grows without bound over a project's life. Backup filenames lead with a
+    timestamp (``{timestamp}-{hash}{suffix}``), so the oldest beyond the cap
+    sort first. Best-effort: a pruning failure must never fail the save.
+    """
+    try:
+        backups = sorted(backup_dir.iterdir(), key=lambda p: p.name)
+        excess = len(backups) - MAX_BACKUPS_PER_DIR
+        for old in backups[: max(0, excess)]:
+            old.unlink(missing_ok=True)
+    except Exception as exc:
+        _log.debug("backup pruning failed for %s: %s", backup_dir, exc)
+
+
 def load_flow_graph(file_path: str) -> Any:
     platform = get_platform()
     flow_graph = platform.make_flow_graph()
@@ -983,7 +1003,6 @@ def change_graph(  # noqa: C901
     force: bool = False,
 ) -> dict[str, Any]:
     from grc_agent.adapter.layout import _compute_layout_model, compute_full_layout
-    from grc_agent.adapter.snapshots import _prune_old_backups, push_undo_snapshot
 
     add_blocks = _sanitize_data(add_blocks)
     update_params = _sanitize_data(update_params)
@@ -1524,7 +1543,6 @@ def change_graph(  # noqa: C901
                     shutil.copy2(target_path, backup_path)
                     _prune_old_backups(backup_dir)
                 _atomic_write_text(_serialize_flow_graph(flow_graph), target_path)
-                push_undo_snapshot(flow_graph, target_path, initial_data)
             finally:
                 fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
     except Exception as exc:

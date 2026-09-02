@@ -109,9 +109,6 @@ def test_sync_manual_edit_does_not_block_when_lock_held(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "grc_agent.native_canvas._atomic_write_text", lambda *_args, **_kwargs: None
     )
-    monkeypatch.setattr(
-        "grc_agent.native_canvas.push_undo_snapshot", lambda *_args, **_kwargs: None
-    )
 
     lock_path = tmp_path / ".grc_agent" / (grc.name + ".lock")
     held = lock_path.open("a", encoding="utf-8")
