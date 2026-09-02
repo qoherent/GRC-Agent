@@ -68,7 +68,7 @@ from pydantic_ai.tools import (
 from pydantic_graph import End
 
 from .agent import GrcAgentResponse
-from .agent_factory import describe_model, resolve_model_context_length
+from .agent_factory import aresolve_model_context_length, describe_model
 from .native_canvas import sidebar_font_multiplier
 from .settings import get_approval_mode, set_approval_mode
 from .ui.approval_card import ApprovalCard
@@ -753,6 +753,11 @@ class ChatSidebar(Gtk.Box):
         # set_agents call (startup + live-swap) so the user always sees which
         # backend the running agent is actually using.
         self._active_provider: str = ""
+        # Context-window resolution is cached per (provider, model) and
+        # refreshed off the unified loop; the label reads the cache only.
+        self._context_window_cache: dict[tuple[str, str], int] = {}
+        self._context_window_probed: set[tuple[str, str]] = set()
+        self._context_window_tasks: set[asyncio.Task] = set()
         self._active_model: str = ""
         self._active_base_url: str | None = None
         self._model_build_error: str | None = None
@@ -1204,6 +1209,34 @@ class ChatSidebar(Gtk.Box):
             )
             ctx.add_class("chat-mode-yolo")
 
+    def _schedule_context_window_probe(self, provider: str, model: str) -> None:
+        """Resolve the model's context window once, off the unified loop."""
+        if not provider or not model:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            # Called from a synchronous render path with no loop running (a
+            # headless test, or before install()). Leave the key unprobed so
+            # the next call under the unified loop schedules it.
+            return
+        key = (provider, model)
+        self._context_window_probed.add(key)
+
+        async def _probe() -> None:
+            try:
+                window = await aresolve_model_context_length(provider, model)
+            except Exception as exc:  # never let a probe break a turn
+                _log.debug("context-window probe failed for %s/%s: %s", provider, model, exc)
+                return
+            if window is not None:
+                self._context_window_cache[key] = window
+                self._update_context_label()
+
+        task = loop.create_task(_probe())
+        self._context_window_tasks.add(task)
+        task.add_done_callback(self._context_window_tasks.discard)
+
     def _update_context_label(self) -> None:
         """Update the context usage label under the input box using Pydantic AI's native msg.usage."""
         msgs = (
@@ -1232,9 +1265,17 @@ class ChatSidebar(Gtk.Box):
             self._active_run, last_turn_cost, has_usage
         )
 
-        active_provider = getattr(self, "_active_provider", "") or ""
-        active_model = getattr(self, "_active_model", "") or ""
-        max_context = resolve_model_context_length(active_provider, active_model)
+        active_provider = self._active_provider or ""
+        active_model = self._active_model or ""
+        # Read a cached value only. This runs inside the agent.iter() node
+        # loop — after every node — and resolve_model_context_length makes a
+        # blocking 3s HTTP request on a cache miss, which stalled the unified
+        # GTK+asyncio loop mid-stream and did it again whenever the 60s
+        # negative-cache TTL expired. The refresh happens off-loop instead,
+        # scheduled once per (provider, model).
+        max_context = self._context_window_cache.get((active_provider, active_model))
+        if max_context is None and (active_provider, active_model) not in self._context_window_probed:
+            self._schedule_context_window_probe(active_provider, active_model)
 
         pct: float | None = None
         if not msgs or last_input_tokens == 0:

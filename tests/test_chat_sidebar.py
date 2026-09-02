@@ -2091,6 +2091,14 @@ def test_context_label_updates_with_pydantic_ai_usage(tmp_path, monkeypatch):
         )
     )
 
+    # The label reads a cache the probe fills off-loop; it never makes the
+    # blocking HTTP call itself, because it runs inside the agent.iter() node
+    # loop after every node. Before the probe lands there is simply no
+    # denominator to show.
+    sidebar._update_context_label()
+    assert "3.3k tok" in sidebar._context_label.get_label()
+
+    sidebar._context_window_cache[("ollama_cloud", "glm-5.3-flash:cloud")] = 1_048_576
     sidebar._update_context_label()
     text = sidebar._context_label.get_label()
     assert "3.3k / 1M tok" in text

@@ -277,12 +277,20 @@ def test_compaction_clamp_tier_guards_the_window(monkeypatch):
 
 
 def test_compaction_window_override_for_documented_registry_errors(monkeypatch):
-    """genai-prices records claude-sonnet-4-5 as 1,000,000 vs its real
-    200,000 — an over-recorded window would never compact before the
-    provider rejects the request. The docs prescribe an explicit
-    context_window override; the map must apply it (substring match covers
-    prefixed ids like OpenRouter's 'anthropic/claude-sonnet-4-5')."""
+    """A model whose window the registry knows is budgeted from it.
+
+    This used to assert a hardcoded override table that corrected
+    genai-prices for two Claude models. Both rows were fixed upstream in
+    0.1.6 (pinned by test_registry_reports_the_real_anthropic_context_windows),
+    so the table is gone and the value now comes from the registry itself --
+    reached through the harness, per request, rather than a substring match on
+    the model id.
+    """
     monkeypatch.delenv("GRC_COMPACTION_TARGET_TOKENS", raising=False)
+    monkeypatch.setattr(
+        "grc_agent.agent_factory.resolve_model_context_length",
+        lambda *_a, **_k: 200_000,
+    )
     cap = _build_compaction_capability(
         {
             "provider": "openai_compatible",
@@ -649,3 +657,83 @@ def test_clear_tool_results_min_clear_tokens_gates_on_total_reclaim():
         assert "[CLEARED]" in str(returns["c2"]), "bulky result must be cleared"
 
     asyncio.run(_run())
+
+
+def test_local_window_is_reprobed_after_a_failed_build_time_probe():
+    """A probe that failed at build time must not freeze the budget forever.
+
+    The window used to be resolved once, when the agent was constructed. If
+    the backend was still starting, a local model with a 131,072-token window
+    stayed capped at 0.85 x 32,000 = 27,200 tokens for the life of the agent.
+    The registry cannot rescue this -- resolve_context_window returns None for
+    every self-hosted model id -- so switching to fallback_context_window
+    alone changes nothing. Only the backend knows, so it is asked again.
+    """
+    import asyncio
+
+    from pydantic_ai_harness.compaction import ClearToolResults
+
+    from grc_agent import agent_factory
+    from grc_agent.agent_factory import TranscriptPreservingTieredCompaction
+
+    cap = TranscriptPreservingTieredCompaction(
+        tiers=[ClearToolResults(max_messages=50)],
+        target_fraction=0.85,
+        context_window=32_000,
+        pending_window_probe=("ollama_local", "qwen3.8"),
+    )
+    assert cap.context_window == 32_000
+
+    async def late_success(provider, model):  # noqa: ARG001
+        return 131_072
+
+    original = agent_factory.aresolve_model_context_length
+    agent_factory.aresolve_model_context_length = late_success
+    try:
+        asyncio.run(cap._resolve_window_once())
+    finally:
+        agent_factory.aresolve_model_context_length = original
+
+    assert cap.context_window == 131_072, "a later successful probe must take effect"
+    assert cap.pending_window_probe is None, "and must not re-probe every request"
+
+
+def test_registry_reports_the_real_anthropic_context_windows():
+    """Pin the two rows a hardcoded override table used to correct.
+
+    genai-prices 0.1.3 recorded claude-sonnet-4-5 at 1,000,000 against a real
+    200,000, and claude-opus-4-6 at 200,000 against a real 1,000,000. Both
+    were wrong in the dangerous direction for sonnet: compaction would trigger
+    at 850,000 and the provider would reject the request instead of the
+    harness compacting. Both rows were corrected upstream, so the workaround
+    is deleted -- and pinned here, because if the registry regresses the
+    symptom is silent mis-budgeting rather than a crash.
+    """
+    from pydantic_ai_harness.compaction import resolve_context_window
+
+    assert resolve_context_window("anthropic:claude-sonnet-4-5") == 200_000
+    assert resolve_context_window("anthropic:claude-opus-4-6") == 1_000_000
+
+
+def test_compaction_fields_are_real_dataclass_fields():
+    """archive_agent_name was a class attribute mutated after construction.
+
+    On a dataclass subclass that makes it shared class state which survives
+    neither dataclasses.replace nor __eq__.
+    """
+    import dataclasses
+
+    from pydantic_ai_harness.compaction import ClearToolResults
+
+    from grc_agent.agent_factory import TranscriptPreservingTieredCompaction
+
+    names = {f.name for f in dataclasses.fields(TranscriptPreservingTieredCompaction)}
+    assert {"archive_agent_name", "pending_window_probe"} <= names
+
+    a = TranscriptPreservingTieredCompaction(
+        tiers=[ClearToolResults(max_messages=50)],
+        target_fraction=0.85,
+        archive_agent_name="one",
+    )
+    b = dataclasses.replace(a, archive_agent_name="two")
+    assert a.archive_agent_name == "one" and b.archive_agent_name == "two"

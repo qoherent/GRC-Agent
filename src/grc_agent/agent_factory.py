@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import dataclasses
 import importlib
 import logging
 import os
@@ -64,10 +66,6 @@ from grc_agent.ui.providers import PROVIDER_LABELS
 # rejects the request (the dangerous direction). `context_window` overrides
 # resolution outright, per the docs' own remedy. Keyed by substring so
 # prefixed ids (e.g. OpenRouter's 'anthropic/claude-sonnet-4-5') match too.
-_MODEL_WINDOW_OVERRIDES = {
-    "claude-sonnet-4-5": 200_000,  # registry records 1,000,000; real window 200,000
-    "claude-opus-4-6": 1_000_000,  # registry records 200,000; real window 1,000,000 (safe but wasteful)
-}
 
 
 if TYPE_CHECKING:  # native_canvas imports gi/GTK; keep it out of the runtime path
@@ -537,6 +535,18 @@ _CTX_PROBES = {
 }
 
 
+async def aresolve_model_context_length(provider: str, model: str) -> int | None:
+    """Off-loop wrapper around the synchronous probe.
+
+    The probe opens a blocking httpx.Client with a 3s timeout. It used to be
+    called straight from the sidebar's per-node context-label refresh, which
+    runs on the unified GTK+asyncio loop — so on a cache miss the whole UI,
+    canvas sync included, stalled mid-stream, and did it again every time the
+    60s negative-cache TTL expired.
+    """
+    return await asyncio.to_thread(resolve_model_context_length, provider, model)
+
+
 def resolve_model_context_length(provider: str, model: str) -> int | None:
     """Dynamically query the active provider's API for the model's exact context
     length. Cached in-memory per (provider, model) pair; returns None if
@@ -618,6 +628,7 @@ def make_summarizing_strategy() -> ResilientSummarizingCompaction:
     )
 
 
+@dataclass
 class TranscriptPreservingTieredCompaction(TieredCompaction):
     """Archive the exact pre-compaction transcript before replacing history.
 
@@ -629,9 +640,37 @@ class TranscriptPreservingTieredCompaction(TieredCompaction):
     never silently destroy the only durable copy used for dataset collection.
     """
 
-    archive_agent_name = "grc_chat"
+    # Real dataclass fields, not class attributes mutated after construction:
+    # the parent is a dataclass, so an undecorated subclass silently turns
+    # these into shared class state that survives neither dataclasses.replace
+    # nor __eq__.
+    archive_agent_name: str = "grc_chat"
+    # (provider, model) to re-probe lazily, or None when the window is already
+    # known or deliberately fixed.
+    pending_window_probe: tuple[str, str] | None = None
+
+    async def _resolve_window_once(self) -> None:
+        """Fill in the real context window on the first request that can.
+
+        The window used to be resolved once, at agent-build time. A probe that
+        failed because the backend was still starting froze the conservative
+        fallback for the entire life of the agent — a local model with a
+        131,072-token window stayed capped at 0.85 x 32,000 = 27,200 tokens
+        until the app was restarted. The registry cannot rescue that case:
+        resolve_context_window returns None for every self-hosted model id, so
+        switching to fallback_context_window alone changes nothing. Only the
+        backend knows, so ask it again.
+        """
+        if self.pending_window_probe is None:
+            return
+        provider, model = self.pending_window_probe
+        probed = await aresolve_model_context_length(provider, model)
+        if probed is not None:
+            self.context_window = probed
+            self.pending_window_probe = None
 
     async def before_model_request(self, ctx, request_context):  # noqa: ANN001
+        await self._resolve_window_once()
         before = list(request_context.messages)
         transcript = list(ctx.messages)
         processed = await super().before_model_request(ctx, request_context)
@@ -665,8 +704,9 @@ def _build_compaction_capability(
     guesses are only fallbacks when the probe cannot answer.
     """
     def tagged(capability: TranscriptPreservingTieredCompaction):
-        capability.archive_agent_name = agent_name
-        return capability
+        # archive_agent_name is a constructor field now; this only keeps the
+        # call sites below from repeating it eight times.
+        return dataclasses.replace(capability, archive_agent_name=agent_name)
 
     base_url = _provider_base_url(cfg)
     # One uniform rule: any plain-HTTP endpoint is a self-hosted server
@@ -738,15 +778,19 @@ def _build_compaction_capability(
     # now the LAST resort, used only when the probe fails (backend down at
     # build time) — never the primary path.
     model_id = str(cfg.get("model", ""))
-    for key, window in _MODEL_WINDOW_OVERRIDES.items():
-        if key in model_id:
-            return tagged(
-                TranscriptPreservingTieredCompaction(
-                    tiers=tiers, target_fraction=0.85, context_window=window
-                )
-            )
+    provider = str(cfg.get("provider", ""))
 
-    probed = resolve_model_context_length(str(cfg.get("provider", "")), model_id)
+    # Ask the backend first — it is the only source that knows a self-hosted
+    # deployment's real window.
+    probed = resolve_model_context_length(provider, model_id)
+
+    # There used to be a two-entry model-name substring table correcting
+    # genai-prices, which recorded claude-sonnet-4-5 at 1,000,000 against a
+    # real 200,000 and claude-opus-4-6 at 200,000 against a real 1,000,000.
+    # Both rows were fixed upstream in genai-prices 0.1.6, verified against
+    # the installed registry, so the workaround is gone rather than kept as
+    # folklore. tests/test_context_compaction.py pins the registry values so a
+    # regression there fails loudly instead of silently mis-budgeting.
     if probed is not None:
         return tagged(
             TranscriptPreservingTieredCompaction(
@@ -754,17 +798,25 @@ def _build_compaction_capability(
             )
         )
 
-    # Probe failed or impossible: let the harness resolve the registry per
-    # request, with the old conservative guesses as the fallback denominator.
+    # Nothing could answer yet. Start on the conservative denominator, but
+    # keep the probe pending so a backend that was merely slow to start is
+    # picked up on a later request rather than frozen out for the session.
+    pending = (provider, model_id) if provider and model_id else None
     if is_local:
         return tagged(
             TranscriptPreservingTieredCompaction(
-                tiers=tiers, target_fraction=0.85, context_window=32_000
+                tiers=tiers,
+                target_fraction=0.85,
+                context_window=32_000,
+                pending_window_probe=pending,
             )
         )
     return tagged(
         TranscriptPreservingTieredCompaction(
-            tiers=tiers, target_fraction=0.85, fallback_context_window=128_000
+            tiers=tiers,
+            target_fraction=0.85,
+            fallback_context_window=128_000,
+            pending_window_probe=pending,
         )
     )
 
