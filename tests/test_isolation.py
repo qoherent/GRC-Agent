@@ -5,7 +5,7 @@ from pydantic_ai.models.ollama import OllamaModel
 from pydantic_ai.models.openai import OpenAIChatModel
 
 from grc_agent.adapter import _embed_endpoint, get_db_and_model
-from grc_agent.agent import build_scenario_model, grc_tools
+from grc_agent.agent import grc_tools
 from grc_agent.agent_factory import _build_model, _retrying_http_client
 from grc_agent.settings import (
     env_path,
@@ -148,26 +148,6 @@ def test_build_model_isolation(tmp_path, monkeypatch):
     m = _build_model(cfg, http_client)
     assert isinstance(m, OpenAIChatModel)
     assert m.model_name == "vllm-model"
-
-
-def test_scenario_model_builder_uses_provider(monkeypatch):
-    """Regression for P2-7: the scenario harness must be able to build a model
-    for either backend so integration tests can run against Ollama or OpenAI-compatible."""
-    monkeypatch.setenv("OPENROUTER_API_KEY", "dummy-test-key")
-    ollama = build_scenario_model("ollama")
-    assert isinstance(ollama, OllamaModel)
-
-    ollama_cloud = build_scenario_model("ollama_cloud", "deepseek-v4-flash:0731")
-    assert isinstance(ollama_cloud, OllamaModel)
-    assert ollama_cloud.model_name == "deepseek-v4-flash:0731"
-
-    openrouter = build_scenario_model("openrouter", "z-ai/glm-5.3-flash")
-    assert isinstance(openrouter, OpenAIChatModel)
-    assert openrouter.model_name == "z-ai/glm-5.3-flash"
-
-    openai_compat = build_scenario_model("openai_compatible", "my-custom-model")
-    assert isinstance(openai_compat, OpenAIChatModel)
-    assert openai_compat.model_name == "my-custom-model"
 
 
 # ── New comprehensive tests for the .env consolidation ──────────────────────

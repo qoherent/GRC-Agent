@@ -18,16 +18,20 @@ load_dotenv(env_path())
 
 pytestmark = pytest.mark.integration
 
-# Import components from grc_agent.agent
-from grc_agent.agent import (  # noqa: E402
+# Production symbols from the installed package...
+# ...and the scenario corpus from the test-side harness that owns it.
+from scenarios.harness import (  # noqa: E402
     SCENARIOS,
-    GrcAgentResponse,
-    StopGracefully,
     build_scenario_model,
     check_expect,
     fresh_agent,
-    grc_tools,
     render_scenario_markdown,
+)
+
+from grc_agent.agent import (  # noqa: E402
+    GrcAgentResponse,
+    StopGracefully,
+    grc_tools,
     validate_flowgraph_state,
     web_fetch_cap,
     web_search_cap,

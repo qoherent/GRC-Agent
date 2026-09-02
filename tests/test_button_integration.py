@@ -23,6 +23,8 @@ from grc_agent.settings import env_path
 
 load_dotenv(env_path())
 
+from scenarios.harness import build_scenario_model, fresh_agent  # noqa: E402
+
 from grc_agent.adapter import (  # noqa: E402
     change_graph,
     inspect_graph,
@@ -30,8 +32,6 @@ from grc_agent.adapter import (  # noqa: E402
 from grc_agent.agent import (  # noqa: E402
     GrcAgentResponse,
     StopGracefully,
-    build_scenario_model,
-    fresh_agent,
     grc_tools,
     validate_flowgraph_state,
     web_fetch_cap,
