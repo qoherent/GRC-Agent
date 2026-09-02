@@ -188,12 +188,13 @@ def test_get_run_log_tool_no_monitor_wired_raises():
     It used to be reported as ordinary data ("No execution log available"),
     which the model could not distinguish from the legitimate "no run yet"
     result — so a broken wiring read as a healthy environment. It now raises
-    ModelRetry like every other domain-tool failure."""
+    ToolFailed: the model sees a failed result and adapts, and no retry budget
+    is spent on a fault no retry can fix."""
     import asyncio
 
     import pytest
     from pydantic_ai import RunContext
-    from pydantic_ai.exceptions import ModelRetry
+    from pydantic_ai.exceptions import ToolFailed
 
     from grc_agent.agent import get_run_log_func
 
@@ -207,7 +208,7 @@ def test_get_run_log_tool_no_monitor_wired_raises():
         model=None,
         usage=None,
     )
-    with pytest.raises(ModelRetry, match="run monitor is not available"):
+    with pytest.raises(ToolFailed, match="not wired up"):
         asyncio.run(get_run_log_func(ctx))
 
 

@@ -40,7 +40,10 @@ Rules and architectural commandments for AI coding agents working on this codeba
   - All file writes must be atomic (temp file → fsync → `os.replace`).
   - Thread safety must be explicit: use `threading.Lock` for cross-worker process spawning (e.g. `ensure_server()`) and `asyncio.Lock` for async token refreshes.
   - Flowgraph disk access is locked via `fcntl.flock` on `.grc_agent/<name>.lock`.
-- **Uniform Error Reporting via `ModelRetry`**: Every model-facing domain tool reports recoverable errors uniformly by raising `ModelRetry` with actionable compiler/runtime feedback so the agent can self-correct. Environment faults (e.g. missing background monitor) must explicitly instruct the agent not to retry to prevent infinite loops.
+- **Uniform Error Reporting — `ModelRetry` vs `ToolFailed`**: Every model-facing domain tool reports failure through one of two framework exceptions, chosen by what the model should do next.
+  - `ModelRetry` — the model can fix this by trying again with different arguments or a different approach (bad param, invalid connection, validation failure). Carries actionable compiler/runtime feedback and consumes the tool's retry budget.
+  - `ToolFailed` — terminal: no retry can fix it (an unwired run monitor, missing execution or save capability). The model sees a failed result and adapts. It consumes no retry budget, so repeated terminal failures are bounded at the run level instead: `StopGracefully.max_repeated_failures` ends the run after a tool fails terminally 3 times in a row.
+  - Never instruct the model not to retry in prose. That was a workaround for reporting terminal faults as retries; the exception type now carries it.
 
 ---
 

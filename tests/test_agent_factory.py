@@ -211,3 +211,73 @@ def test_httpx1_exception_set_is_still_needed(monkeypatch):
         monkeypatch.setenv(PROVIDER_API_KEY[provider], "dummy-key")
         with pytest.raises(TypeError, match="http_client"):
             _build_model({"provider": provider, "model": "x"}, httpx2.AsyncClient())
+
+
+def test_repeated_terminal_failures_end_the_run():
+    """ToolFailed spends no retry budget, so the run-level bound must exist.
+
+    Converting the environment faults from ModelRetry to ToolFailed removed
+    the per-tool retry ceiling that used to stop a model hammering a dead
+    end. StopGracefully now ends the run after a tool fails terminally three
+    times in a row -- the bound AGENTS.md section 3 names in place of the old
+    prose "do not retry" instruction.
+    """
+    from types import SimpleNamespace
+
+    from grc_agent.agent import StopGracefully
+
+    cap = StopGracefully()
+
+    def failed(tool: str):
+        return SimpleNamespace(parts=[SimpleNamespace(outcome="failed", tool_name=tool)])
+
+    def ok(tool: str):
+        return SimpleNamespace(parts=[SimpleNamespace(outcome="success", tool_name=tool)])
+
+    ctx = SimpleNamespace(messages=[failed("get_run_log"), failed("get_run_log")])
+    assert cap._repeatedly_failing_tool(ctx) is None, "two failures must not end the run"
+
+    ctx = SimpleNamespace(messages=[failed("get_run_log")] * 3)
+    assert cap._repeatedly_failing_tool(ctx) == "get_run_log"
+
+    # A success breaks the streak: fail, recover, fail again is not a dead end.
+    ctx = SimpleNamespace(messages=[failed("x"), failed("x"), ok("x"), failed("x")])
+    assert cap._repeatedly_failing_tool(ctx) is None
+
+    # Failures of *different* tools do not aggregate into one streak.
+    ctx = SimpleNamespace(messages=[failed("a"), failed("b"), failed("c")])
+    assert cap._repeatedly_failing_tool(ctx) is None
+
+
+def test_agent_module_imports_without_pygobject():
+    """The tool layer must not drag GTK in through its type annotations.
+
+    agent.py has no postponed-annotation import, so annotating ctx.deps with
+    NativeFlowgraphProxy would evaluate that name at definition time and pull
+    gi/GTK into the import path -- the separation agent_factory already keeps
+    behind `if TYPE_CHECKING`. The deps Protocol exists to avoid that.
+    """
+    import subprocess
+    import sys
+    import textwrap
+
+    script = textwrap.dedent(
+        """
+        import sys
+        # Make any gi import fail, the way a machine without PyGObject would.
+        class _Blocked:
+            def find_module(self, name, path=None):
+                if name == "gi" or name.startswith("gi."):
+                    raise ImportError("PyGObject is not installed")
+                return None
+        sys.meta_path.insert(0, _Blocked())
+        import grc_agent.agent  # noqa: F401
+        assert "gi" not in sys.modules, "importing the tool layer pulled in GTK"
+        print("OK")
+        """
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script], capture_output=True, text=True, timeout=120
+    )
+    assert result.returncode == 0, result.stderr[-1500:]
+    assert "OK" in result.stdout

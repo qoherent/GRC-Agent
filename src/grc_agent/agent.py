@@ -12,6 +12,7 @@ from pydantic_ai import (
     ModelRetry,
     RunContext,
     Tool,
+    ToolFailed,
 )
 from pydantic_ai.capabilities import (
     AbstractCapability,
@@ -34,6 +35,14 @@ from grc_agent.adapter import (
     query_catalog,
     query_docs,
     save_block_to_library,
+)
+from grc_agent.deps import (
+    FlowgraphDeps,
+    SupportsGetRunLog,
+    SupportsNotifyEdit,
+    SupportsRunFlowgraph,
+    SupportsSaveBlock,
+    SupportsSaveGraph,
 )
 
 _log = logging.getLogger(__name__)
@@ -83,19 +92,66 @@ class StopGracefully(AbstractCapability[Any]):
     detector."""
 
     max_requests: int = 40
+    # ToolFailed reports a terminal failure and deliberately consumes no retry
+    # budget, so a tool that keeps failing is bounded only by max_requests —
+    # 40 model round-trips of the same dead end. Cap the repeats instead:
+    # pydantic-ai's own guidance is to bound repeated failures at the run
+    # level, which is what AGENTS.md section 3's do-not-retry prose used to
+    # approximate in words.
+    max_repeated_failures: int = 3
     count: int = 0
 
-    async def for_run(self, ctx: RunContext[Any]) -> "StopGracefully":  # noqa: ARG002
-        return StopGracefully(max_requests=self.max_requests)
+    async def for_run(self, ctx: RunContext[FlowgraphDeps]) -> "StopGracefully":  # noqa: ARG002
+        return StopGracefully(
+            max_requests=self.max_requests,
+            max_repeated_failures=self.max_repeated_failures,
+        )
+
+    def _repeatedly_failing_tool(self, ctx: RunContext[FlowgraphDeps]) -> str | None:
+        """The tool that has just failed terminally too many times, if any.
+
+        Counts the trailing run of failed returns rather than a total, so a
+        tool that fails once, succeeds, then fails again is not penalised.
+        """
+        streak: dict[str, int] = {}
+        for msg in reversed(list(ctx.messages)):
+            parts = getattr(msg, "parts", ())
+            settled = [p for p in parts if getattr(p, "outcome", None) is not None]
+            if not settled:
+                continue
+            for part in settled:
+                if part.outcome != "failed":
+                    return None
+                name = getattr(part, "tool_name", "") or ""
+                streak[name] = streak.get(name, 0) + 1
+                if streak[name] >= self.max_repeated_failures:
+                    return name
+        return None
 
     async def wrap_node_run(
         self,
-        ctx: RunContext[Any],  # noqa: ARG002
+        ctx: RunContext[FlowgraphDeps],
         *,
         node: AgentNode,
         handler: WrapNodeRunHandler,
     ) -> NodeResult:
         if isinstance(node, ModelRequestNode):
+            failing = self._repeatedly_failing_tool(ctx)
+            if failing:
+                _log.warning(
+                    "StopGracefully: %r failed terminally %d times in a row — ending run",
+                    failing,
+                    self.max_repeated_failures,
+                )
+                return End(
+                    FinalResult(
+                        output=(
+                            f"`{failing}` is not available in this environment and kept "
+                            "failing, so I'm stopping rather than retrying it further. "
+                            "The rest of the session is unaffected."
+                        )
+                    )
+                )
             self.count += 1
             if self.count > self.max_requests:
                 _log.warning(
@@ -165,7 +221,7 @@ prompt_injection_cap = PromptInjectionDefender(
     on_detection=_log_injection_detection,
 )
 # Module-level tool functions
-async def inspect_graph_func(ctx: RunContext[Any], targets: list[str] | None = None) -> str:
+async def inspect_graph_func(ctx: RunContext[FlowgraphDeps], targets: list[str] | None = None) -> str:
     """Read-only inspection of the active graph. Returns topology, block instances, connections, parameter values, and validation status.
 
     Args:
@@ -201,7 +257,7 @@ ConnectionSpec = Annotated[
 
 
 async def query_knowledge_func(
-    ctx: RunContext[Any],  # noqa: ARG001
+    ctx: RunContext[FlowgraphDeps],  # noqa: ARG001
     query: str,
     domain: Literal["catalog", "docs"],
     k: ResultCount = 5,
@@ -224,7 +280,7 @@ async def query_knowledge_func(
     return json.dumps(res)
 
 
-async def generate_python_func(ctx: RunContext[Any], k: ResultCount = 5) -> str:
+async def generate_python_func(ctx: RunContext[FlowgraphDeps], k: ResultCount = 5) -> str:
     """Render the Python source GNU Radio would generate from the current graph. Read-only — never writes to disk or runs the flowgraph.
 
     Returns one entry per generated file: the main flowgraph script plus one
@@ -244,7 +300,7 @@ async def generate_python_func(ctx: RunContext[Any], k: ResultCount = 5) -> str:
 
 
 async def change_graph_func(
-    ctx: RunContext[Any],
+    ctx: RunContext[FlowgraphDeps],
     reason: str,
     add_blocks: Annotated[list[BlockAdd], Field(default_factory=list)],
     remove_blocks: Annotated[list[str], Field(default_factory=list)],
@@ -305,7 +361,7 @@ async def change_graph_func(
         # regardless of force, so suggesting it there is actively misleading
         # and can waste one of the model's limited retries chasing something
         # that can never succeed.
-        if res.get("rollback_failed") and hasattr(ctx.deps, "notify_edit"):
+        if res.get("rollback_failed") and isinstance(ctx.deps, SupportsNotifyEdit):
             await ctx.deps.notify_edit(relayout=False)
         hint = (
             "Set force=True to bypass GNU Radio's own validation opinion and retry."
@@ -325,7 +381,7 @@ async def change_graph_func(
     # signalling them, so a `canvas_synced` field could only ever say True —
     # false assurance is worse than none. On a raw flowgraph deps (scenario
     # harness) notify_edit is absent and this is skipped.
-    if hasattr(ctx.deps, "notify_edit"):
+    if isinstance(ctx.deps, SupportsNotifyEdit):
         await ctx.deps.notify_edit(relayout=bool(res.get("relayout")))
     # The `reason` argument is consumed by the approval UI, not by the engine;
     # it is echoed into the result so the persisted transcript carries the
@@ -333,7 +389,7 @@ async def change_graph_func(
     return json.dumps({**res, "reason": reason})
 
 
-async def get_run_log_func(ctx: RunContext[Any]) -> str:
+async def get_run_log_func(ctx: RunContext[FlowgraphDeps]) -> str:
     """Read the console output (stdout + stderr) of the most recent flowgraph run.
 
     Returns the captured log from the last Execute action, whether it succeeded
@@ -345,17 +401,16 @@ async def get_run_log_func(ctx: RunContext[Any]) -> str:
     after a run to re-read the output. If it was longer than the monitor's
     buffer, the oldest output is dropped and "log_truncated" is set.
     """
-    get_fn = getattr(ctx.deps, "get_run_log", None)
-    if get_fn is None or not callable(get_fn):
-        # A missing monitor is a wiring fault in this app, not an empty result.
-        # Reporting it as ordinary data made it indistinguishable from "no run
-        # yet" — the model would read a broken environment as a normal one.
-        raise ModelRetry(
-            "The run monitor is not available, so no execution log can be read. This is an "
-            "environment fault, not an empty log — do not retry this tool; tell the user that "
-            "run-log capture is unavailable and continue without it."
+    # A missing monitor is a wiring fault, not an empty result: reporting it as
+    # ordinary data made it indistinguishable from "no run yet". ToolFailed is
+    # the framework's own terminal-failure signal — the model sees the result
+    # and adapts instead of being told in prose not to retry.
+    if not isinstance(ctx.deps, SupportsGetRunLog):
+        raise ToolFailed(
+            "Run-log capture is not wired up in this environment, so no execution log "
+            "exists to read. Tell the user and continue without it."
         )
-    data = get_fn()
+    data = ctx.deps.get_run_log()
     if data is None:
         return json.dumps(
             {
@@ -367,7 +422,7 @@ async def get_run_log_func(ctx: RunContext[Any]) -> str:
 
 
 async def save_block_func(
-    ctx: RunContext[Any],
+    ctx: RunContext[FlowgraphDeps],
     instance_name: str,
     block_id: str | None = None,
     label: str | None = None,
@@ -393,7 +448,7 @@ async def save_block_func(
         overwrite: Set True to replace a block_id this tool previously saved. Never
             allowed to overwrite a stock or foreign block regardless of this flag.
     """
-    if hasattr(ctx.deps, "save_block"):
+    if isinstance(ctx.deps, SupportsSaveBlock):
         res = await ctx.deps.save_block(
             instance_name,
             block_id=block_id,
@@ -415,8 +470,24 @@ async def save_block_func(
     return json.dumps(res)
 
 
+def _validate_run_flowgraph(ctx: RunContext[FlowgraphDeps], action: str = "start", **_: Any) -> None:
+    """Decide approval before the tool body runs.
+
+    Starting a flowgraph is a physical-world side effect (RF transmission) and
+    is approval-gated; stopping one is the remedy, not the risk, and executes
+    immediately. Raising ApprovalRequired here rather than inside the tool is
+    the framework's documented placement: invalid arguments are rejected
+    before a human is asked to approve them, the deferral costs no retry
+    budget, and the validator re-runs with tool_call_approved set once the
+    user approves. The action value itself needs no check — the Literal in the
+    signature already rejects anything but 'start' or 'stop'.
+    """
+    if action == "start" and not ctx.tool_call_approved:
+        raise ApprovalRequired()
+
+
 async def run_flowgraph_func(
-    ctx: RunContext[Any],
+    ctx: RunContext[FlowgraphDeps],
     action: Literal["start", "stop"] = "start",
     wait: bool = True,
     timeout_seconds: float = 60.0,
@@ -438,20 +509,13 @@ async def run_flowgraph_func(
             stops the flowgraph after N seconds (requires wait=True). Leave unset to run
             until completion or manual stop.
     """
-    if action not in ("start", "stop"):
-        raise ModelRetry(f"Invalid action {action!r}: must be 'start' or 'stop'.")
-    if action == "start" and not getattr(ctx, "tool_call_approved", False):
-        raise ApprovalRequired()
-
-    run_fn = getattr(ctx.deps, "run_flowgraph", None)
-    if run_fn is None or not callable(run_fn):
-        raise ModelRetry(
-            "Flowgraph execution is not available in this environment — this is a wiring "
-            "fault, not a fixable error. Do not retry; tell the user to use GRC's own "
-            "Execute/Stop button and continue without this tool."
+    if not isinstance(ctx.deps, SupportsRunFlowgraph):
+        raise ToolFailed(
+            "Flowgraph execution is not wired up in this environment. Tell the user to "
+            "use GRC's own Execute/Stop button and continue without this tool."
         )
     try:
-        res = await run_fn(
+        res = await ctx.deps.run_flowgraph(
             action=action,
             wait=wait,
             timeout_seconds=timeout_seconds,
@@ -462,7 +526,7 @@ async def run_flowgraph_func(
     return json.dumps(res)
 
 
-async def save_graph_func(ctx: RunContext[Any]) -> str:
+async def save_graph_func(ctx: RunContext[FlowgraphDeps]) -> str:
     """Save the active flowgraph to disk through GRC's native serializer — the agent-side equivalent of Ctrl+S, with no dialog and no user interaction.
 
     Takes no arguments: it always saves the currently active GRC tab. A page
@@ -482,106 +546,57 @@ async def save_graph_func(ctx: RunContext[Any]) -> str:
     (retry the save shortly), or the write itself failed (the target is left
     untouched).
     """
-    save_fn = getattr(ctx.deps, "save_graph", None)
-    if save_fn is None or not callable(save_fn):
-        raise ModelRetry(
-            "Saving the flowgraph is not available in this environment — this is a wiring "
-            "fault, not a fixable error. Do not retry; tell the user to save the flowgraph "
-            "in GRC (File > Save) and continue without this tool."
+    if not isinstance(ctx.deps, SupportsSaveGraph):
+        raise ToolFailed(
+            "Saving the flowgraph is not wired up in this environment. Tell the user to "
+            "save it in GRC (File > Save) and continue without this tool."
         )
     try:
-        res = await save_fn()
+        res = await ctx.deps.save_graph()
     except ValueError as exc:
         raise ModelRetry(str(exc)) from exc
     return json.dumps(res)
 
 
+# Every domain tool derives its description and its per-argument schema text
+# from its own google-style docstring, so the model-visible contract cannot
+# drift from the real signature, and every one gets the same retry budget.
+_TOOL_DEFAULTS: dict[str, Any] = {
+    "docstring_format": "google",
+    "require_parameter_descriptions": True,
+    "max_retries": 3,
+}
+
+
 def grc_tools() -> list[Tool[Any]]:
-    inspect_tool = Tool(
-        inspect_graph_func,
-        name="inspect_graph",
-        docstring_format="google",
-        require_parameter_descriptions=True,
-    )
-
-    query_tool = Tool(
-        query_knowledge_func,
-        name="query_knowledge",
-        docstring_format="google",
-        require_parameter_descriptions=True,
-    )
-
-    generate_python_tool = Tool(
-        generate_python_func,
-        name="generate_python",
-        docstring_format="google",
-        require_parameter_descriptions=True,
-    )
-
-    change_tool = Tool(
-        change_graph_func,
-        name="change_graph",
-        # PydanticAI's own sanctioned human-in-the-loop approval mechanism:
-        # the model's call is never executed — the run ends with a
-        # DeferredToolRequests output the UI resolves with
-        # ToolApproved()/ToolDenied() before the tool body runs.
-        requires_approval=True,
-        # docstring_format + require_parameter_descriptions is PydanticAI's
-        # own sanctioned idiom for deriving both the tool description and
-        # each top-level arg's schema description straight from the
-        # docstring — one source of truth instead of a hand-written
-        # description that can silently drift from the real signature.
-        docstring_format="google",
-        require_parameter_descriptions=True,
-    )
-    change_tool.max_retries = 3
-
-    run_log_tool = Tool(
-        get_run_log_func,
-        name="get_run_log",
-        docstring_format="google",
-        require_parameter_descriptions=True,
-    )
-
-    # Execution control: starting a flowgraph raises ApprovalRequired() conditionally
-    # inside run_flowgraph_func; stopping is safe and executes immediately.
-    run_fg_tool = Tool(
-        run_flowgraph_func,
-        name="run_flowgraph",
-        docstring_format="google",
-        require_parameter_descriptions=True,
-    )
-    run_fg_tool.max_retries = 3
-
-    # Agent-side save (Ctrl+S parity): the unsaved-run gate directs the model
-    # here before a first run, so it sits next to run_flowgraph. No approval:
-    # a save is local and atomic, and its guards fail before anything is
-    # touched (never destructive).
-    save_graph_tool = Tool(
-        save_graph_func,
-        name="save_graph",
-        docstring_format="google",
-        require_parameter_descriptions=True,
-    )
-    save_graph_tool.max_retries = 3
-
-    save_block_tool = Tool(
-        save_block_func,
-        name="save_block",
-        docstring_format="google",
-        require_parameter_descriptions=True,
-    )
-    save_block_tool.max_retries = 3
-
+    """The eight GRC domain tools, in the order the model sees them."""
     return [
-        inspect_tool,
-        query_tool,
-        generate_python_tool,
-        change_tool,
-        run_log_tool,
-        run_fg_tool,
-        save_graph_tool,
-        save_block_tool,
+        Tool(inspect_graph_func, name="inspect_graph", **_TOOL_DEFAULTS),
+        Tool(query_knowledge_func, name="query_knowledge", **_TOOL_DEFAULTS),
+        Tool(generate_python_func, name="generate_python", **_TOOL_DEFAULTS),
+        Tool(
+            change_graph_func,
+            name="change_graph",
+            # Pydantic AI's own human-in-the-loop mechanism: the call is never
+            # executed — the run ends with a DeferredToolRequests output the
+            # sidebar resolves with ToolApproved()/ToolDenied() first.
+            requires_approval=True,
+            **_TOOL_DEFAULTS,
+        ),
+        Tool(get_run_log_func, name="get_run_log", **_TOOL_DEFAULTS),
+        Tool(
+            run_flowgraph_func,
+            name="run_flowgraph",
+            # Approval is conditional on the action, so it is decided in the
+            # validator rather than by a blanket requires_approval flag.
+            args_validator=_validate_run_flowgraph,
+            **_TOOL_DEFAULTS,
+        ),
+        # Agent-side save (Ctrl+S parity): the unsaved-run gate sends the model
+        # here before a first run. No approval — a save is local and atomic,
+        # and its guards fail before anything is touched.
+        Tool(save_graph_func, name="save_graph", **_TOOL_DEFAULTS),
+        Tool(save_block_func, name="save_block", **_TOOL_DEFAULTS),
     ]
 
 
@@ -611,7 +626,7 @@ def _extract_turn_pre_existing_errors(messages: list[Any]) -> set[str]:
     return set()
 
 
-async def validate_flowgraph_state(ctx: RunContext[Any], output: Any) -> Any:
+async def validate_flowgraph_state(ctx: RunContext[FlowgraphDeps], output: Any) -> Any:
     # A change_graph call only mutates the graph when it EXECUTED successfully:
     # denied calls (approval card) never run their body, and failed/rolled-back
     # calls leave the graph as it was before the call — validating the live

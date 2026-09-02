@@ -12,7 +12,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
-from pydantic_ai.exceptions import ApprovalRequired, ModelRetry
+from pydantic_ai.exceptions import ApprovalRequired, ModelRetry, ToolFailed
 
 from grc_agent.agent import run_flowgraph_func
 from grc_agent.native_canvas import NativeCanvasManager, NativeFlowgraphProxy
@@ -97,8 +97,15 @@ def fake_actions(monkeypatch):
 
 
 def test_run_gates_no_monitor():
+    """An unwired monitor is terminal, so the proxy raises ToolFailed.
+
+    ValueError is the proxy's channel for a *recoverable* gate refusal (no
+    graph, invalid graph, unsaved) which run_flowgraph_func turns into a
+    ModelRetry. A missing monitor is not recoverable, and routing it through
+    ValueError told the model to retry something no retry can fix.
+    """
     proxy, _ = _make_proxy(_valid_page(), monitor=None)
-    with pytest.raises(ValueError, match="run monitor is not wired"):
+    with pytest.raises(ToolFailed, match="run monitor is not wired"):
         import asyncio
 
         asyncio.run(proxy.run_flowgraph(action="start"))
@@ -398,31 +405,46 @@ def _ctx(deps, tool_call_approved=True):
 
 
 def test_tool_run_flowgraph_requires_approval_on_start():
-    import asyncio
+    """Approval is decided by the args_validator, before the tool body runs.
 
-    ctx = _ctx(SimpleNamespace(), tool_call_approved=False)
+    That placement is the point: an invalid argument is rejected without a
+    human being asked to approve it, and the deferral costs no retry budget.
+    """
+    from grc_agent.agent import _validate_run_flowgraph
+
     with pytest.raises(ApprovalRequired):
-        asyncio.run(
-            run_flowgraph_func(ctx, action="start", wait=True, timeout_seconds=1)
-        )
+        _validate_run_flowgraph(_ctx(SimpleNamespace(), tool_call_approved=False), action="start")
+
+    # 'stop' is the remedy, not the risk — it never asks.
+    _validate_run_flowgraph(_ctx(SimpleNamespace(), tool_call_approved=False), action="stop")
+    # ...and once approved, start passes too.
+    _validate_run_flowgraph(_ctx(SimpleNamespace(), tool_call_approved=True), action="start")
 
 
 def test_tool_run_flowgraph_requires_wired_deps():
+    """Unwired execution is terminal, so it is a failed result, not a retry."""
     import asyncio
 
-    with pytest.raises(ModelRetry, match="wiring"):
+    with pytest.raises(ToolFailed, match="not wired up"):
         asyncio.run(
             run_flowgraph_func(_ctx(SimpleNamespace(), tool_call_approved=True), action="start", wait=True, timeout_seconds=1)
         )
 
 
 def test_tool_run_flowgraph_invalid_action():
-    import asyncio
+    """The Literal in the signature rejects a bad action at validation time.
 
-    with pytest.raises(ModelRetry, match="Invalid action"):
-        asyncio.run(
-            run_flowgraph_func(_ctx(SimpleNamespace()), action="invalid")  # type: ignore[arg-type]
-        )
+    There is no hand-written check in the body any more: the schema carries
+    the enum, so an invalid value never reaches the tool.
+    """
+    import pydantic
+
+    from grc_agent.agent import grc_tools
+
+    tool = [t for t in grc_tools() if t.name == "run_flowgraph"][0]
+    assert tool.function_schema.json_schema["properties"]["action"]["enum"] == ["start", "stop"]
+    with pytest.raises(pydantic.ValidationError):
+        tool.function_schema.validator.validate_python({"action": "invalid"})
 
 
 @pytest.mark.usefixtures("fake_actions")

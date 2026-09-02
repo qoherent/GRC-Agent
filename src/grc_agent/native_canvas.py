@@ -64,6 +64,8 @@ def sidebar_font_multiplier(zoom_factor: float) -> float:
 # "until the next unrelated state_cache movement, or never."
 _POLL_FULL_CHECK_EVERY = 10  # ~15s at the 1.5s poll interval
 
+from pydantic_ai import ToolFailed
+
 from grc_agent.adapter import (
     flow_graph_content_hash,
     get_blocks_panel_visibility,
@@ -181,10 +183,13 @@ class NativeFlowgraphProxy:
 
         monitor = object.__getattribute__(self, "_exec_monitor")
         if monitor is None:
-            raise ValueError(
+            # ToolFailed, not ValueError: run_flowgraph_func converts ValueError
+            # into a ModelRetry, and a missing monitor is terminal — no amount
+            # of retrying wires one up. ToolFailed reaches the model as a
+            # failed result it adapts to, and costs no retry budget.
+            raise ToolFailed(
                 "The run monitor is not wired, so flowgraphs cannot be run from here. "
-                "This is an environment fault — do not retry; tell the user to use "
-                "GRC's own Execute button."
+                "Tell the user to use GRC's own Execute button."
             )
         cm = object.__getattribute__(self, "_canvas_manager")
         page = cm.current_page

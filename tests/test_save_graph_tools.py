@@ -12,7 +12,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
-from pydantic_ai.exceptions import ModelRetry
+from pydantic_ai.exceptions import ModelRetry, ToolFailed
 
 from grc_agent.agent import save_graph_func
 from grc_agent.native_canvas import NativeCanvasManager, NativeFlowgraphProxy
@@ -613,9 +613,9 @@ def test_tool_save_graph_requires_wired_deps():
     not become a retry loop."""
     import asyncio
 
-    with pytest.raises(ModelRetry, match="wiring") as excinfo:
+    with pytest.raises(ToolFailed, match="not wired up") as excinfo:
         asyncio.run(save_graph_func(_ctx(SimpleNamespace())))
-    assert "Do not retry" in str(excinfo.value)
+    assert "not wired up" in str(excinfo.value)
 
 
 def test_grc_tools_save_graph_registration():
