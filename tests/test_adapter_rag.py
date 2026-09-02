@@ -12,7 +12,8 @@ def test_vector_db_dimension_check_is_cached(tmp_path, monkeypatch):
     on every query, doubling embedding API calls. The dimension check must be
     cached per (domain, model) so subsequent queries only issue the real
     query embedding."""
-    from grc_agent.adapter import _ensure_db_built, get_db_and_model
+    from grc_agent.adapter import get_db_and_model
+    from grc_agent.adapter.rag import _ensure_db_built
 
     tmp_vectors = tmp_path / "vectors"
     tmp_vectors.mkdir()
@@ -52,7 +53,7 @@ def test_vector_db_dimension_check_is_cached(tmp_path, monkeypatch):
     # otherwise _ensure_db_built deletes and rebuilds the DB (calling
     # embed_document many times during ingestion, not just once for the
     # dimension check).
-    from grc_agent.adapter import _corpus_version
+    from grc_agent.adapter.rag import _corpus_version
 
     conn.execute("CREATE TABLE _db_meta (key TEXT PRIMARY KEY, value TEXT)")
     conn.execute("INSERT INTO _db_meta (key, value) VALUES ('embedding_model', ?)", (model,))
@@ -84,7 +85,7 @@ def test_vector_db_dimension_check_is_cached(tmp_path, monkeypatch):
     # cleanup, subsequent tests that use the real embed_document (768-dim)
     # would see a dimension mismatch, delete the real DB, and rebuild it
     # unnecessarily — or worse, leave a stale 3-dim DB behind.
-    from grc_agent.adapter import _EMBEDDING_DIM_CACHE
+    from grc_agent.adapter.rag import _EMBEDDING_DIM_CACHE
 
     _EMBEDDING_DIM_CACHE.pop(model, None)
 

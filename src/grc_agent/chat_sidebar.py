@@ -1389,13 +1389,12 @@ class ChatSidebar(Gtk.Box):
         is in progress or on a transition — never when idle — so it can't
         clobber other messages.
         """
-        from .adapter import _rag_building
+        from .adapter import build_status
 
-        # Snapshot the keys: the worker thread may add a domain entry
-        # concurrently, and iterating a dict view during mutation raises.
+        # build_status() returns a snapshot: the worker thread may add a
+        # domain entry concurrently, and iterating the live dict raises.
         building_msg: str | None = None
-        for domain in list(_rag_building):
-            entry = _rag_building.get(domain)
+        for domain, entry in build_status().items():
             if not entry:
                 continue
             status = entry.get("status")

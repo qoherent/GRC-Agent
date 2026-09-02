@@ -5,13 +5,8 @@ Minimal set per the clustered test plan; shared fixtures/helpers live in conftes
 
 from conftest import _DIAL_TONE_FLOW_BLOCKS
 
-from grc_agent.adapter import (
-    GRID_H,
-    GRID_W,
-    _compute_layout_model,
-    change_graph,
-    load_flow_graph,
-)
+from grc_agent.adapter import change_graph, load_flow_graph
+from grc_agent.adapter.layout import GRID_H, GRID_W, _compute_layout_model
 
 
 def _rects_overlap(ax: float, ay: float, bx: float, by: float) -> bool:
@@ -472,7 +467,7 @@ def test_change_graph_add_blocks_no_visual_overlap_for_busy_block(temp_empty):
         force=True,
     )
     assert res["ok"] is True
-    from grc_agent.adapter import BLOCK_FOOTPRINT_H
+    from grc_agent.adapter.layout import BLOCK_FOOTPRINT_H
 
     # A fixed, empirically-grounded bound. The real Signal Source block that
     # triggered this bug rendered ~150-170px tall (6 visible rows); 150 is a

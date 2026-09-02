@@ -65,12 +65,14 @@ def sidebar_font_multiplier(zoom_factor: float) -> float:
 _POLL_FULL_CHECK_EVERY = 10  # ~15s at the 1.5s poll interval
 
 from grc_agent.adapter import (
-    _atomic_write_text,
-    _fsync_directory,
-    _serialize_flow_graph,
     flow_graph_content_hash,
     get_blocks_panel_visibility,
     set_blocks_panel_visibility,
+)
+from grc_agent.adapter.graph import (
+    _atomic_write_text,
+    _fsync_directory,
+    _serialize_flow_graph,
 )
 
 

@@ -1,11 +1,15 @@
-from grc_agent.adapter.block_library import (
-    _validate_block_definition,
-    save_block_to_library,
-)
+"""Public surface of the GRC adapter.
+
+Exports only the names other packages in ``grc_agent`` consume. Everything
+else - including every underscore-prefixed helper - is imported from the
+module that defines it (``grc_agent.adapter.graph``, ``.rag``, ``.layout``,
+``.block_library``), by production code and tests alike. A re-export layer
+that exists so tests can reach internals turns those internals into public
+API and hides where they really live.
+"""
+
+from grc_agent.adapter.block_library import save_block_to_library
 from grc_agent.adapter.graph import (
-    _atomic_write_text,
-    _fsync_directory,
-    _serialize_flow_graph,
     change_graph,
     flow_graph_content_hash,
     get_blocks_panel_visibility,
@@ -21,21 +25,8 @@ from grc_agent.adapter.graph import (
     set_blocks_panel_visibility,
     set_param,
 )
-from grc_agent.adapter.layout import (
-    BLOCK_FOOTPRINT_H,
-    GRID_H,
-    GRID_W,
-    LayoutModel,
-    _compute_layout_model,
-)
 from grc_agent.adapter.rag import (
-    _EMBEDDING_DIM_CACHE,
-    EMBED_MAX_WORDS,
-    _cap_words,
-    _corpus_version,
-    _embed_endpoint,
-    _ensure_db_built,
-    _rag_building,
+    build_status,
     embed_document,
     embed_documents,
     get_db_and_model,
@@ -45,22 +36,7 @@ from grc_agent.adapter.rag import (
 )
 
 __all__ = [
-    "BLOCK_FOOTPRINT_H",
-    "EMBED_MAX_WORDS",
-    "GRID_H",
-    "GRID_W",
-    "LayoutModel",
-    "_EMBEDDING_DIM_CACHE",
-    "_atomic_write_text",
-    "_fsync_directory",
-    "_cap_words",
-    "_compute_layout_model",
-    "_corpus_version",
-    "_embed_endpoint",
-    "_ensure_db_built",
-    "_rag_building",
-    "_serialize_flow_graph",
-    "_validate_block_definition",
+    "build_status",
     "change_graph",
     "embed_document",
     "embed_documents",

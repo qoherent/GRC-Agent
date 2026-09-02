@@ -206,6 +206,16 @@ build. Mutated from the worker thread ingest runs on; read from the main loop
 (CPython per-key dict ops are atomic under the GIL)."""
 
 
+def build_status() -> dict[str, dict[str, Any]]:
+    """Snapshot of the per-domain build status, safe to read from the GUI.
+
+    Returns a shallow copy: the worker thread adds domain keys concurrently,
+    and iterating the live dict during mutation raises. The GUI polls this
+    instead of reaching into the module global.
+    """
+    return {domain: dict(entry) for domain, entry in _rag_building.items()}
+
+
 def _get_embedding_dim(model: str) -> int:
     """Cache the embedding dimension for a model so we don't pay for a real
     embedding API call on every single vector query just to verify the cached
@@ -440,6 +450,11 @@ def _build_db(domain: str, db_path: str, model: str | None) -> None:  # noqa: C9
             "(first run only, may take a few minutes)...",
             domain,
         )
+        # Deferred deliberately, not as a leftover: ingest imports
+        # EMBED_MAX_WORDS/_cap_words/render_catalog_block from this module,
+        # so a module-level import here is a genuine cycle — verified, it
+        # raises ImportError from a partially initialized grc_agent.adapter.rag.
+        # Importing at the call site is the resolution; do not hoist it.
         from grc_agent import ingest
 
         if domain == "catalog":

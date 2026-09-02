@@ -4,7 +4,8 @@ import pytest
 from pydantic_ai.models.ollama import OllamaModel
 from pydantic_ai.models.openai import OpenAIChatModel
 
-from grc_agent.adapter import _embed_endpoint, get_db_and_model
+from grc_agent.adapter import get_db_and_model
+from grc_agent.adapter.rag import _embed_endpoint
 from grc_agent.agent import grc_tools
 from grc_agent.agent_factory import _build_model, _retrying_http_client
 from grc_agent.settings import (
@@ -284,8 +285,9 @@ def test_build_model_fallback_does_not_mutate_cfg(tmp_path, monkeypatch):
 def test_rag_building_flag_set_during_ensure_db_built(tmp_path, monkeypatch):
     """_rag_building must be set to 'building' before the DB build and
     'ready' after (per-domain), so the GUI can show a progress banner."""
-    import grc_agent.adapter as adapter_mod
-    from grc_agent.adapter import _ensure_db_built, get_db_and_model
+    import grc_agent.adapter.rag as rag_mod
+    from grc_agent.adapter import get_db_and_model
+    from grc_agent.adapter.rag import _ensure_db_built
 
     tmp_vectors = tmp_path / "vectors"
     tmp_vectors.mkdir()
@@ -298,8 +300,8 @@ def test_rag_building_flag_set_during_ensure_db_built(tmp_path, monkeypatch):
     # _rag_building is module-global; a prior test's build may have left a
     # catalog entry. This test verifies the building->ready transition, so
     # reset to pristine.
-    adapter_mod._rag_building.pop("catalog", None)
-    assert adapter_mod._rag_building.get("catalog") is None
+    rag_mod._rag_building.pop("catalog", None)
+    assert rag_mod._rag_building.get("catalog") is None
 
     # Import ingest first so it's in sys.modules, then patch it.
     import grc_agent.ingest as ingest_mod
@@ -309,7 +311,7 @@ def test_rag_building_flag_set_during_ensure_db_built(tmp_path, monkeypatch):
         # (an `if on_progress is not None` guard here would silently pass if the
         # wiring regressed and None was passed).
         assert on_progress is not None, "_build_db did not forward on_progress to ingest"
-        entry = adapter_mod._rag_building["catalog"]
+        entry = rag_mod._rag_building["catalog"]
         # Verify the entry is 'building' during the ingest call, with counters reset.
         assert entry["status"] == "building"
         assert entry["current"] == 0
@@ -326,7 +328,7 @@ def test_rag_building_flag_set_during_ensure_db_built(tmp_path, monkeypatch):
     # Build the DB (mocked)
     _ensure_db_built("catalog", db_path, model)
     # After build, the entry should be 'ready' and carry the embedded count.
-    entry = adapter_mod._rag_building["catalog"]
+    entry = rag_mod._rag_building["catalog"]
     assert entry["status"] == "ready"
     assert entry["indexed"] == 5
 
@@ -354,7 +356,9 @@ def test_ingest_catalog_reports_progress_per_block(tmp_path, monkeypatch):
 
     monkeypatch.setattr(ingest_mod, "get_platform", lambda: FakePlatform())
     monkeypatch.setattr(ingest_mod, "render_catalog_block", fake_render)
-    monkeypatch.setattr(ingest_mod, "embed_document", lambda text, model: [0.1, 0.2, 0.3])  # noqa: ARG005
+    monkeypatch.setattr(
+        ingest_mod, "embed_documents", lambda texts, model: [[0.1, 0.2, 0.3] for _ in texts]  # noqa: ARG005
+    )
 
     db_path = str(tmp_path / "catalog.db")
     seen: list[tuple[int, int]] = []
@@ -420,7 +424,9 @@ def test_ingest_catalog_builds_lexical_only_when_all_embeds_fail(tmp_path, monke
         calls.append(text)
         raise RuntimeError("backend down")
 
-    monkeypatch.setattr(ingest_mod, "embed_document", fail_embed)
+    monkeypatch.setattr(
+        ingest_mod, "embed_documents", lambda texts, model: [fail_embed(t, model) for t in texts]
+    )
 
     db_path = str(tmp_path / "catalog.db")
     n = ingest_mod.ingest_catalog(db_path, "fake-model")
@@ -497,8 +503,8 @@ def test_lexical_only_db_does_not_rehammer_embedding_backend(tmp_path, monkeypat
     re-attempting a full re-embed on every call — only a genuine corpus
     change should give embedding a fresh chance (see rag.py's _build_db)."""
     import grc_agent.ingest as ingest_mod
-    from grc_agent.adapter import _ensure_db_built, get_db_and_model
-    from grc_agent.adapter.rag import _FRESHNESS_CACHE
+    from grc_agent.adapter import get_db_and_model
+    from grc_agent.adapter.rag import _FRESHNESS_CACHE, _ensure_db_built
 
     tmp_vectors = tmp_path / "vectors"
     tmp_vectors.mkdir()
@@ -510,7 +516,9 @@ def test_lexical_only_db_does_not_rehammer_embedding_backend(tmp_path, monkeypat
     def fail_embed(text, model):  # noqa: ARG001
         raise RuntimeError("backend down")
 
-    monkeypatch.setattr(ingest_mod, "embed_document", fail_embed)
+    monkeypatch.setattr(
+        ingest_mod, "embed_documents", lambda texts, model: [fail_embed(t, model) for t in texts]
+    )
 
     # First build: real ingestion, every embed call fails -> lexical-only DB.
     _ensure_db_built("catalog", db_path, model)
@@ -558,7 +566,9 @@ def test_query_catalog_falls_back_to_lexical_when_embedding_unreachable(tmp_path
 
     # Build a real lexical-only DB (embedding fails during ingest too — the
     # cold-start-with-no-backend case).
-    monkeypatch.setattr(ingest_mod, "embed_document", fail_embed)
+    monkeypatch.setattr(
+        ingest_mod, "embed_documents", lambda texts, model: [fail_embed(t, model) for t in texts]
+    )
     ingest_mod.ingest_catalog(db_path, model)
 
     import grc_agent.adapter.rag as rag_mod
@@ -627,7 +637,9 @@ def test_query_catalog_lexical_message_present_even_when_embed_succeeds(tmp_path
         raise RuntimeError("backend down")
 
     # Build lexical-only (embeddings failed at build time — no catalog_idx table).
-    monkeypatch.setattr(ingest_mod, "embed_document", fail_embed)
+    monkeypatch.setattr(
+        ingest_mod, "embed_documents", lambda texts, model: [fail_embed(t, model) for t in texts]
+    )
     ingest_mod.ingest_catalog(db_path, model)
 
     # Simulate the embedding backend having recovered since: embed_query now succeeds.
@@ -667,7 +679,9 @@ def test_query_docs_falls_back_to_lexical_when_embedding_unreachable(tmp_path, m
         docs_calls.append(text)
         raise RuntimeError("backend down")
 
-    monkeypatch.setattr(ingest_mod, "embed_document", fail_embed)
+    monkeypatch.setattr(
+        ingest_mod, "embed_documents", lambda texts, model: [fail_embed(t, model) for t in texts]
+    )
     ingest_mod.ingest_docs(db_path, model)
     assert len(docs_calls) == 1, (
         "ingest_docs backend probe failure must avoid re-calling embed_document per chunk"
@@ -699,7 +713,8 @@ def test_ensure_db_built_rebuilds_when_fts_table_missing(tmp_path, monkeypatch):
     import sqlite_vec
 
     import grc_agent.ingest as ingest_mod
-    from grc_agent.adapter import _corpus_version, _ensure_db_built, get_db_and_model
+    from grc_agent.adapter import get_db_and_model
+    from grc_agent.adapter.rag import _corpus_version, _ensure_db_built
 
     tmp_vectors = tmp_path / "vectors"
     tmp_vectors.mkdir()
@@ -1286,7 +1301,9 @@ def test_partial_embedding_failure_yields_no_vector_index(tmp_path, monkeypatch)
             raise RuntimeError("input too large to process")
         return [0.1, 0.2, 0.3]
 
-    monkeypatch.setattr(ingest_mod, "embed_document", flaky_embed)
+    monkeypatch.setattr(
+        ingest_mod, "embed_documents", lambda texts, model: [flaky_embed(t, model) for t in texts]
+    )
     ingest_mod.ingest_catalog(db_path, model)
 
     conn = sqlite3.connect(db_path)
@@ -2243,8 +2260,8 @@ def test_db_build_meta_integrity(tmp_path, monkeypatch):
 
     import grc_agent.ingest as ingest_mod
     from grc_agent._paths import docs_dir
-    from grc_agent.adapter import _corpus_version, get_db_and_model
-    from grc_agent.adapter.rag import _EMBEDDING_DIM_CACHE, _FRESHNESS_CACHE
+    from grc_agent.adapter import get_db_and_model
+    from grc_agent.adapter.rag import _EMBEDDING_DIM_CACHE, _FRESHNESS_CACHE, _corpus_version
     from grc_agent.ingest import ingest_catalog
 
     _isolated_vectors(tmp_path, monkeypatch)
@@ -2288,7 +2305,9 @@ def test_db_build_meta_integrity(tmp_path, monkeypatch):
         h = hashlib.sha256(text.encode()).digest()
         return [b / 255.0 for b in h[:3]]
 
-    monkeypatch.setattr(ingest_mod, "embed_document", fake_embed)
+    monkeypatch.setattr(
+        ingest_mod, "embed_documents", lambda texts, model: [fake_embed(t, model) for t in texts]
+    )
     import grc_agent.adapter.rag as rag_mod
 
     monkeypatch.setattr(rag_mod, "embed_document", fake_embed)
@@ -2351,7 +2370,7 @@ def test_stale_db_rebuilds_on_corpus_version_change(tmp_path, monkeypatch):
         meta = dict(conn.execute("SELECT key, value FROM _db_meta").fetchall())
         conn.close()
         assert after == before
-        from grc_agent.adapter import _corpus_version
+        from grc_agent.adapter.rag import _corpus_version
         assert meta["corpus_version"] == _corpus_version("docs")
 
         # Anti-thrash: a healthy lexical-only DB must not rebuild — even with
@@ -2403,7 +2422,9 @@ def test_hybrid_fusion_when_both_indexes_present(tmp_path, monkeypatch):
     # _build_db dimension check, and query-time embedding. Missing the
     # second would send _build_db into embed_runtime.ensure_server() — a
     # real download/start, breaking hermeticity.
-    monkeypatch.setattr(ingest_mod, "embed_document", fake_embed)
+    monkeypatch.setattr(
+        ingest_mod, "embed_documents", lambda texts, model: [fake_embed(t, model) for t in texts]
+    )
     import grc_agent.adapter.rag as rag_mod
 
     monkeypatch.setattr(rag_mod, "embed_document", fake_embed)

@@ -10,13 +10,13 @@ import pytest
 from conftest import _add_scale_epy_block
 
 from grc_agent.adapter import (
-    _validate_block_definition,
     change_graph,
     inspect_graph,
     load_flow_graph,
     preview_flowgraph_py,
     save_block_to_library,
 )
+from grc_agent.adapter.block_library import _validate_block_definition
 
 
 def test_save_block_round_trip_and_reuse_in_second_flowgraph(temp_empty, temp_hier_block_lib_dir):

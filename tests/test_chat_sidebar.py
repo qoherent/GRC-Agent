@@ -1034,7 +1034,7 @@ def test_poll_indexing_building_ready_failed_idle(monkeypatch):
     idle (no-op), building (live progress, content-guarded), ready transition
     (notifies once, using the embedded `indexed` count not `total`), and failed
     (error). Per-domain so concurrent builds don't tangle."""
-    import grc_agent.adapter as adapter_mod
+    import grc_agent.adapter.rag as rag_mod
     from grc_agent.chat_sidebar import ChatSidebar
 
     sidebar = ChatSidebar()
@@ -1045,14 +1045,14 @@ def test_poll_indexing_building_ready_failed_idle(monkeypatch):
         lambda msg, *, error=False, background=False: calls.append((msg, error)),  # noqa: ARG005
     )
 
-    adapter_mod._rag_building.clear()
+    rag_mod._rag_building.clear()
     try:
         # Idle: no domains -> no status writes.
         sidebar._poll_indexing()
         assert calls == []
 
         # Building: live progress shows counts.
-        adapter_mod._rag_building["catalog"] = {
+        rag_mod._rag_building["catalog"] = {
             "status": "building",
             "current": 3,
             "total": 10,
@@ -1065,12 +1065,12 @@ def test_poll_indexing_building_ready_failed_idle(monkeypatch):
         sidebar._poll_indexing()
         assert len(calls) == n
         # Progress advances -> new message.
-        adapter_mod._rag_building["catalog"]["current"] = 9
+        rag_mod._rag_building["catalog"]["current"] = 9
         sidebar._poll_indexing()
         assert calls[-1] == ("Indexing block library for search\u2026 9/10", False)
 
         # Transition to ready with indexed(8) < total(10): message uses indexed.
-        adapter_mod._rag_building["catalog"] = {
+        rag_mod._rag_building["catalog"] = {
             "status": "ready",
             "current": 10,
             "total": 10,
@@ -1083,7 +1083,7 @@ def test_poll_indexing_building_ready_failed_idle(monkeypatch):
         assert len(calls) == n
 
         # A docs failure surfaces as an error status.
-        adapter_mod._rag_building["docs"] = {
+        rag_mod._rag_building["docs"] = {
             "status": "failed",
             "current": 0,
             "total": 0,
@@ -1092,7 +1092,7 @@ def test_poll_indexing_building_ready_failed_idle(monkeypatch):
         sidebar._poll_indexing()
         assert calls[-1][1] is True
     finally:
-        adapter_mod._rag_building.clear()
+        rag_mod._rag_building.clear()
 
 
 def test_run_agent_turn_error_preserves_user_message(tmp_path, monkeypatch):

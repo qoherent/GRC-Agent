@@ -32,18 +32,17 @@ from typing import Any
 import sqlite_vec
 
 from grc_agent._paths import docs_dir
-from grc_agent.adapter import (
+from grc_agent.adapter.graph import get_platform
+from grc_agent.adapter.rag import (
     EMBED_MAX_WORDS,
     _cap_words,
     _corpus_version,
     embed_document,
     embed_documents,
-    get_platform,
     render_catalog_block,
 )
 
 _log = logging.getLogger(__name__)
-_orig_embed_document = embed_document
 
 
 def _open_db(db_path: str) -> sqlite3.Connection:
@@ -116,10 +115,7 @@ def ingest_catalog(  # noqa: C901
                 for b in batch
             ]
             try:
-                if embed_document is not _orig_embed_document:
-                    embeddings = [embed_document(t, model) for t in batch_texts]  # type: ignore[arg-type]
-                else:
-                    embeddings = embed_documents(batch_texts, model)  # type: ignore[arg-type]
+                embeddings = embed_documents(batch_texts, model)  # type: ignore[arg-type]
                 for bid, emb in zip(batch_ids, embeddings, strict=True):
                     vec_rows.append((bid, emb))
             except Exception as exc:
@@ -268,10 +264,7 @@ def ingest_docs(  # noqa: C901
                 for c in batch
             ]
             try:
-                if embed_document is not _orig_embed_document:
-                    embeddings = [embed_document(t, model) for t in batch_texts]  # type: ignore[arg-type]
-                else:
-                    embeddings = embed_documents(batch_texts, model)  # type: ignore[arg-type]
+                embeddings = embed_documents(batch_texts, model)  # type: ignore[arg-type]
                 for idx, emb in enumerate(embeddings, start=i):
                     vec_rows.append((idx, emb))
             except Exception as exc:
