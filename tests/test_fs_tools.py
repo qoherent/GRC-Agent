@@ -623,3 +623,21 @@ def test_read_file_image_missing_raises_filenotfound(toolset, _saved):
     as every other read_file path (uniform error contract)."""
     with pytest.raises(ModelRetry, match="File not found"):
         read(toolset, "missing.png")
+
+
+def test_protected_globs_still_cover_credential_files():
+    """Pin the protected-path CONTENTS the sandbox relies on.
+
+    _DEFAULT_PROTECTED is a private harness constant supplying the only
+    read-protection for credential material inside the project root, and
+    nothing asserted its contents. A release that dropped *.pem or *.key
+    would silently open those files to the model.
+    """
+    from pydantic_ai_harness.filesystem._capability import _DEFAULT_PROTECTED
+
+    required = {"*.pem", "*.key", "**/secrets*", ".env"}
+    missing = required - set(_DEFAULT_PROTECTED)
+    assert not missing, (
+        f"the harness protected-path defaults no longer cover {sorted(missing)} — "
+        "either the upgrade weakened them or they must be added explicitly"
+    )

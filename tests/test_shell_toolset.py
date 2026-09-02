@@ -132,6 +132,26 @@ def test_default_denylist_matches_harness_defaults():
     assert ts._denied_commands == list(_DEFAULT_DENIED_COMMANDS)
 
 
+@pytest.mark.usefixtures("project_root")
+def test_denylist_still_covers_every_destructive_command_we_rely_on():
+    """Pin the denylist's CONTENTS, not just its provenance.
+
+    The test above compares the harness constant to itself, so a release that
+    quietly drops entries from _DEFAULT_DENIED_COMMANDS would weaken the
+    shell denylist and still pass it. The pin is upper-bounded for this
+    reason; this asserts what the bound is protecting.
+    """
+    required = {
+        "dd", "format", "halt", "init", "mkfs",
+        "poweroff", "reboot", "rm", "rmdir", "shutdown",
+    }
+    missing = required - set(_toolset()._denied_commands)
+    assert not missing, (
+        f"the harness denylist no longer covers {sorted(missing)} — either the "
+        "upgrade weakened it or these must be added explicitly"
+    )
+
+
 # --- env scrubbing ---
 
 
