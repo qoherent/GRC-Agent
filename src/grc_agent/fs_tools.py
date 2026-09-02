@@ -315,7 +315,7 @@ class GrcFileSystemToolset(FileSystemToolset[AgentDepsT]):
         if active is not None and resolved == active:
             fg = _active_flow_graph_fn()
             if fg is not None:
-                data = inspect_graph(fg, targets=None, view="overview")
+                data = inspect_graph(fg, targets=None)
                 source = "live in-memory flowgraph (includes unsaved canvas edits)"
             else:
                 data, source = self._load_and_inspect(resolved), "active file on disk"
@@ -338,7 +338,7 @@ class GrcFileSystemToolset(FileSystemToolset[AgentDepsT]):
             # log instead.
             _log.warning("read_file could not parse %s as a flowgraph: %s", resolved.name, exc)
             raise ValueError(f"Could not parse {resolved.name!r} as a GNU Radio flowgraph file.") from exc
-        return inspect_graph(fg, targets=None, view="overview")
+        return inspect_graph(fg, targets=None)
 
     # -- write_file with a suffix allowlist and atomic replacement ----------
 

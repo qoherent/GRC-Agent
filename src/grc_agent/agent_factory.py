@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib
 import logging
 import os
 import time
@@ -51,6 +52,7 @@ from grc_agent.fs_tools import GrcFileSystem
 from grc_agent.prompts import build_planner_prompt, build_system_prompt
 from grc_agent.settings import default_settings, get_env_value, load_settings, resolve_key
 from grc_agent.shell_tools import GrcShell
+from grc_agent.ui.providers import PROVIDER_LABELS
 
 # genai-prices registry errors documented in the harness compaction docs:
 # an OVER-recorded window means compaction never fires before the provider
@@ -276,8 +278,6 @@ def _build_model(cfg: dict, http_client: httpx.AsyncClient):
             provider
         ]
         key = resolve_key(key_var)
-        import importlib
-
         model_cls = getattr(importlib.import_module(mod_name), cls_name)
         provider_cls = getattr(importlib.import_module(prov_mod), prov_cls)
         kwargs: dict[str, Any] = {"api_key": key}
@@ -493,20 +493,17 @@ def _openai_shaped_context_length(provider: str, model: str) -> int | None:
     return None
 
 
-def _codex_context_length(model: str) -> int | None:
-    from grc_agent.providers.openai_codex.model import context_window
-
-    return context_window(model)
-
-
 # Provider -> context-window probe (single-arg: the model id). Anthropic's
 # /v1/models carries no context length — the genai-prices registry knows the
-# Claude windows, so it maps to None.
+# Claude windows, so it maps to None. Codex has no /v1/models either; its
+# window comes from the Codex catalog fetch in its own module, imported
+# lazily so a non-Codex startup never pays for that provider's import.
 _CTX_PROBES = {
-    "ollama": _ollama_context_length,
     "ollama_local": _ollama_context_length,
     "ollama_cloud": _ollama_context_length,
-    "openai_codex": _codex_context_length,
+    "openai_codex": lambda m: importlib.import_module(
+        "grc_agent.providers.openai_codex.model"
+    ).context_window(m),
     "google": _google_context_length,
     "anthropic": lambda _m: None,
 }
@@ -621,9 +618,6 @@ class TranscriptPreservingTieredCompaction(TieredCompaction):
             step_index=ctx.run_step,
         )
         return processed
-
-
-
 
 
 def _build_compaction_capability(
@@ -923,16 +917,6 @@ _PREFLIGHT_ENDPOINTS = {
         lambda k: {"Authorization": f"Bearer {k}"},
     ),
 }
-_PREFLIGHT_LABELS = {
-    "openrouter": "OpenRouter",
-    "openai": "OpenAI",
-    "anthropic": "Anthropic",
-    "google": "Google (Gemini)",
-    "groq": "Groq",
-    "mistral": "Mistral",
-    "cohere": "Cohere",
-    "xai": "xAI",
-}
 
 # OpenAI-shaped /v1/models providers whose catalogs carry per-model
 # context_length — DERIVED from the table above (everything except the
@@ -956,7 +940,7 @@ def _preflight_target(provider: str, api_key: str, base_url: str) -> tuple[str, 
     if provider in _PREFLIGHT_ENDPOINTS:
         url_t, _key_var, headers_fn = _PREFLIGHT_ENDPOINTS[provider]
         if not api_key:
-            return f"API key is required for {_PREFLIGHT_LABELS[provider]}"
+            return f"API key is required for {PROVIDER_LABELS[provider]}"
         return url_t.format(key=api_key), headers_fn(api_key)
 
     if provider == "openai_compatible":

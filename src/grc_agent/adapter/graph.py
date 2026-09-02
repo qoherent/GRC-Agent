@@ -576,10 +576,15 @@ def keep_param(  # noqa: C901
     )
 
 
-def render_port(port: Any, mode: str = "overview") -> dict[str, Any] | None:
+def render_port(port: Any) -> dict[str, Any] | None:
+    """Render one port, or None when it carries no information.
+
+    An optional port nobody connected is noise in the model-facing payload;
+    inspect_graph counts the omissions rather than listing them.
+    """
     optional = bool(getattr(port, "optional", False))
     connected = len(list(port.connections(enabled=True))) > 0
-    if mode == "overview" and optional and not connected:
+    if optional and not connected:
         return None
     domain = str(getattr(port, "domain", "") or "")
     res = {"port_id": str(port.key), "dtype": str(getattr(port, "dtype", ""))}
@@ -656,9 +661,8 @@ def _find_port(flow_graph: Any, block_name: str, port_key: str, *, kind: str) ->
 
 
 def inspect_graph(  # noqa: C901
-    flow_graph: Any, targets: list[str] | str | None = None, view: str = "overview"
+    flow_graph: Any, targets: list[str] | str | None = None
 ) -> dict[str, Any]:
-    selected_view = str(view).strip().lower()
     blocks_all = []
     connections_all = []
 
@@ -668,13 +672,19 @@ def inspect_graph(  # noqa: C901
         )
         connections_all.append(conn_str)
 
+    # GRC stores connections in a set, so iteration order varies between
+    # calls on an unchanged graph. Sort them: the model otherwise sees a
+    # different payload every time it inspects the same graph, which defeats
+    # prompt caching and makes two inspections impossible to diff.
+    connections_all.sort()
+
     variable_names = {b.name for b in flow_graph.blocks if getattr(b, "is_variable", False)}
 
     for b in flow_graph.blocks:
         params = {}
         omitted_params_count = 0
         for k, p in b.params.items():
-            if keep_param(k, p, b, mode=selected_view, variable_names=variable_names):
+            if keep_param(k, p, b, mode="overview", variable_names=variable_names):
                 params[k] = str(p.value)
             else:
                 omitted_params_count += 1
@@ -682,7 +692,7 @@ def inspect_graph(  # noqa: C901
         inputs = []
         omitted_inputs_count = 0
         for p in getattr(b, "active_sinks", ()) or ():
-            rendered = render_port(p, mode=selected_view)
+            rendered = render_port(p)
             if rendered is not None:
                 inputs.append(rendered)
             else:
@@ -691,7 +701,7 @@ def inspect_graph(  # noqa: C901
         outputs = []
         omitted_outputs_count = 0
         for p in getattr(b, "active_sources", ()) or ():
-            rendered = render_port(p, mode=selected_view)
+            rendered = render_port(p)
             if rendered is not None:
                 outputs.append(rendered)
             else:

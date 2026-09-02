@@ -325,12 +325,12 @@ class MarkdownView:
                     child, buffer, tv, active_tags + ["heading"], in_list=False, list_depth=list_depth
                 )
             self._insert_plain_tagged(buffer, "\n", active_tags + ["heading"])
-        elif ntype in ("strong", "b"):
+        elif ntype == "strong":
             for child in node.children:
                 self._render_node(
                     child, buffer, tv, active_tags + ["bold"], in_list=in_list, list_depth=list_depth
                 )
-        elif ntype in ("em", "i"):
+        elif ntype == "em":
             for child in node.children:
                 self._render_node(
                     child, buffer, tv, active_tags + ["italic"], in_list=in_list, list_depth=list_depth
@@ -377,16 +377,6 @@ class MarkdownView:
                             child, buffer, tv, active_tags + [list_tag], in_list=True, list_depth=list_depth
                         )
                 self._insert_plain_tagged(buffer, "\n", active_tags + [list_tag])
-        elif ntype == "list_item":
-            list_tag = self._get_or_create_list_tag(buffer, list_depth)
-            self._insert_plain_tagged(buffer, "\u2022 ", active_tags + [list_tag])
-            for c_idx, child in enumerate(node.children):
-                if c_idx > 0:
-                    self._insert_plain_tagged(buffer, "\n", active_tags + [list_tag])
-                self._render_node(
-                    child, buffer, tv, active_tags + [list_tag], in_list=True, list_depth=list_depth
-                )
-            self._insert_plain_tagged(buffer, "\n", active_tags + [list_tag])
         elif ntype == "blockquote":
             for child in node.children:
                 self._insert_plain_tagged(buffer, "│ ", active_tags + ["blockquote"])

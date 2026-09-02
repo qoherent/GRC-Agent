@@ -184,11 +184,6 @@ textview.chat-thinking-textview text {
     min-height: 22px;
     padding: 2px 7px;
 }
-.chat-agent-mode-label,
-.chat-agent-mode-label label {
-    color: alpha(@theme_fg_color, 0.82);
-    font-size: 0.92em;
-}
 
 /* Copy buttons (symbolic icon, unobtrusive flat button) */
 .chat-copy-btn {
@@ -360,8 +355,6 @@ def _get_theme_pair() -> tuple[str, str]:
 
     if "Yaru-dark" in installed and "Yaru" in installed:
         return "Yaru-dark", "Yaru"
-    if "Adwaita-dark" in installed and "Adwaita" in installed:
-        return "Adwaita-dark", "Adwaita"
     return "Adwaita-dark", "Adwaita"
 
 
@@ -397,12 +390,8 @@ def apply_theme(mode: str) -> None:
 def is_dark_theme(widget: Gtk.Widget | None = None) -> bool:
     """Determine whether the active theme is dark."""
     settings = Gtk.Settings.get_default()
-    if settings is not None:
-        if settings.get_property("gtk-application-prefer-dark-theme"):
-            return True
-        theme_name = (settings.get_property("gtk-theme-name") or "").lower()
-        if "dark" in theme_name or "black" in theme_name:
-            return True
+    if settings is not None and settings.get_property("gtk-application-prefer-dark-theme"):
+        return True
 
     try:
         ctx = widget.get_style_context() if widget else Gtk.StyleContext()

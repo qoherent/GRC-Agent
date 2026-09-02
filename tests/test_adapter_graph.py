@@ -694,12 +694,12 @@ def test_render_port_exposes_vlen_when_vector():
     fg = get_platform().make_flow_graph()
     fft = fg.new_block("fft_vxx")
     fg.rewrite()
-    info = render_port(fft.active_sinks[0], mode="details")
+    info = render_port(fft.active_sinks[0])
     assert info["vlen"] not in (None, 1, "1", "")
 
     scalar = fg.new_block("qtgui_freq_sink_x")
     fg.rewrite()
-    info2 = render_port(scalar.active_sinks[0], mode="details")
+    info2 = render_port(scalar.active_sinks[0])
     assert "vlen" not in info2
 
 
@@ -889,3 +889,21 @@ def test_backup_pruning_bounds_the_directory(tmp_path):
     # The oldest 7 went; the newest survived.
     assert remaining[0] == f"{total - MAX_BACKUPS_PER_DIR:05d}-deadbeef.grc"
     assert remaining[-1] == f"{total - 1:05d}-deadbeef.grc"
+
+
+def test_inspect_graph_connection_order_is_deterministic(temp_dial_tone):
+    """Two inspections of an unchanged graph must be byte-identical.
+
+    GRC keeps connections in a set, so raw iteration order varies per call.
+    A payload that reshuffles on every inspection defeats prompt caching and
+    makes it impossible for the model to diff two inspections of the same
+    graph to see what its own edit changed.
+    """
+    import json
+
+    fg = load_flow_graph(str(temp_dial_tone))
+    payloads = {json.dumps(inspect_graph(fg), sort_keys=True) for _ in range(5)}
+    assert len(payloads) == 1, "inspect_graph must be stable across repeated calls"
+
+    conns = inspect_graph(fg)["graph"]["connections"]
+    assert conns == sorted(conns)

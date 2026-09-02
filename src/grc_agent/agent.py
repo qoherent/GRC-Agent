@@ -171,7 +171,7 @@ async def inspect_graph_func(ctx: RunContext[Any], targets: list[str] | str | No
     Args:
         targets: Block/variable instance name(s) to scope inspection to (e.g. ["samp_rate", "blocks_head_0"] or "samp_rate"). Omit or pass null to inspect the full graph.
     """
-    result = inspect_graph(ctx.deps, targets=targets, view="overview")
+    result = inspect_graph(ctx.deps, targets=targets)
     if not result.get("ok", True):
         raise ModelRetry(f"Inspection failed. Errors: {result.get('errors') or '(no detail)'}")
     return json.dumps(result)

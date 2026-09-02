@@ -543,9 +543,6 @@ class _ChunkAccumulator:
             self._joined = "".join(self._chunks)
         return self._joined
 
-    def __eq__(self, other: object) -> bool:
-        return str(self) == other if isinstance(other, str) else super().__eq__(other)
-
 
 @dataclass(slots=True)
 class _StreamCtx:
@@ -829,7 +826,6 @@ class ChatSidebar(Gtk.Box):
         self._implement_plan_row: Gtk.ListBoxRow | None = None
         self._implement_plan_button: Gtk.Button | None = None
         self._project_directory: Path | None = None
-        self._proj_chooser: Gtk.FileChooserButton | None = None
         # Set by shutting_down() (called from desktop_app.py's _shutdown)
         # just before stop_chat(). _run_agent_turn's finally block checks
         # this to skip widget operations on widgets that are mid-destroy
@@ -864,7 +860,6 @@ class ChatSidebar(Gtk.Box):
 
         # Vertical content area
         content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
-        self._content = content
         self._build_project_bar(content)
         self._build_toolbar(content)
         self._build_message_list(content)
@@ -1361,14 +1356,6 @@ class ChatSidebar(Gtk.Box):
     def set_active_graph(self, name: str | None, path: str | None = None) -> None:
         self._active_graph_name = name
         self._active_graph_path = path
-        if hasattr(self, "_graph_label") and self._graph_label is not None:
-            self._graph_label.set_text(f"{name}" if name else "none")
-            if name and path:
-                self._graph_label.set_tooltip_text(f"Graph: {name}\nPath: {path}")
-            elif name:
-                self._graph_label.set_tooltip_text(f"Graph: {name}\nPath: (Unsaved)")
-            else:
-                self._graph_label.set_tooltip_text("No flowgraph open")
 
     def _domain_label(self, domain: str | None) -> str:
         if domain == "catalog":
@@ -2461,16 +2448,6 @@ class ChatSidebar(Gtk.Box):
             self._scrolled.check_resize()
             self._scroll_to_bottom()
         return ctx.think_body
-
-    def _make_text_label(self) -> Gtk.Label:
-        lbl = Gtk.Label()
-        lbl.set_line_wrap(True)
-        lbl.set_line_wrap_mode(Pango.WrapMode.WORD_CHAR)
-        lbl.set_xalign(0.0)
-        lbl.set_halign(Gtk.Align.START)
-        lbl.set_selectable(True)
-        lbl.get_style_context().add_class("chat-agent-label")
-        return lbl
 
     def _copy_to_clipboard(self, text: str, btn: Gtk.Button | None = None) -> None:
         if not text:
@@ -3607,11 +3584,6 @@ class ChatSidebar(Gtk.Box):
         request, and drop the remaining cards (deferred to idle so a card is
         never destroyed from inside its own click handler)."""
         set_approval_mode("auto")
-        self._update_approval_toggle()
-        for fut in pending.values():
-            if not fut.done():
-                fut.set_result(ToolApproved())
-        GLib.idle_add(lambda: [c.destroy() for c in cards])
         self._update_approval_toggle()
         for fut in pending.values():
             if not fut.done():

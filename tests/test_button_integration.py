@@ -83,7 +83,7 @@ def test_inspect_graph_returns_topology():
     """The agent sees the loaded graph's blocks and connections."""
     fg, _tmp, tmp_dir = fresh_agent(_DIAL_TONE)
     try:
-        result = inspect_graph(fg, view="overview")
+        result = inspect_graph(fg)
         assert result["ok"] is True
         graph = result["graph"]
         assert len(graph["blocks"]) > 0
@@ -99,9 +99,9 @@ def test_inspect_graph_targets_filter():
     """inspect_graph with targets returns only the named blocks."""
     fg, _tmp, tmp_dir = fresh_agent(_DIAL_TONE)
     try:
-        full = inspect_graph(fg, view="overview")
+        full = inspect_graph(fg)
         first_block = full["graph"]["blocks"][0]["instance_name"]
-        targeted = inspect_graph(fg, targets=[first_block], view="overview")
+        targeted = inspect_graph(fg, targets=[first_block])
         assert targeted["ok"] is True
         assert len(targeted["graph"]["blocks"]) == 1
         assert targeted["graph"]["blocks"][0]["instance_name"] == first_block

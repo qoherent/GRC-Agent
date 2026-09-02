@@ -2067,9 +2067,8 @@ def test_context_label_updates_with_pydantic_ai_usage(tmp_path, monkeypatch):
     # HTTP probe hit the developer's local daemon) and redirect settings to a
     # tmp .env so load_settings() can't read the real repo .env.
     monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
-    monkeypatch.setitem(_af._CTX_PROBES, "ollama", lambda _model: 1024 * 1024)
     monkeypatch.setitem(_af._CTX_PROBES, "ollama_cloud", lambda _model: 1024 * 1024)
-    assert resolve_model_context_length("ollama", "glm-5.3-flash:cloud") == 1_048_576
+    assert resolve_model_context_length("ollama_cloud", "glm-5.3-flash:cloud") == 1_048_576
     _context_length_cache.clear()
     _context_negative_cache.clear()
 
