@@ -44,17 +44,15 @@ from pydantic_ai.tools import AgentDepsT
 # accept back as ``expected_hash`` — reusing it keeps the hash contract
 # identical across the parent tools and this subclass.
 #
-# These three have NO public equivalent as of pydantic_ai_harness 0.23:
-# ``filesystem.__all__`` is only {FileSystem, FileSystemToolset,
-# READ_ONLY_TOOL_NAMES}. Re-checked on every harness bump — if any of them
-# gains a public name, switch to it; the coupling is deliberate, not an
-# oversight.
+# ``FileSystemToolset`` became public in 0.28 and is imported as such.
+# ``_DEFAULT_PROTECTED``, ``_content_hash`` and ``_recoverable`` are still
+# private there (``filesystem.__all__`` is only {READ_ONLY_TOOL_NAMES,
+# FileSystem, FileSystemToolset}). Re-checked on every harness bump — if any
+# gains a public name, switch to it; the coupling is deliberate, and the
+# dependency pin is upper-bounded because of it.
+from pydantic_ai_harness.filesystem import FileSystemToolset
 from pydantic_ai_harness.filesystem._capability import _DEFAULT_PROTECTED
-from pydantic_ai_harness.filesystem._toolset import (
-    FileSystemToolset,
-    _content_hash,
-    _recoverable,
-)
+from pydantic_ai_harness.filesystem._toolset import _content_hash, _recoverable
 
 from grc_agent.adapter.graph import (
     _NO_ACTIVE_GRAPH_MSG,

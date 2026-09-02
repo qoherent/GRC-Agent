@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import httpx
+import httpx2
 from pydantic_ai import Agent, ModelRequestContext, ModelSettings, RunContext
 from pydantic_ai.capabilities import AbstractCapability, PrepareTools
 from pydantic_ai.models.ollama import OllamaModel
@@ -16,7 +17,11 @@ from pydantic_ai.models.openrouter import OpenRouterModel
 from pydantic_ai.providers.ollama import OllamaProvider
 from pydantic_ai.providers.openai import OpenAIProvider
 from pydantic_ai.providers.openrouter import OpenRouterProvider
-from pydantic_ai.retries import AsyncTenacityTransport, RetryConfig
+from pydantic_ai.retries import (
+    AsyncHTTPX2TenacityTransport,
+    AsyncTenacityTransport,
+    RetryConfig,
+)
 from pydantic_ai.tools import DeferredToolRequests, ToolDefinition
 from pydantic_ai_harness.compaction import (
     ClampOversizedMessages,
@@ -173,16 +178,43 @@ def _provider_base_url(cfg: dict) -> str:
     return cfg.get("openai_compatible_base_url", "") or ""
 
 
-def _retrying_http_client() -> httpx.AsyncClient:
-    return httpx.AsyncClient(
-        timeout=httpx.Timeout(connect=15.0, read=1800.0, write=60.0, pool=30.0),
-        transport=AsyncTenacityTransport(
-            config=RetryConfig(
-                retry=retry_if_exception_type((httpx.TransportError, httpx.HTTPStatusError)),
-                wait=wait_exponential(multiplier=1, max=10),
-                stop=stop_after_attempt(3),
-                reraise=True,
+# pydantic-ai 2.37 is mid-migration between HTTP stacks and the providers are
+# split across both: Anthropic rejects an httpx.AsyncClient outright, Groq
+# rejects an httpx2.AsyncClient outright, and every other provider the
+# Settings UI exposes accepts either (the OpenAI-compatible ones warn on
+# httpx and drop it in v3). Verified against all eleven providers.
+#
+# So the default is httpx2 — where the framework is going — with one named
+# exception rather than a per-provider table. Delete the exception when Groq
+# migrates; the assertion in tests/test_agent_factory.py will say when.
+_HTTPX1_ONLY_PROVIDERS = frozenset({"groq"})
+
+_HTTP_TIMEOUT = {"connect": 15.0, "read": 1800.0, "write": 60.0, "pool": 30.0}
+
+
+def _retry_config(transport_error: type[Exception], status_error: type[Exception]) -> RetryConfig:
+    return RetryConfig(
+        retry=retry_if_exception_type((transport_error, status_error)),
+        wait=wait_exponential(multiplier=1, max=10),
+        stop=stop_after_attempt(3),
+        reraise=True,
+    )
+
+
+def _retrying_http_client(provider: str = "") -> httpx.AsyncClient | httpx2.AsyncClient:
+    """An HTTP client on the stack the given provider's SDK accepts."""
+    if provider in _HTTPX1_ONLY_PROVIDERS:
+        return httpx.AsyncClient(
+            timeout=httpx.Timeout(**_HTTP_TIMEOUT),
+            transport=AsyncTenacityTransport(
+                config=_retry_config(httpx.TransportError, httpx.HTTPStatusError),
+                validate_response=lambda r: r.raise_for_status(),
             ),
+        )
+    return httpx2.AsyncClient(
+        timeout=httpx2.Timeout(**_HTTP_TIMEOUT),
+        transport=AsyncHTTPX2TenacityTransport(
+            config=_retry_config(httpx2.TransportError, httpx2.HTTPStatusError),
             validate_response=lambda r: r.raise_for_status(),
         ),
     )
@@ -243,7 +275,7 @@ _NATIVE_MODEL_BUILDERS = {
 }
 
 
-def _build_model(cfg: dict, http_client: httpx.AsyncClient):
+def _build_model(cfg: dict, http_client: httpx.AsyncClient | httpx2.AsyncClient):
     provider = cfg.get("provider", "ollama_local")
     if provider == "openai_codex":
         # Returns before the /v1 suffixing below: the Codex base URL is
@@ -392,7 +424,6 @@ _CONTEXT_NEGATIVE_TTL = 60.0
 def _google_context_length(model: str) -> int | None:
     """GET the Gemini /v1beta/models catalog -> inputTokenLimit for the model
     (the context window). Returns None if unresolvable."""
-    import httpx
 
     from grc_agent.settings import get_env_value
 
@@ -423,7 +454,6 @@ def _ollama_context_length(model: str) -> int | None:
     with the key and a local user hits their own daemon. Never keyed on an
     env-var name: the resolved provider decides the URL.
     """
-    import httpx
 
     from grc_agent.settings import load_settings, resolve_key
 
@@ -462,7 +492,6 @@ def _openai_shaped_context_length(provider: str, model: str) -> int | None:
     source of truth `_preflight_target` uses) — never a hardcoded host, or a
     LAN model's window would be silently overridden by OpenRouter's upstream
     spec (the compaction target is now probe-driven)."""
-    import httpx
 
     from grc_agent.settings import get_env_value, load_settings, resolve_key
 
@@ -748,7 +777,7 @@ def build_agents_from_cfg(cfg: dict) -> AgentBundle:
     their model-visible tools are disjoint. On model-construction failure the
     bundle falls back to defaults and carries the error for the GUI to surface.
     """
-    http_client = _retrying_http_client()
+    http_client = _retrying_http_client(str(cfg.get("provider", "")))
     model_build_error: str | None = None
     try:
         model = _build_model(cfg, http_client)

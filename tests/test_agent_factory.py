@@ -156,3 +156,58 @@ def test_probe_backend_branches(monkeypatch):
     assert probe_backend("openai_codex", "", "", "gpt-5.6-luna") == (None, None)
     # Empty model -> reachability only.
     assert probe_backend("ollama_local", "", "http://localhost:11434", "")[1] is None
+
+
+def test_every_provider_accepts_the_client_it_is_built_with(monkeypatch):
+    """The HTTP stack handed to each provider must be the one its SDK accepts.
+
+    pydantic-ai 2.37 is mid-migration: Anthropic rejects an httpx.AsyncClient
+    outright and Groq rejects an httpx2.AsyncClient outright, so a single
+    shared client cannot serve both. _retrying_http_client picks per provider;
+    this pins that every provider the Settings UI exposes actually builds.
+
+    When Groq migrates to httpx2 this test still passes and
+    _HTTPX1_ONLY_PROVIDERS can be emptied -- see the companion test below.
+    """
+    import warnings
+
+    from grc_agent.agent_factory import _build_model, _retrying_http_client
+    from grc_agent.ui.providers import PROVIDER_API_KEY
+
+    for var in PROVIDER_API_KEY.values():
+        if var:
+            monkeypatch.setenv(var, "dummy-key")
+
+    # openai_codex authenticates through its own OAuth credential store rather
+    # than an API key, so it is exercised by its own suite.
+    providers = [p for p in PROVIDER_API_KEY if p != "openai_codex"]
+    assert providers, "provider catalog must not be empty"
+
+    # OpenRouter validates that the model name carries an upstream prefix.
+    model_names = {"openrouter": "openai/test-model"}
+
+    for provider in providers:
+        client = _retrying_http_client(provider)
+        name = model_names.get(provider, "test-model")
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")  # a deprecated stack must fail loudly
+            model = _build_model({"provider": provider, "model": name}, client)
+        assert model is not None, f"{provider} produced no model"
+
+
+def test_httpx1_exception_set_is_still_needed(monkeypatch):
+    """_HTTPX1_ONLY_PROVIDERS is a temporary carve-out; prove it is still real.
+
+    If this fails because Groq now accepts httpx2, delete the entry (and this
+    test) rather than widening it.
+    """
+    import httpx2
+    import pytest
+
+    from grc_agent.agent_factory import _HTTPX1_ONLY_PROVIDERS, _build_model
+    from grc_agent.ui.providers import PROVIDER_API_KEY
+
+    for provider in _HTTPX1_ONLY_PROVIDERS:
+        monkeypatch.setenv(PROVIDER_API_KEY[provider], "dummy-key")
+        with pytest.raises(TypeError, match="http_client"):
+            _build_model({"provider": provider, "model": "x"}, httpx2.AsyncClient())

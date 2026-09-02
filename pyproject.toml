@@ -50,7 +50,11 @@ dependencies = [
     "gbulb>=0.6.6; python_version < '3.13'",
     "markdown-it-py>=3.0.0",
     "ddgs>=9.0",
-    "pydantic-ai-harness[prompt-injection-defender]>=0.23.0",
+    # Upper-bounded deliberately: this is a 0.x package whose own policy is
+    # that minor releases may break, and fs_tools/shell_tools still import a
+    # few private symbols it has no public equivalent for. An unbounded range
+    # over that combination silently ships breakage.
+    "pydantic-ai-harness[prompt-injection-defender]>=0.28.0,<0.29",
     # Official provider SDKs for the pydantic-ai models the Settings UI
     # exposes (anthropic/google ship with pydantic-ai-slim's own extras;
     # these four are separate SDKs pydantic-ai wraps).

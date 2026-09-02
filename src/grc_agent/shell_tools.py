@@ -48,21 +48,20 @@ from typing import Any
 
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.tools import AgentDepsT
-from pydantic_ai_harness.shell import LLM_API_KEY_ENV_PATTERNS
+from pydantic_ai_harness.shell import LLM_API_KEY_ENV_PATTERNS, ShellToolset
 from pydantic_ai_harness.shell._capability import _DEFAULT_DENIED_COMMANDS
-from pydantic_ai_harness.shell._toolset import ShellToolset, _recoverable
+from pydantic_ai_harness.shell._toolset import _recoverable
 
 from grc_agent.adapter.graph import _NO_ACTIVE_GRAPH_MSG
 from grc_agent.fs_tools import active_grc_path, active_project_dir
 
 _log = logging.getLogger(__name__)
 
-# Private-but-stable harness constants: the destructive-command defaults (the
-# capability's __post_init__ identity trick makes them awkward to reuse) and
-# the ShellToolset itself. No public equivalent as of pydantic_ai_harness
-# 0.23 (`shell.__all__` is {Shell, ShellToolset, LLM_API_KEY_ENV_PATTERNS} —
-# only the denylist tuple is missing). Re-checked on every harness bump, same
-# deliberate coupling as fs_tools' filesystem privates.
+# ``ShellToolset`` is public as of 0.28 and imported as such. The
+# destructive-command defaults and ``_recoverable`` remain private (the
+# capability's __post_init__ identity trick makes the former awkward to
+# reuse). Re-checked on every harness bump, same deliberate coupling as
+# fs_tools' filesystem privates — and the reason the pin is upper-bounded.
 
 # Placeholder cwd used only while no project directory is set. Never a real
 # directory, so nothing could spawn there even if the gate below were bypassed.
