@@ -364,7 +364,11 @@ def test_query_knowledge_docs_lexical_fallback_real(monkeypatch):
             assert any(c.get("search_mode") == "lexical" for c in calls), (
                 f"expected a lexical-mode result under embedding outage, got: {calls}"
             )
-            answers = [c.get("answer", "") for c in calls if c.get("search_mode") == "lexical"]
+            answers = [
+                " ".join(e.get("text", "") for e in c.get("results", []))
+                for c in calls
+                if c.get("search_mode") == "lexical"
+            ]
             assert any("tag" in a.lower() for a in answers), (
                 f"lexical docs answer doesn't mention tags: {answers}"
             )

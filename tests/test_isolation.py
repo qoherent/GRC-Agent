@@ -699,7 +699,7 @@ def test_query_docs_falls_back_to_lexical_when_embedding_unreachable(tmp_path, m
         assert res["ok"] is True
         assert res["search_mode"] == "lexical"
         assert "fallback" in res.get("message", "").lower()
-        assert "tag" in res["answer"].lower()
+        assert any("tag" in e["text"].lower() for e in res["results"])
     finally:
         _FRESHNESS_CACHE.pop("docs", None)
 
@@ -2095,7 +2095,7 @@ def test_docs_exact_phrase_ranks_top1_lexical(tmp_path, monkeypatch):
             res = query_docs(phrase, limit=5)
             assert res["ok"] is True
             assert res["search_mode"] == "lexical"
-            first_chunk = res["answer"].split("\n\n---\n\n")[0]
+            first_chunk = res["results"][0]["text"]
             first_line = first_chunk.split("\n", 1)[0]
             assert first_line.startswith("path: ")
             stem = first_line[len("path: "):]
@@ -2143,10 +2143,10 @@ def test_docs_and_catalog_both_report_output_truncated(tmp_path, monkeypatch):
         assert "output_truncated" in res5
         # …and be truthful in both directions on a 7-chunk corpus.
         assert res5["output_truncated"] is True  # 7 > 5 — entries were dropped
-        assert len(res5["answer"].split("\n\n---\n\n")) == 5
+        assert len(res5["results"]) == 5
         res20 = query_docs("text", limit=20)
         assert res20["output_truncated"] is False  # 7 ≤ 20 — nothing dropped
-        assert len(res20["answer"].split("\n\n---\n\n")) == 7
+        assert len(res20["results"]) == 7
 
         # Catalog side (unchanged shape, now also exercised): the key is
         # present and truthful (True on the 568-block platform at limit=5).

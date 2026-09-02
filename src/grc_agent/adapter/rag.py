@@ -704,6 +704,29 @@ def _query_index(
         conn.close()
 
 
+def _attach_notices(response: dict[str, Any], result: dict[str, Any]) -> None:
+    """Attach every disclosure that applies, not just the first.
+
+    These were an if/elif over a single `message` slot, so a query that was
+    both token-capped and fell back to lexical search reported only the cap
+    and silently dropped the fallback. Both are transformations the model
+    needs to know about, so both are listed.
+    """
+    notices: list[str] = []
+    if result["query_capped"]:
+        notices.append(
+            f"Lexical search truncated the query to the first {_FTS_MAX_TOKENS} word tokens."
+        )
+    if result["search_mode"] == "lexical" and (
+        result["embed_error"] or resolve_embed_backend(load_settings()) == "llamacpp"
+    ):
+        notices.append(_lexical_fallback_message(result["embed_error"]))
+    if notices:
+        response["notices"] = notices
+        # One-line summary kept for readers that only look at `message`.
+        response["message"] = " ".join(notices)
+
+
 def query_catalog(query: str, limit: int = 5) -> dict[str, Any]:
     q = " ".join(str(query).split())
     if not q:
@@ -748,16 +771,7 @@ def query_catalog(query: str, limit: int = 5) -> dict[str, Any]:
         "output_truncated": result["output_truncated"],
         "search_mode": result["search_mode"],
     }
-    if result["query_capped"]:
-        # Disclosed in every backend mode, hybrid included (no silent
-        # transformation).
-        response["message"] = (
-            f"Lexical search truncated the query to the first {_FTS_MAX_TOKENS} word tokens."
-        )
-    elif result["search_mode"] == "lexical" and (
-        result["embed_error"] or resolve_embed_backend(load_settings()) == "llamacpp"
-    ):
-        response["message"] = _lexical_fallback_message(result["embed_error"])
+    _attach_notices(response, result)
     return response
 
 
@@ -848,6 +862,19 @@ def render_catalog_block(
     type_controlling = type_controlling_params(block_id)
 
     for k, p in b.params.items():
+        # GRC's own classification is the filter: `alias`, `affinity`,
+        # `minoutbuf`, `maxoutbuf` and `comment` are Advanced — bookkeeping
+        # present on every block regardless of type, and 21% of a k=5 catalog
+        # payload. Every block-specific schema parameter is General. Using
+        # param.category (an API AGENTS.md section 4 names) keeps this a
+        # uniform rule rather than a hardcoded name list.
+        #
+        # keep_param's overview mode is deliberately NOT used here: the
+        # catalog renders a freshly constructed block, where every parameter
+        # sits at its default, so the value-differs-from-default rule would
+        # also hide real schema like blocks_multiply_xx's num_inputs and vlen.
+        if str(getattr(p, "category", "") or "") == "Advanced":
+            continue
         if keep_param(k, p, b, mode="details"):
             dtype = getattr(p, "dtype", "") or "raw"
             default = getattr(p, "default", "") or ""
@@ -893,7 +920,7 @@ def render_catalog_block(
 def query_docs(query: str, limit: int = 5) -> dict[str, Any]:
     q = " ".join(str(query).split())
     if not q:
-        return {"ok": False, "answer": "", "message": "query must be non-empty"}
+        return {"ok": False, "results": [], "message": "query must be non-empty"}
 
     result = _query_index(
         "docs",
@@ -906,30 +933,24 @@ def query_docs(query: str, limit: int = 5) -> dict[str, Any]:
         extra_limit=1,
     )
     if not result["ok"]:
-        return {"ok": False, "answer": "", "message": result["message"]}
+        return {"ok": False, "results": [], "message": result["message"]}
 
     id_by_rowid = result["id_by_rowid"]
     # Cap the answer at `limit`: the +1 over-fetched rowid is a truncation
     # probe (mirrors the catalog's render-failure spare), never an extra
     # chunk — the response surfaces at most `limit` entries like catalog does.
     chunks = [id_by_rowid[r] for r in result["ranked_rowids"] if r in id_by_rowid][:limit]
-    answer = "\n\n---\n\n".join(chunks)
 
     response: dict[str, Any] = {
         "ok": True,
         "query": q,
-        "answer": answer,
+        # One shape across both domains: catalog returns block entries, docs
+        # returns passage entries, both under `results`. Joining the passages
+        # into a single string made the caller branch on the domain it just
+        # asked for, and threw away the chunk boundaries.
+        "results": [{"text": chunk} for chunk in chunks],
         "output_truncated": result["output_truncated"],
         "search_mode": result["search_mode"],
     }
-    if result["query_capped"]:
-        # Disclosed in every backend mode, hybrid included (no silent
-        # transformation).
-        response["message"] = (
-            f"Lexical search truncated the query to the first {_FTS_MAX_TOKENS} word tokens."
-        )
-    elif result["search_mode"] == "lexical" and (
-        result["embed_error"] or resolve_embed_backend(load_settings()) == "llamacpp"
-    ):
-        response["message"] = _lexical_fallback_message(result["embed_error"])
+    _attach_notices(response, result)
     return response

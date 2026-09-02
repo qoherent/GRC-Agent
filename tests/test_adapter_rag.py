@@ -155,7 +155,7 @@ def test_query_knowledge_func_passes_through_k(monkeypatch):
 
     def fake_query_docs(query, limit=5):
         seen_calls.append((query, limit))
-        return {"ok": True, "query": query, "answer": "", "search_mode": "vector"}
+        return {"ok": True, "query": query, "results": [], "search_mode": "vector"}
 
     monkeypatch.setattr("grc_agent.agent.query_catalog", fake_query_catalog)
     monkeypatch.setattr("grc_agent.agent.query_docs", fake_query_docs)
@@ -442,8 +442,8 @@ def test_former_both_engine_misses_now_rank(tmp_path, monkeypatch):
             res = query_docs(query, limit=5)
             assert res["ok"] is True
             paths = [
-                chunk.split("\n", 1)[0][len("path: "):]
-                for chunk in res["answer"].split("\n\n---\n\n")
+                entry["text"].split("\n", 1)[0][len("path: "):]
+                for entry in res["results"]
             ]
             assert any(stem in paths for stem in expected_stems), (
                 f"{query!r}: none of {expected_stems} in top-5 (got {paths})"
@@ -483,7 +483,7 @@ def test_new_corpus_pages_rank_top1_for_unique_phrases(tmp_path, monkeypatch):
                 continue  # corpus drifted — guard rather than assert stale pins
             res = query_docs(phrase, limit=3)
             assert res["ok"] is True
-            first = res["answer"].split("\n\n---\n\n")[0].split("\n", 1)[0]
+            first = res["results"][0]["text"].split("\n", 1)[0]
             assert first == f"path: {expected_stem}"
     finally:
         _FRESHNESS_CACHE.pop("docs", None)
@@ -538,3 +538,74 @@ def test_render_with_distance_includes_rounded_key():
     assert r_zero is not None
     assert r_zero["distance"] == 0.0
 
+
+
+def test_query_knowledge_returns_one_shape_across_both_domains(tmp_path, monkeypatch):
+    """One tool must not return two shapes.
+
+    catalog returned a `results` list while docs returned a single `answer`
+    string of chunks joined by a separator, so the model had to branch on the
+    domain it had just supplied, and the chunk boundaries were only
+    recoverable by splitting on a magic delimiter.
+    """
+    monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
+
+    from grc_agent.adapter import query_catalog, query_docs
+
+    catalog = query_catalog("multiply", 3)
+    docs = query_docs("stream tag", 3)
+
+    assert sorted(catalog) == sorted(docs), (
+        f"top-level keys differ: catalog={sorted(catalog)} docs={sorted(docs)}"
+    )
+    for payload in (catalog, docs):
+        assert isinstance(payload["results"], list)
+    assert "answer" not in docs
+    if docs["results"]:
+        assert set(docs["results"][0]) == {"text"}
+
+
+def test_catalog_omits_grc_bookkeeping_parameters():
+    """Advanced parameters are GRC bookkeeping, not block schema.
+
+    alias/affinity/minoutbuf/maxoutbuf/comment sit on every block regardless
+    of type and were ~20% of a k=5 catalog payload. They are filtered by
+    GRC's own param.category, not by a hardcoded name list -- and crucially
+    NOT by keep_param's overview rule, which would also hide real schema
+    (blocks_multiply_xx's num_inputs and vlen sit at their defaults on a
+    freshly constructed block).
+    """
+    from grc_agent.adapter.rag import render_catalog_block
+
+    rendered = render_catalog_block("blocks_multiply_xx", None)
+    assert rendered is not None
+    params = rendered["params"]
+
+    for bookkeeping in ("alias", "affinity", "minoutbuf", "maxoutbuf", "comment"):
+        assert bookkeeping not in params, f"{bookkeeping} is Advanced and must not be rendered"
+    for schema in ("type", "num_inputs", "vlen"):
+        assert schema in params, f"{schema} is real block schema and must survive"
+
+
+def test_both_disclosures_survive_when_both_apply():
+    """A capped query that also fell back to lexical must report both.
+
+    They shared a single `message` slot behind an if/elif, so whichever fired
+    first silently suppressed the other.
+    """
+    from grc_agent.adapter.rag import _attach_notices
+
+    response: dict = {}
+    _attach_notices(
+        response,
+        {"query_capped": True, "search_mode": "lexical", "embed_error": "backend down"},
+    )
+    assert len(response["notices"]) == 2, response
+    joined = " ".join(response["notices"])
+    assert "truncated the query" in joined
+    assert "backend down" in joined or "lexical" in joined.lower()
+
+    # Neither applies -> no notice at all.
+    clean: dict = {}
+    _attach_notices(clean, {"query_capped": False, "search_mode": "hybrid", "embed_error": None})
+    assert "notices" not in clean and "message" not in clean
