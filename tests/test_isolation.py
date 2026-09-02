@@ -762,6 +762,7 @@ def test_ensure_db_built_rebuilds_when_fts_table_missing(tmp_path, monkeypatch):
         _FRESHNESS_CACHE.pop("catalog", None)
 
 
+@pytest.mark.integration  # a real chat completion against https://ollama.com/v1
 def test_ollama_cloud_model_builds_and_runs():
     """Build an OllamaModel against Ollama Cloud (https://ollama.com/v1) with
     the saved API key and run a real chat turn. This is the file's one
@@ -1000,6 +1001,7 @@ def test_build_agents_from_cfg_produces_correct_model_type_per_provider(tmp_path
         )
 
 
+@pytest.mark.integration  # a real chat completion against OpenRouter
 def test_live_swap_rebuilds_agent_with_new_provider(tmp_path, monkeypatch):
     """Regression for the reported bug: changing provider via save_settings +
     rebuild must produce an Agent whose model actually points at the NEW
@@ -1074,6 +1076,7 @@ def test_live_swap_rebuilds_agent_with_new_provider(tmp_path, monkeypatch):
     asyncio.run(_run())
 
 
+@pytest.mark.integration  # a live HTTP probe against OpenRouter
 def test_probe_backend_returns_none_on_success_and_error_on_failure():
     """probe_backend must return (None, None) on a reachable endpoint and a
     descriptive reachability error string on any failure. The live branch is

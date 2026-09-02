@@ -123,6 +123,13 @@ no_implicit_optional = false
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra -m 'not integration'"
+# asyncio_mode is explicit so the suite's @pytest.mark.asyncio tests keep
+# running as pytest-asyncio's defaults move; without the loop-scope setting
+# pytest-asyncio emits a deprecation warning on every run.
+asyncio_mode = "strict"
+asyncio_default_fixture_loop_scope = "function"
 markers = [
     "integration: marks tests as integration tests that require live LLM backends",
+    "gui: requires an X display (run under xvfb-run)",
+    "network: reaches an external network endpoint",
 ]
