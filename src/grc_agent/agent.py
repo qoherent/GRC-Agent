@@ -222,7 +222,11 @@ prompt_injection_cap = PromptInjectionDefender(
 )
 # Module-level tool functions
 async def inspect_graph_func(ctx: RunContext[FlowgraphDeps], targets: list[str] | None = None) -> str:
-    """Read-only inspection of the active graph. Returns topology, block instances, connections, parameter values, and validation status.
+    """Read-only inspection of the active graph: topology, block instances, connections, parameter values and validation status.
+
+    Advanced parameters at their default value and unconnected optional ports
+    are left out. An "omitted_*_count" appears only when something actually
+    was omitted, so a missing counter means nothing was hidden.
 
     Args:
         targets: Block/variable instance names to scope inspection to (e.g. ["samp_rate", "blocks_head_0"]). Omit to inspect the full graph.
@@ -262,13 +266,11 @@ async def query_knowledge_func(
     domain: Literal["catalog", "docs"],
     k: ResultCount = 5,
 ) -> str:
-    """Answer GNU Radio knowledge questions from two domains: catalog (block IDs, port names, parameter keys, and each block's implementation docstring with parameter units/semantics) or docs (concepts).
-
-    Responses carry search_mode ('vector' | 'lexical' | 'hybrid') and output_truncated (true when more matching entries existed beyond the k returned — raise k or refine the query).
+    """Answer GNU Radio questions from the local corpus: block schemas and parameter semantics, or DSP concepts.
 
     Args:
         query: The search text.
-        domain: "catalog" for block lookups, "docs" for conceptual/how-to questions.
+        domain: "catalog" for block IDs, ports, parameter keys and units; "docs" for concepts and how-to.
         k: How many results to return.
     """
     engine = query_catalog if domain == "catalog" else query_docs
@@ -283,11 +285,8 @@ async def query_knowledge_func(
 async def generate_python_func(ctx: RunContext[FlowgraphDeps], k: ResultCount = 5) -> str:
     """Render the Python source GNU Radio would generate from the current graph. Read-only — never writes to disk or runs the flowgraph.
 
-    Returns one entry per generated file: the main flowgraph script plus one
-    per Embedded Python Block/Module if any are present (excess block-source
-    files are dropped and counted in "omitted_files", never silently). Fails
-    (with a clear error) on invalid graphs, hierarchical blocks, or C++-output
-    flowgraphs — fix the graph with change_graph and retry.
+    Returns the main flowgraph script plus one entry per Embedded Python
+    Block/Module, capped at k; any dropped are counted in "omitted_files".
 
     Args:
         k: Max number of block-source files to include alongside the main script.
@@ -310,15 +309,12 @@ async def change_graph_func(
     remove_connections: Annotated[list[ConnectionSpec], Field(default_factory=list)],
     force: bool = False,
 ) -> str:
-    """Apply a batch of structural graph edits as one atomic transaction.
+    """Apply a batch of structural graph edits as one atomic transaction, after the user approves it.
 
-    The edit is applied only after the user approves it — this tool requires
-    human-in-the-loop approval, and the flowgraph is never mutated before then.
-
-    A type-controlling param (e.g. 'type') set to the literal string 'auto' is
-    resolved from an explicit, non-'auto' value on a connected neighbor —
-    including one added and connected in this same call; if neither side has an
-    explicit type, the call fails with an actionable error instead of guessing.
+    Nothing is mutated before approval, and a failed batch rolls back whole.
+    A type-controlling param set to 'auto' resolves from an explicit value on a
+    connected neighbour, including one added in this same call; if neither side
+    has one the call fails rather than guessing.
 
     Args:
         reason: One-sentence justification of this edit's intent, shown to the
@@ -390,16 +386,11 @@ async def change_graph_func(
 
 
 async def get_run_log_func(ctx: RunContext[FlowgraphDeps]) -> str:
-    """Read the console output (stdout + stderr) of the most recent flowgraph run.
+    """Read stdout + stderr from the most recent flowgraph run.
 
-    Returns the captured log from the last Execute action, whether it succeeded
-    or failed. Use this after running a flowgraph to diagnose runtime errors (e.g.
-    hardware not found, parameter mismatches, GPU/CPU issues) that are not visible
-    in the static graph structure.
-
-    The log is retained until the next run — you can call this tool at any time
-    after a run to re-read the output. If it was longer than the monitor's
-    buffer, the oldest output is dropped and "log_truncated" is set.
+    Diagnoses runtime faults a static graph cannot show — missing hardware,
+    driver errors, parameter mismatches. The result carries its own status
+    fields for truncation, an in-flight run, and a graph edited since.
     """
     # A missing monitor is a wiring fault, not an empty result: reporting it as
     # ordinary data made it indistinguishable from "no run yet". ToolFailed is
@@ -429,14 +420,11 @@ async def save_block_func(
     category: str | None = None,
     overwrite: bool = False,
 ) -> str:
-    """Save an existing Embedded Python Block (epy_block) instance into GNU Radio's native hier-block library so it becomes a reusable catalog block for future flowgraphs.
+    """Save an existing Embedded Python Block (epy_block) into GNU Radio's hier-block library, making it a reusable catalog block.
 
-    Does NOT modify the current flowgraph's own epy_block instance — it keeps using
-    its own local inline source, unaffected. The saved block is a new, separately
-    named catalog entry available for future change_graph calls (in this flowgraph
-    or any other) once this call succeeds. This is not an out-of-tree (OOT) module —
-    it's GNU Radio's lighter hier-block library mechanism; say so if asked, rather
-    than calling it OOT.
+    The flowgraph's own epy_block is untouched; the saved block is a separate
+    catalog entry usable by later change_graph calls anywhere. This is the
+    hier-block library, not an out-of-tree module — say so if asked.
 
     Args:
         instance_name: The epy_block instance in the current flowgraph to export.
@@ -495,9 +483,8 @@ async def run_flowgraph_func(
 ) -> str:
     """Control execution of the active GNU Radio flowgraph (start or stop).
 
-    Executes via GRC's native runner and streams console output live. Action 'start'
-    is approval-gated (RF safety); 'stop' terminates immediately without approval.
-    Read stdout/stderr with get_run_log after completion.
+    Runs through GRC's own runner, streaming console output live. Starting is
+    approval-gated (RF safety); stopping is not.
 
     Args:
         action: 'start' to run the active flowgraph, or 'stop' to terminate it (SIGTERM).
@@ -527,24 +514,12 @@ async def run_flowgraph_func(
 
 
 async def save_graph_func(ctx: RunContext[FlowgraphDeps]) -> str:
-    """Save the active flowgraph to disk through GRC's native serializer — the agent-side equivalent of Ctrl+S, with no dialog and no user interaction.
+    """Save the active flowgraph to disk — the agent-side equivalent of Ctrl+S, with no dialog.
 
-    Takes no arguments: it always saves the currently active GRC tab. A page
-    that has never been saved is written into the project directory under a
-    name derived from the graph's options id (collision-free); a page that
-    already has a file is saved in place. The write is atomic. GRC generates
-    into the saved graph's directory and executes from there, so save here
-    before run_flowgraph when the flowgraph is untitled.
-
-    Returns a JSON object {"path", "page"}: "path" is the saved .grc file's
-    path and "page" is the tab name it lives under, so you can detect tab
-    switches between calls. Failures raise a retryable error naming the
-    target path or tab so you can correct course: no project directory is
-    selected (select one first), the derived path is already open in another
-    tab (switch to that tab and save there, or close it), the target file is
-    read-only (make it writable), the target is locked by another writer
-    (retry the save shortly), or the write itself failed (the target is left
-    untouched).
+    An unsaved page lands in the project directory under a derived name; a
+    saved one is rewritten in place. GRC generates into the saved graph's
+    directory and runs from there, so save before run_flowgraph when the
+    flowgraph is untitled.
     """
     if not isinstance(ctx.deps, SupportsSaveGraph):
         raise ToolFailed(

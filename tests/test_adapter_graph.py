@@ -968,3 +968,53 @@ def test_change_graph_list_arguments_carry_no_null_branch():
     ):
         assert "anyOf" not in props[arg], f"{arg} still widens to a null branch"
         assert props[arg]["type"] == "array"
+
+
+def test_inspect_graph_omits_zero_counters_and_empty_port_lists(temp_dial_tone):
+    """Absence carries the same information as a zero, at no token cost.
+
+    Emitting omitted_*_count: 0 and inputs: [] on every block was ~21% of the
+    payload on this repo's own fixtures. A counter now appears only when
+    something actually was omitted -- and inspect_graph's description states
+    that convention, so a missing key is never ambiguous.
+    """
+    fg = load_flow_graph(str(temp_dial_tone))
+    payload = inspect_graph(fg)
+    blocks = payload["graph"]["blocks"]
+    assert blocks
+
+    for b in blocks:
+        for key in ("omitted_params_count", "omitted_inputs_count", "omitted_outputs_count"):
+            assert b.get(key, 1) != 0, f"{b['instance_name']} still emits a zero {key}"
+        for key in ("inputs", "outputs"):
+            assert b.get(key, ["x"]) != [], f"{b['instance_name']} still emits an empty {key}"
+
+    # A block that genuinely hid parameters still reports the count, so the
+    # honesty contract survives the trim.
+    assert any(b.get("omitted_params_count", 0) > 0 for b in blocks), (
+        "the fixture should hide advanced params on at least one block"
+    )
+    # ...and ports are still reported where they exist.
+    assert any(b.get("inputs") for b in blocks)
+    assert any(b.get("outputs") for b in blocks)
+
+
+def test_tool_description_budget_and_omission_convention():
+    """The model-visible surface stays bounded, and states its own conventions."""
+    import json
+
+    from grc_agent.agent import grc_tools
+
+    tools = grc_tools()
+    descriptions = sum(len(t.description or "") for t in tools)
+    schemas = sum(
+        len(json.dumps(t.function_schema.json_schema, separators=(",", ":"))) for t in tools
+    )
+    # Was 4,058 / 5,932 before the schema and description work.
+    assert descriptions < 2200, f"description budget regressed to {descriptions}"
+    assert schemas < 5932, f"schema bytes regressed to {schemas}"
+
+    inspect_desc = [t for t in tools if t.name == "inspect_graph"][0].description or ""
+    assert "omitted_" in inspect_desc, (
+        "inspect_graph must state that a missing omission counter means nothing was hidden"
+    )

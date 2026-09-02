@@ -712,20 +712,31 @@ def inspect_graph(  # noqa: C901
         if state == "bypassed":
             state = "bypass"
 
-        blocks_all.append(
-            {
-                "instance_name": b.name,
-                "block_id": b.key,
-                "role": role,
-                "state": state,
-                "params": params,
-                "inputs": inputs,
-                "outputs": outputs,
-                "omitted_params_count": omitted_params_count,
-                "omitted_inputs_count": omitted_inputs_count,
-                "omitted_outputs_count": omitted_outputs_count,
-            }
-        )
+        # An omission counter is emitted only when something was actually
+        # omitted, and an empty port list is left out entirely. Absence says
+        # exactly what a zero said — nothing was hidden — and on the repo's
+        # own fixtures the zeros and empty arrays were 21% of the payload the
+        # model pays for on every inspection. The tool's description states
+        # the convention so a missing key is never ambiguous.
+        entry = {
+            "instance_name": b.name,
+            "block_id": b.key,
+            "role": role,
+            "state": state,
+            "params": params,
+        }
+        if inputs:
+            entry["inputs"] = inputs
+        if outputs:
+            entry["outputs"] = outputs
+        for key, count in (
+            ("omitted_params_count", omitted_params_count),
+            ("omitted_inputs_count", omitted_inputs_count),
+            ("omitted_outputs_count", omitted_outputs_count),
+        ):
+            if count:
+                entry[key] = count
+        blocks_all.append(entry)
 
     # is_valid()/iter_error_messages() only ever read _error_messages, which
     # validate() populates and rewrite() (called after every load/mutation)
