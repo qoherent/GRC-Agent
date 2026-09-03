@@ -111,7 +111,7 @@ uv run pytest tests/ --ignore=tests/test_integration.py --ignore=tests/test_butt
 uv run ruff check
 
 # Display-dependent GTK UI tests (run under xvfb if headless)
-xvfb-run -a uv run pytest tests/test_chat_sidebar.py tests/test_native_canvas.py tests/test_desktop_app.py tests/test_session_persistence_advanced.py tests/test_context_compaction.py
+xvfb-run -a uv run pytest tests/test_chat_sidebar.py tests/test_chat_sidebar_golden.py tests/test_native_canvas.py tests/test_desktop_app.py tests/test_session_persistence_advanced.py tests/test_context_compaction.py
 ```
 
 - The fast gate is hermetic: no test in it makes an LLM call or reaches an external network endpoint. Live-backend tests carry `@pytest.mark.integration` and are deselected by `addopts`.
