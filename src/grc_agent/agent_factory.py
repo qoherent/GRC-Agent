@@ -3,15 +3,17 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import importlib
+import json
 import logging
 import os
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Annotated, Any
 
 import httpx
 import httpx2
-from pydantic_ai import Agent, ModelRequestContext, ModelSettings, RunContext
+from pydantic import BeforeValidator
+from pydantic_ai import Agent, ModelRequestContext, ModelRetry, ModelSettings, RunContext
 from pydantic_ai.capabilities import AbstractCapability, PrepareTools
 from pydantic_ai.models.ollama import OllamaModel
 from pydantic_ai.models.openai import OpenAIChatModel
@@ -36,6 +38,7 @@ from pydantic_ai_harness.compaction import (
 from pydantic_ai_harness.filesystem import READ_ONLY_TOOL_NAMES
 from pydantic_ai_harness.planning import (
     InMemoryPlanStore,
+    PlanItem,
     Planning,
     PlanStore,
     SqlitePlanStore,
@@ -144,6 +147,85 @@ def _plan_store_resolver(ctx: RunContext[Any]) -> PlanStore:
     return SqlitePlanStore(str(get_db_path()), session=conversation_id)
 
 
+def coerce_plan_items(v: Any) -> list[Any]:
+    """Uniform normalization for write_plan tool input.
+
+    Coerces JSON-stringified arrays, plain string lists, and field aliases
+    (name, step, task, title, description -> content) into PlanItem-compatible dicts.
+    Raises ModelRetry with actionable feedback on unparseable inputs.
+    """
+    if isinstance(v, str):
+        v = v.strip()
+        try:
+            v = json.loads(v)
+        except Exception as exc:
+            raise ModelRetry(
+                "Invalid JSON for plan items. Expected a list of steps, e.g.:\n"
+                '[{"content": "First step description", "status": "pending"}]\n'
+                f"Error: {exc}"
+            ) from exc
+
+    if isinstance(v, list):
+        parsed: list[dict[str, Any] | Any] = []
+        for item in v:
+            if isinstance(item, str):
+                parsed.append({"content": item.strip(), "status": "pending"})
+            elif isinstance(item, dict):
+                content = (
+                    item.get("content")
+                    or item.get("name")
+                    or item.get("step")
+                    or item.get("task")
+                    or item.get("title")
+                    or item.get("description")
+                    or ""
+                )
+                if not content:
+                    raise ModelRetry(
+                        "Each plan item must include a description. Expected:\n"
+                        '{"content": "Step description", "status": "pending"}'
+                    )
+                status = item.get("status", "pending")
+                if isinstance(status, str):
+                    status = status.lower().strip()
+                    if status in ("todo", "not_started"):
+                        status = "pending"
+                    elif status in ("doing", "active"):
+                        status = "in_progress"
+                    elif status in ("done", "finished"):
+                        status = "completed"
+                item_id = str(item.get("id")) if item.get("id") is not None else None
+                d = {"content": str(content).strip(), "status": status}
+                if item_id:
+                    d["id"] = item_id
+                parsed.append(d)
+            else:
+                parsed.append(item)
+        return parsed
+
+    raise ModelRetry(
+        "Invalid plan items. Expected a list of plan steps, e.g.:\n"
+        '[{"content": "Step description", "status": "pending"}]'
+    )
+
+
+CoercedPlanItems = Annotated[list[PlanItem], BeforeValidator(coerce_plan_items)]
+
+
+async def write_plan_func(
+    ctx: RunContext[Any],
+    items: CoercedPlanItems,
+) -> str:
+    """Create or replace the whole plan.
+
+    Args:
+        items: The complete ordered list of plan steps.
+    """
+    store = _plan_store_resolver(ctx)
+    await store.set_items(items)
+    return f"Plan updated: {len(items)} step(s).\n\n{render_plan(items)}"
+
+
 def _provider_base_url(cfg: dict) -> str:
     """The configured endpoint for the active chat provider ("" when there
     isn't one — ChatGPT/Codex is always chatgpt.com OAuth with no user-set
@@ -186,7 +268,7 @@ def _provider_base_url(cfg: dict) -> str:
 # migrates; the assertion in tests/test_agent_factory.py will say when.
 _HTTPX1_ONLY_PROVIDERS = frozenset({"groq"})
 
-_HTTP_TIMEOUT = {"connect": 15.0, "read": 1800.0, "write": 60.0, "pool": 30.0}
+_HTTP_TIMEOUT = {"connect": 15.0, "read": 120.0, "write": 60.0, "pool": 30.0}
 
 
 def _retry_config(transport_error: type[Exception], status_error: type[Exception]) -> RetryConfig:
@@ -906,19 +988,12 @@ def build_agents_from_cfg(cfg: dict) -> AgentBundle:
             ),
             Planning(
                 store_resolver=_plan_store_resolver,
-                # write_plan only. read_plan was redundant: Planning already
-                # appends the full rendered plan as an ephemeral tail on every
-                # request (inject defaults True), so a tool to fetch it is a
-                # second copy of a feature that is already on.
-                #
-                # Dropping it also removes the need for a hand-written
-                # `guidance`. The default is assembled from the registered
-                # tools, and the granular sentence is gated on read_plan and
-                # the task tools — with write_plan alone the harness emits
-                # only _WRITE_PLAN_GUIDANCE, which is correct. The explicit
-                # string existed to work around that gate and enumerated the
-                # tools by name, which AGENTS.md section 4 forbids.
-                tools=["write_plan"],
+                tools=[],
+                guidance=(
+                    "You have a planning tool, `write_plan`. For multi-step work, call it first to lay out the steps, "
+                    "then keep it current: mark exactly one step `in_progress`, and mark a step `completed` as soon as "
+                    "it is fully done. Pass the full plan every time you call `write_plan`."
+                ),
             ),
             _build_compaction_capability(cfg, agent_name="grc_planner"),
             web_search_cap,
@@ -930,6 +1005,7 @@ def build_agents_from_cfg(cfg: dict) -> AgentBundle:
         model_settings=model_settings,
         retries={"tools": 3, "output": 3},
     )
+    planner.tool(write_plan_func, name="write_plan")
 
     def add_active_flowgraph_context(ctx: RunContext[NativeFlowgraphProxy]) -> str | None:
         if ctx.deps is not None:

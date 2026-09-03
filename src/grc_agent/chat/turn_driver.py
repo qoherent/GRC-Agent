@@ -55,7 +55,6 @@ from ..ui.providers import PROVIDER_LABELS as _PROVIDER_LABELS
 from .errors import _format_turn_error
 from .history import (
     _clean_message_history_for_new_turn,
-    _messages_call_tool,
     _without_truncated_thinking_tail,
 )
 from .stream_view import _StreamCtx
@@ -287,9 +286,6 @@ class TurnDriverMixin:
                 turn_required_approval = True
 
             if run.result is not None:
-                planner_wrote_plan = origin_agent_mode == "planner" and _messages_call_tool(
-                    run.result.new_messages(), "write_plan"
-                )
                 self._message_history = run.result.all_messages()
                 await self._save_history()
                 if turn_required_approval:
@@ -300,7 +296,7 @@ class TurnDriverMixin:
                     self._render_history()
                 else:
                     self._replace_streaming_turn(ctx, run.result.new_messages())
-                if planner_wrote_plan and origin_session_id is not None:
+                if origin_agent_mode == "planner" and origin_session_id is not None:
                     await self._show_implement_plan_if_ready(origin_session_id)
                 rich_rendered = True
         except asyncio.CancelledError:

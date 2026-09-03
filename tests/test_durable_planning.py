@@ -280,3 +280,144 @@ def test_planner_factory_uses_durable_store_and_executor_has_no_planning(monkeyp
     executor_capabilities = []
     agents.executor._root_capability.apply(executor_capabilities.append)
     assert not any(isinstance(cap, Planning) for cap in executor_capabilities)
+
+
+def test_coerce_plan_items_handles_stringified_json_and_aliases():
+    from pydantic import TypeAdapter
+    from pydantic_ai_harness.planning import TaskStatus
+
+    from grc_agent.agent_factory import CoercedPlanItems
+
+    ta = TypeAdapter(CoercedPlanItems)
+
+    raw_json = '[{"id": 1, "name": "Add variables", "status": "in_progress"}, {"id": 2, "step": "Build chain", "status": "done"}]'
+    items = ta.validate_python(raw_json)
+    assert len(items) == 2
+    assert items[0].id == "1"
+    assert items[0].content == "Add variables"
+    assert items[0].status == TaskStatus.in_progress
+    assert items[1].id == "2"
+    assert items[1].content == "Build chain"
+    assert items[1].status == TaskStatus.completed
+
+
+def test_coerce_plan_items_handles_plain_strings():
+    from pydantic import TypeAdapter
+
+    from grc_agent.agent_factory import CoercedPlanItems
+
+    ta = TypeAdapter(CoercedPlanItems)
+    items = ta.validate_python(["First step", "Second step"])
+    assert len(items) == 2
+    assert items[0].content == "First step"
+    assert items[1].content == "Second step"
+
+
+def test_coerce_plan_items_raises_model_retry_on_invalid():
+    from pydantic import TypeAdapter
+    from pydantic_ai import ModelRetry
+
+    from grc_agent.agent_factory import CoercedPlanItems
+
+    ta = TypeAdapter(CoercedPlanItems)
+    with pytest.raises(ModelRetry) as exc_info:
+        ta.validate_python("not json at all")
+    assert "Invalid JSON" in str(exc_info.value)
+
+    with pytest.raises(ModelRetry) as exc_info2:
+        ta.validate_python(12345)
+    assert "Invalid plan items" in str(exc_info2.value)
+
+
+def test_planner_executes_write_plan_with_stringified_json(tmp_path):
+    from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart
+    from pydantic_ai.models.function import FunctionModel
+
+    from grc_agent.agent_factory import build_agents_from_cfg
+
+    agents = build_agents_from_cfg(
+        {
+            "provider": "ollama_local",
+            "model": "test-model",
+            "ollama_base_url": "http://127.0.0.1:11434",
+        }
+    )
+    conversation_id = _conversation(_make_session(tmp_path))
+
+    def model(messages, _info):
+        wrote_plan = any(
+            getattr(part, "tool_name", None) == "write_plan"
+            for message in messages
+            for part in getattr(message, "parts", [])
+        )
+        if not wrote_plan:
+            return ModelResponse(
+                parts=[
+                    ToolCallPart(
+                        tool_name="write_plan",
+                        # Stringified JSON array with integer IDs and 'name' alias (exactly as ling-flash emitted)
+                        args={
+                            "items": '[{"id": 1, "name": "Variable setup", "status": "in_progress"}, {"id": 2, "name": "Modulator", "status": "pending"}]'
+                        },
+                    ),
+                ]
+            )
+        return ModelResponse(parts=[TextPart(content="Plan created.")])
+
+    async def run():
+        with agents.planner.override(
+            model=FunctionModel(model, profile=agents.planner.model.profile)
+        ):
+            return await agents.planner.run(
+                "Plan the flowgraph.", conversation_id=conversation_id
+            )
+
+    result = asyncio.run(run())
+    assert "Plan created." in result.output
+
+    items = _plan_contents(conversation_id)
+    assert items == ["Variable setup", "Modulator"]
+
+
+def test_text_plan_fallback_recovery_in_session(tmp_path):
+    from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, UserPromptPart
+
+    from grc_agent.chat.session import SessionMixin
+
+    session_id = _make_session(tmp_path)
+    conversation_id = _conversation(session_id)
+
+    # Durable plan is currently empty
+    assert _plan_contents(conversation_id) == []
+
+    class FakeChat(SessionMixin):
+        def __init__(self):
+            self._active_session_id = session_id
+            self._agent_mode = "planner"
+            self._message_history = [
+                ModelRequest(parts=[UserPromptPart(content="Design QPSK flowgraph")]),
+                ModelResponse(
+                    parts=[
+                        TextPart(
+                            content="### Step 1 — Variables\nSet samp_rate\n### Step 2 — Modulator\nAdd psk_mod"
+                        )
+                    ]
+                ),
+            ]
+            self._appended_action = False
+            self._busy = False
+
+        def _append_implement_plan_action(self, _sid):
+            self._appended_action = True
+
+        def set_status(self, msg, error=False):
+            pass
+
+    chat = FakeChat()
+    asyncio.run(chat._show_implement_plan_if_ready(session_id))
+
+    # Assert that plan was recovered into SqlitePlanStore and action button was enabled
+    assert chat._appended_action is True
+    assert _plan_contents(conversation_id) == ["Variables", "Modulator"]
+
+

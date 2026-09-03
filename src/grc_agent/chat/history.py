@@ -10,8 +10,18 @@ reasoning tail.
 from __future__ import annotations
 
 import logging
+import re
 
-from pydantic_ai.messages import ModelMessage, ModelResponse, ThinkingPart, ToolCallPart
+from pydantic_ai.messages import (
+    ModelMessage,
+    ModelRequest,
+    ModelResponse,
+    TextPart,
+    ThinkingPart,
+    ToolCallPart,
+    UserPromptPart,
+)
+from pydantic_ai_harness.planning import PlanItem
 
 _log = logging.getLogger(__name__)
 
@@ -74,3 +84,61 @@ def _without_truncated_thinking_tail(
     ):
         return messages[:-1], True
     return messages, False
+
+
+def _sanitize_history_for_executor(
+    messages: list[ModelMessage],
+) -> list[ModelMessage]:
+    """Sanitize message history when transitioning from Planner to Executor.
+
+    Keeps:
+    - User prompts (preserving user intent, requirements, and directives)
+    - Assistant text explanations (preserving the high-level plan explanation)
+
+    Prunes:
+    - Intermediate failed tool calls and retry prompts
+    - Bulky file chunk reads and directory listings from exploratory turns
+
+    Merges adjacent messages of the same type to maintain valid conversational flow.
+    """
+    filtered: list[ModelMessage] = []
+    for msg in messages:
+        if isinstance(msg, ModelRequest):
+            user_parts = [p for p in msg.parts if isinstance(p, UserPromptPart)]
+            if user_parts:
+                filtered.append(ModelRequest(parts=user_parts))
+        elif isinstance(msg, ModelResponse):
+            text_parts = [
+                p for p in msg.parts if isinstance(p, TextPart) and p.content.strip()
+            ]
+            if text_parts:
+                filtered.append(ModelResponse(parts=text_parts))
+
+    merged: list[ModelMessage] = []
+    for msg in filtered:
+        if merged and type(merged[-1]) is type(msg):
+            combined_parts = list(merged[-1].parts) + list(msg.parts)
+            if isinstance(msg, ModelRequest):
+                merged[-1] = ModelRequest(parts=combined_parts)
+            else:
+                merged[-1] = ModelResponse(parts=combined_parts)
+        else:
+            merged.append(msg)
+    return merged
+
+
+def extract_plan_from_text(text: str) -> list[PlanItem]:
+    """Extract structured plan items from markdown headings or numbered lists."""
+    if not text:
+        return []
+    # Pattern 1: '### Step \d+ [-—–:] (.+)'
+    step_headings = re.findall(r"###\s+Step\s+\d+\s*[-—–:]\s*(.+)", text, re.IGNORECASE)
+    if len(step_headings) >= 2:
+        return [PlanItem(content=h.strip()) for h in step_headings if h.strip()]
+
+    # Pattern 2: numbered list '1. Step description'
+    numbered = re.findall(r"^\s*\d+\.\s+(.+)$", text, re.MULTILINE)
+    if len(numbered) >= 2:
+        return [PlanItem(content=n.strip()) for n in numbered if n.strip()]
+
+    return []

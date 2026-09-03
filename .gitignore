@@ -57,6 +57,7 @@ experiments/*/final_findings_and_causes.md
 .context/
 unsloth_compiled_cache/
 docs/handoff.md
+docs/blog.md
 
 # pi harness local state (goals pool, loops, session ledgers)
 .pi/
