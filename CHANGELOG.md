@@ -11,10 +11,9 @@ web-dashboard codebase and are not part of this history.
 
 Harness lean-out and model-facing tool contract rework, planned in
 [`docs/plans/2026-09-02-0830-refactor-harness-lean-and-tool-contracts-plan.md`](docs/plans/2026-09-02-0830-refactor-harness-lean-and-tool-contracts-plan.md).
-Phases 1-3 of that plan are landed, plus U20 (shared test fixtures) and U15's
-pure-function extraction and state-consolidation work (below); U15's
-widget-owning mixin splits, U16-U18, and the infrastructure/layout unit (U14)
-are not.
+Phases 1-3 of that plan are landed, plus U20 (shared test fixtures) and all of
+U15 except one of its own verification bars (below); U16-U18 and the
+infrastructure/layout unit (U14) are not.
 
 **Measured effect on the model-facing surface.** Tool descriptions 4,058 -> 2,179
 characters, tool schemas 5,932 -> 5,743, system prompt 5,012 -> 4,056. The static
@@ -56,6 +55,7 @@ Cloud scenarios (`01_add_throttle`, `06_query_knowledge_multiply`,
 - **`chat_sidebar.py`'s display-free logic moved out into a new `chat/` package** (`format.py`, `errors.py`, `history.py`, `usage.py`) — tool-label/transcript formatting, turn-error message extraction, message-history cleanup, and token/cost usage accounting, none of which touch GTK. Each is now directly unit-testable without a display; a behavioral golden captured before the split stays byte-identical after it. `chat_sidebar.py` drops from 4,173 to under 3,800 lines.
 - **Three duplicated pieces of `ChatSidebar` state collapsed to one authority each.** The canvas manager was re-derived via `getattr(self._flowgraph_proxy, "_canvas_manager", None)` at seven call sites instead of the file's own existing `_get_cm()` helper; "what are the current messages" was inlined again in `_update_context_label` instead of reading through one method (`_current_messages`, covering both the stable `_message_history` snapshot and a live run's `all_messages()`); and `clear_messages`/`stop_chat` each hand-enumerated the same four named task attributes to cancel them. The four fire-and-forget tasks (`_chat_task`, `_compact_task`, `_fix_task`, `_implement_plan_task`) now also register into one `_background_tasks` set via `_track_background_task`, read by a single `_cancel_background_tasks`, while keeping their named references where a call site needs to ask "is this specific kind of task running" (the implement-plan guard).
 - **`_clean_message_history_for_new_turn` and `_without_truncated_thinking_tail` moved from a downstream repair to the read boundary that actually needs them.** `_run_agent_turn` re-ran both filters on `self._message_history` at the top of every turn, papering over whatever state an earlier write left behind — AGENTS.md section 1 asks for the source fixed instead. The abort path (`_recover_history_after_failure`) already persisted clean history; the one write site that didn't was loading a saved session, which can carry a trailing unfulfilled tool call (a session persisted mid-approval-pause, or one saved by a pre-fix build) — pydantic-ai rejects a new prompt against that history outright. `_on_recent_session_clicked` now cleans at load, and the turn-start repair is gone.
+- **`ChatSidebar`'s six widget-owning concerns split into their own mixin modules**, mixed back in rather than composed (`class ChatSidebar(StreamViewMixin, TranscriptViewMixin, ComposerMixin, ApprovalsMixin, ZoomProjectionMixin, SettingsControllerMixin, Gtk.Box)`) — an organizational split of one widget's behavior, not a new encapsulation boundary, since every method still assumes the full instance. `chat/stream_view.py` owns the live-streaming render (plus `_StreamCtx`/`_ChunkAccumulator`, moved from module scope); `transcript_view.py` owns rendering completed turns and the tool-card/copy-button primitives; `composer.py` owns the input area, attachments, and send dispatch (plus `_ChatTextView`); `approvals.py` owns the Manual/Auto/YOLO gate; `zoom_projection.py` owns the canvas-zoom-to-font projection; `settings_controller.py` owns the Preferences dialog's save flow. Two small shared leaves came out alongside them: `chat/constants.py` (`_SCROLL_STICK_THRESHOLD`, read by three of the mixins) and `chat/images.py` (`_thumbnail`, read by two). `chat_sidebar.py`: 4,173 -> 1,937 lines against its pre-split baseline.
 
 ### Removed
 
@@ -69,6 +69,8 @@ Cloud scenarios (`01_add_throttle`, `06_query_knowledge_multiply`,
 Three audit findings were verified as **wrong** and the code left alone: `settings.get_theme_mode`/`set_theme_mode` are live with five call sites; the `ingest` <-> `rag` lazy import is a genuine cycle (hoisting it raises `ImportError` from a partially initialised module, now documented in place); and `event_loop`'s gbulb path is the only working backend on this project's minimum supported Python (3.12 with PyGObject 3.48 has no `gi.events`), so it stays and now has a test pinning the third-party attribute its patch reaches for.
 
 `AGENTS.md` was amended alongside the code it describes: section 3 now names both `ModelRetry` and `ToolFailed` with the boundary between them and the run-level bound; section 5 records the new schema contract; section 6's gate description is true again and its xvfb list gains the two GTK-constructing files it omitted.
+
+U15's own verification bar of no module over 1,000 lines is not yet met: `chat_sidebar.py` is 1,937 lines after all six named mixin files came out — `__init__`, the widget-tree builders (`_build_project_bar`/`_build_toolbar`/`_build_message_list`/`_build_status_bar`), and the ~213-line `_run_agent_turn` turn driver account for most of what remains, and none of those were named as files to extract. Every other U15 bar (golden byte-identical, pure-function modules pass without a display, the GTK gate passes forward and `--reverse`) is met. Left as-is rather than inventing an unscoped seventh split.
 
 ## [0.6.0] - 2026-09-01
 
