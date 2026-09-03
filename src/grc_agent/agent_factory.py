@@ -150,9 +150,8 @@ def _plan_store_resolver(ctx: RunContext[Any]) -> PlanStore:
 def coerce_plan_items(v: Any) -> list[Any]:
     """Uniform normalization for write_plan tool input.
 
-    Coerces JSON-stringified arrays, plain string lists, and field aliases
-    (name, step, task, title, description -> content) into PlanItem-compatible dicts.
-    Raises ModelRetry with actionable feedback on unparseable inputs.
+    Coerces JSON-stringified arrays, plain string lists, and stringifies numeric IDs.
+    Validates items against PlanItem and raises ModelRetry with actionable compiler feedback.
     """
     if isinstance(v, str):
         v = v.strip()
@@ -169,38 +168,27 @@ def coerce_plan_items(v: Any) -> list[Any]:
         parsed: list[dict[str, Any] | Any] = []
         for item in v:
             if isinstance(item, str):
-                parsed.append({"content": item.strip(), "status": "pending"})
+                parsed.append({"content": item.strip()})
             elif isinstance(item, dict):
-                content = (
-                    item.get("content")
-                    or item.get("name")
-                    or item.get("step")
-                    or item.get("task")
-                    or item.get("title")
-                    or item.get("description")
-                    or ""
-                )
-                if not content:
+                d = dict(item)
+                if "id" in d and d["id"] is not None:
+                    d["id"] = str(d["id"])
+                if "content" not in d and "name" in d:
+                    d["content"] = d.pop("name")
+                try:
+                    PlanItem.model_validate(d)
+                except Exception as exc:
                     raise ModelRetry(
-                        "Each plan item must include a description. Expected:\n"
-                        '{"content": "Step description", "status": "pending"}'
-                    )
-                status = item.get("status", "pending")
-                if isinstance(status, str):
-                    status = status.lower().strip()
-                    if status in ("todo", "not_started"):
-                        status = "pending"
-                    elif status in ("doing", "active"):
-                        status = "in_progress"
-                    elif status in ("done", "finished"):
-                        status = "completed"
-                item_id = str(item.get("id")) if item.get("id") is not None else None
-                d = {"content": str(content).strip(), "status": status}
-                if item_id:
-                    d["id"] = item_id
+                        f"Invalid plan item {d}. Expected:\n"
+                        '{"content": "Step description", "status": "pending"}\n'
+                        f"Validation error: {exc}"
+                    ) from exc
                 parsed.append(d)
             else:
-                parsed.append(item)
+                raise ModelRetry(
+                    "Plan items must be objects or strings. Expected:\n"
+                    '[{"content": "Step description", "status": "pending"}]'
+                )
         return parsed
 
     raise ModelRetry(

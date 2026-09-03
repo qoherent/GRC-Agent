@@ -290,7 +290,7 @@ def test_coerce_plan_items_handles_stringified_json_and_aliases():
 
     ta = TypeAdapter(CoercedPlanItems)
 
-    raw_json = '[{"id": 1, "name": "Add variables", "status": "in_progress"}, {"id": 2, "step": "Build chain", "status": "done"}]'
+    raw_json = '[{"id": 1, "name": "Add variables", "status": "in_progress"}, {"id": 2, "content": "Build chain", "status": "completed"}]'
     items = ta.validate_python(raw_json)
     assert len(items) == 2
     assert items[0].id == "1"
@@ -357,7 +357,7 @@ def test_planner_executes_write_plan_with_stringified_json(tmp_path):
                         tool_name="write_plan",
                         # Stringified JSON array with integer IDs and 'name' alias (exactly as ling-flash emitted)
                         args={
-                            "items": '[{"id": 1, "name": "Variable setup", "status": "in_progress"}, {"id": 2, "name": "Modulator", "status": "pending"}]'
+                            "items": '[{"id": 1, "name": "Variable setup", "status": "in_progress"}, {"id": 2, "content": "Modulator", "status": "pending"}]'
                         },
                     ),
                 ]
@@ -379,31 +379,19 @@ def test_planner_executes_write_plan_with_stringified_json(tmp_path):
     assert items == ["Variable setup", "Modulator"]
 
 
-def test_text_plan_fallback_recovery_in_session(tmp_path):
-    from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, UserPromptPart
+def test_show_implement_plan_if_ready_requires_durable_plan(tmp_path):
+    from pydantic_ai_harness.planning import PlanItem, SqlitePlanStore
 
     from grc_agent.chat.session import SessionMixin
+    from grc_agent.db import get_db_path
 
     session_id = _make_session(tmp_path)
     conversation_id = _conversation(session_id)
-
-    # Durable plan is currently empty
-    assert _plan_contents(conversation_id) == []
 
     class FakeChat(SessionMixin):
         def __init__(self):
             self._active_session_id = session_id
             self._agent_mode = "planner"
-            self._message_history = [
-                ModelRequest(parts=[UserPromptPart(content="Design QPSK flowgraph")]),
-                ModelResponse(
-                    parts=[
-                        TextPart(
-                            content="### Step 1 — Variables\nSet samp_rate\n### Step 2 — Modulator\nAdd psk_mod"
-                        )
-                    ]
-                ),
-            ]
             self._appended_action = False
             self._busy = False
 
@@ -414,10 +402,16 @@ def test_text_plan_fallback_recovery_in_session(tmp_path):
             pass
 
     chat = FakeChat()
-    asyncio.run(chat._show_implement_plan_if_ready(session_id))
 
-    # Assert that plan was recovered into SqlitePlanStore and action button was enabled
+    # Case 1: No durable plan in database -> action button is NOT shown
+    asyncio.run(chat._show_implement_plan_if_ready(session_id))
+    assert chat._appended_action is False
+
+    # Case 2: Durable plan exists in database -> action button is shown
+    store = SqlitePlanStore(str(get_db_path()), session=conversation_id)
+    asyncio.run(store.set_items([PlanItem(content="Step 1")]))
+    asyncio.run(chat._show_implement_plan_if_ready(session_id))
     assert chat._appended_action is True
-    assert _plan_contents(conversation_id) == ["Variables", "Modulator"]
+
 
 

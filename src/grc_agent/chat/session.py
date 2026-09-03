@@ -37,8 +37,6 @@ import gi
 gi.require_version("Gtk", "3.0")
 
 from gi.repository import Gtk
-from pydantic_ai.messages import ModelResponse, TextPart
-from pydantic_ai_harness.planning import PlanItem, SqlitePlanStore
 
 from ..db import (
     archive_transcript,
@@ -46,16 +44,13 @@ from ..db import (
     delete_all_sessions,
     delete_session,
     deserialize_messages,
-    get_db_path,
     load_plan_items,
     load_session,
     save_session,
 )
 from .history import (
     _clean_message_history_for_new_turn,
-    _sanitize_history_for_executor,
     _without_truncated_thinking_tail,
-    extract_plan_from_text,
 )
 
 _log = logging.getLogger(__name__)
@@ -408,8 +403,6 @@ class SessionMixin:
         """Show the handoff only when the planner left a durable plan."""
         try:
             items = await load_plan_items(session_id)
-            if not items and self._message_history:
-                items = await self._recover_plan_from_last_message(session_id)
         except Exception:
             _log.exception("Failed to read durable plan for implementation action")
             self.set_status("Plan saved, but its implementation action could not be loaded.", error=True)
@@ -420,29 +413,6 @@ class SessionMixin:
             and self._agent_mode == "planner"
         ):
             self._append_implement_plan_action(session_id)
-
-    async def _recover_plan_from_last_message(self, session_id: int) -> list[PlanItem]:
-        """Recover structured plan steps from the planner's last assistant message if write_plan was not called."""
-        for msg in reversed(self._message_history):
-            if isinstance(msg, ModelResponse):
-                text = " ".join(
-                    part.content
-                    for part in msg.parts
-                    if isinstance(part, TextPart) and part.content
-                )
-                items = extract_plan_from_text(text)
-                if len(items) >= 2:
-                    conversation_id = f"session-{session_id}"
-                    store = SqlitePlanStore(str(get_db_path()), session=conversation_id)
-                    await store.set_items(items)
-                    _log.info(
-                        "Recovered %d plan steps from planner text response for session %d",
-                        len(items),
-                        session_id,
-                    )
-                    return items
-                break
-        return []
 
     def _on_implement_plan_clicked(self, button: Gtk.Button, session_id: int) -> None:
         if self._busy or self._implement_plan_task is not None:
@@ -472,9 +442,6 @@ class SessionMixin:
                 )
             except Exception:
                 _log.warning("Failed to archive planner transcript before handoff", exc_info=True)
-
-            self._message_history = _sanitize_history_for_executor(self._message_history)
-            await self._save_history()
 
             self._select_executor()
             self._remove_implement_plan_action()
