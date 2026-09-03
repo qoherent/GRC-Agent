@@ -76,7 +76,7 @@ Active feature requests, architectural improvements, and planned capabilities. C
 
 ---
 
-### 5. Platform Hardening & Upstream Fixes
+### 6. Platform Hardening & Upstream Fixes
 * **Status**: 🔄 Active & Planned
 * **5.1 ExecFlowGraphThread Early Spawn Crash Tracking**:
   - *Observation*: If spawning the run subprocess raises inside GRC (`gnuradio/grc/gui/Executor.py:44`), GRC's exception handler emits `send_end_exec()` with a default return code of 0.
@@ -91,6 +91,28 @@ Active feature requests, architectural improvements, and planned capabilities. C
   - *Status*: ✅ Completed. The `distance` field is omitted on non-vector lexical rows (`distance is None`) rather than emitting a fabricated `0.0`, eliminating confusion with perfect vector matches.
 * **5.5 ConversationSearch Snapshot Recovery for Interrupted Runs**:
   - Engage with upstream harness to allow recovery of user-interrupted tool calls (`state=interrupted`) during session history analysis.
+
+### 7. Finish the chat-sidebar decomposition (≤1,000-line bar)
+* **Status**: 🔄 Planned — descoped from the current release by user decision; the audit and its evidence base are already landed.
+* **Objective**: Extract the three remaining clusters from `chat_sidebar.py` (1,925 lines) so no module under `src/grc_agent/chat/` — nor the root file itself — exceeds U15's 1,000-line verification bar.
+* **Mechanics** (measured line budgets from the review plan): a turn-driver mixin (~275 lines: `_run_agent_turn`, `_send_fix_when_free`, `notify_run_failure`, `_on_chat_task_done`, `_recover_history_after_failure`); a session-lifecycle mixin (~360: recent-session open/save/clear/delete and the implement-plan handoff); a status/context mixin (~270: context label, status/model-wait, indexing poll); the scroll cluster (~112) as the named buffer if the bar is still short. `chat_sidebar.py` remains the composition root (`__init__` + the `_build_*` widget-tree methods). Extractions follow the established mixin conventions and must be move-only.
+* **Verification**: the committed behavioral golden (`tests/test_chat_sidebar_golden.py`) byte-identical after each extraction step; fast gate, lint, and the GTK gate green forward and `--reverse`; line counts re-measured per step.
+* **Reference**: `docs/plans/2026-09-03-0829-refactor-sidebar-decomposition-review-plan.md` (units U5/U6, KTD3 line budgets); origin plan U15.
+
+### 8. Sidebar heuristics replacement & blocking work off the loop (origin plan U16)
+* **Status**: 🔄 Planned — the origin plan's next sidebar unit, deliberately fenced out of the decomposition review.
+* **Mechanics**: the `search_mode` suffix decided by substring-matching nine literal spellings in the tool-label helper → read the adapter's structured field; codex provider magic strings in render/preflight branches → the provider tables; the four-interval flush throttle → one GLib frame-bounded timer; the two competing font scalers → one (startup scale vs reset mismatch included); synchronous SQLite reads and the blocking HTTP probe off the unified loop; the two never-removed `__init__` timers removed on destroy.
+* **Reference**: `docs/plans/2026-09-02-0830-refactor-harness-lean-and-tool-contracts-plan.md` (U16).
+
+### 9. Test-tree split & private-surface rewrite (origin plan U18)
+* **Status**: 🔄 Proposed
+* **Mechanics**: `tests/test_chat_sidebar.py` (4,600+ lines) constructs `ChatSidebar` ad hoc ~99 times and reaches ~470 private attributes; migrate onto the conftest `sidebar` fixture and the public/widget surface — the golden and the copy-coverage matrix are already first consumers of the fixture pattern. Four `# noqa: C901` complexity suppressions remain on sidebar render/turn code; refactor or justify each. Every test file under the 1,500-line cap.
+* **Reference**: `docs/plans/2026-09-02-0830-refactor-harness-lean-and-tool-contracts-plan.md` (U18).
+
+### 10. Scenario suite needs a stronger default model than the free tiers
+* **Status**: 🧪 Open finding (recorded 2026-09-03)
+* **Evidence**: all three free OpenRouter models tried this session fail the schema-strict `01_add_throttle` scenario — `dots-studio/dots-3-note-preview:free` exhausted `inspect_graph` retries; `poolside/laguna-s-2.1:free` saturated upstream (HTTP 429); `inclusionai/ling-3.0-flash-fin:free` (the current default, matching `.env`) produced a schema-invalid `change_graph` call and exhausted retries.
+* **Options**: default scenarios to a stronger OpenRouter model (per-run `GRC_OPENROUTER_MODEL` override until chosen), or run scenarios on `GRC_TEST_BACKEND=ollama_cloud` (the origin plan's baseline shows the selected scenarios passing there).
 
 ---
 
