@@ -5,7 +5,7 @@ import logging
 from dataclasses import dataclass
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, BeforeValidator, Field
 from pydantic_ai import (
     ApprovalRequired,
     ModelRequestNode,
@@ -18,12 +18,15 @@ from pydantic_ai.capabilities import (
     AbstractCapability,
     AgentNode,
     NodeResult,
+    RawToolArgs,
     WebFetch,
     WebSearch,
     WrapNodeRunHandler,
 )
 from pydantic_ai.common_tools.duckduckgo import duckduckgo_search_tool
+from pydantic_ai.messages import ToolCallPart
 from pydantic_ai.result import FinalResult
+from pydantic_ai.tools import ToolDefinition
 from pydantic_ai_harness import PromptInjectionDefender
 from pydantic_graph import End
 
@@ -60,12 +63,14 @@ class GrcAgentResponse(BaseModel):
 
 class BlockAdd(BaseModel):
     block_id: str = Field(
-        ..., description="Installed GNU Radio catalog block ID (e.g. 'analog_sig_source_x')."
+        ...,
+        validation_alias=AliasChoices("block_id", "id"),
+        description="Installed GNU Radio catalog block ID (e.g. 'analog_sig_source_x').",
     )
     instance_name: str = Field(
         ..., description="New unique graph instance name (e.g. 'my_source')."
     )
-    params: dict[str, str] | None = Field(
+    params: dict[str, Any] | None = Field(
         None, description="Initial parameter values keyed by parameter ID."
     )
     state: Literal["enabled", "disabled", "bypass"] | None = Field(
@@ -75,7 +80,7 @@ class BlockAdd(BaseModel):
 
 class ParamUpdate(BaseModel):
     instance_name: str = Field(..., description="Target block instance name (e.g. 'my_source').")
-    params: dict[str, str] = Field(..., description="Param updates keyed by parameter ID.")
+    params: dict[str, Any] = Field(..., description="Param updates keyed by parameter ID.")
 
 
 class StateUpdate(BaseModel):
@@ -181,9 +186,55 @@ class StopGracefully(AbstractCapability[Any]):
 # retry instead of returning a masked "Web search failed: ..." string).
 # Eager (defer_loading=False) so the tools are always callable — no
 # load_capability round-trip. Defined once here and imported by
-# agent_factory.py / tests so every Agent shares the same instances.
+@dataclass
+class JsonRepairCapability(AbstractCapability[Any]):
+    """Automatically decodes JSON-stringified tool arguments before validation.
+
+    Many small, fast, or remote LLMs format complex nested tool parameters (such as lists
+    or objects) as serialized JSON strings instead of native nested JSON arrays/objects.
+
+    This capability hooks into Pydantic AI's official `before_tool_validate` lifecycle
+    to unpack JSON-encoded values for any parameter whose schema expects an array or object.
+    """
+
+    async def before_tool_validate(
+        self,
+        ctx: RunContext[Any],  # noqa: ARG002
+        *,
+        call: ToolCallPart,  # noqa: ARG002
+        tool_def: ToolDefinition,
+        args: RawToolArgs,
+    ) -> RawToolArgs:
+        if isinstance(args, str):
+            with contextlib.suppress(Exception):
+                args = json.loads(args)
+            if not isinstance(args, dict):
+                return args
+
+        if isinstance(args, dict):
+            props = tool_def.parameters_json_schema.get("properties", {})
+            for k, v in list(args.items()):
+                if isinstance(v, str):
+                    s = v.strip()
+                    param_spec = props.get(k, {})
+                    target_type = param_spec.get("type")
+                    is_composite = (
+                        target_type in ("array", "object")
+                        or "items" in param_spec
+                        or "$ref" in param_spec
+                    )
+                    if is_composite and (
+                        (s.startswith("[") and s.endswith("]"))
+                        or (s.startswith("{") and s.endswith("}"))
+                    ):
+                        with contextlib.suppress(Exception):
+                            args[k] = json.loads(s)
+        return args
+
+
 web_search_cap = WebSearch(local=duckduckgo_search_tool(max_results=5))
 web_fetch_cap = WebFetch(local=True)
+json_repair_cap = JsonRepairCapability()
 
 
 def _log_injection_detection(ctx, call, verdict) -> None:  # noqa: ARG001
@@ -298,15 +349,30 @@ async def generate_python_func(ctx: RunContext[FlowgraphDeps], k: ResultCount = 
     return json.dumps(result)
 
 
+def coerce_json_sequence(v: Any) -> Any:
+    """Decode a JSON string if the argument was passed as a serialized JSON array."""
+    if isinstance(v, str):
+        s = v.strip()
+        if s.startswith("[") and s.endswith("]"):
+            try:
+                return json.loads(s)
+            except Exception as exc:
+                raise ModelRetry(f"Invalid JSON array string: {exc}") from exc
+    return v
+
+
+JsonCoercedSequence = BeforeValidator(coerce_json_sequence)
+
+
 async def change_graph_func(
     ctx: RunContext[FlowgraphDeps],
     reason: str,
-    add_blocks: Annotated[list[BlockAdd], Field(default_factory=list)],
-    remove_blocks: Annotated[list[str], Field(default_factory=list)],
-    update_params: Annotated[list[ParamUpdate], Field(default_factory=list)],
-    update_states: Annotated[list[StateUpdate], Field(default_factory=list)],
-    add_connections: Annotated[list[ConnectionSpec], Field(default_factory=list)],
-    remove_connections: Annotated[list[ConnectionSpec], Field(default_factory=list)],
+    add_blocks: Annotated[list[BlockAdd], JsonCoercedSequence, Field(default_factory=list)],
+    remove_blocks: Annotated[list[str], JsonCoercedSequence, Field(default_factory=list)],
+    update_params: Annotated[list[ParamUpdate], JsonCoercedSequence, Field(default_factory=list)],
+    update_states: Annotated[list[StateUpdate], JsonCoercedSequence, Field(default_factory=list)],
+    add_connections: Annotated[list[ConnectionSpec], JsonCoercedSequence, Field(default_factory=list)],
+    remove_connections: Annotated[list[ConnectionSpec], JsonCoercedSequence, Field(default_factory=list)],
     force: bool = False,
 ) -> str:
     """Apply a batch of structural graph edits as one atomic transaction, after the user approves it.

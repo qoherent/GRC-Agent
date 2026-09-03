@@ -1213,3 +1213,172 @@ def test_block_role_and_enum_use_gnu_radio_s_own_apis(temp_dial_tone):
         native = param.is_enum() if callable(getattr(param, "is_enum", None)) else None
         if native is not None:
             assert _is_enum(param) == native, f"{key}: disagreed with Param.is_enum()"
+
+
+def test_block_add_accepts_id_alias_and_numeric_parameters():
+    """Models frequently emit 'id' instead of 'block_id' and numeric/boolean parameter values."""
+    from grc_agent.agent import BlockAdd, ParamUpdate
+
+    b = BlockAdd.model_validate({
+        "id": "analog_random_source_x",
+        "instance_name": "random_source",
+        "params": {"type": "byte", "min": 0, "max": 3, "repeat": True},
+        "label": "Ignored Label",
+    })
+    assert b.block_id == "analog_random_source_x"
+    assert b.instance_name == "random_source"
+    assert b.params == {"type": "byte", "min": 0, "max": 3, "repeat": True}
+
+    dumped = b.model_dump(exclude_none=True)
+    assert dumped["block_id"] == "analog_random_source_x"
+    assert dumped["params"] == {"type": "byte", "min": 0, "max": 3, "repeat": True}
+
+    p = ParamUpdate.model_validate({
+        "instance_name": "random_source",
+        "params": {"min": 10, "gain": 1.5, "enabled": False},
+    })
+    assert p.params == {"min": 10, "gain": 1.5, "enabled": False}
+
+
+def test_change_graph_coerces_stringified_json_arguments():
+    """Fast or smaller models serialize nested list arguments as JSON strings."""
+    from typing import Annotated
+
+    from pydantic import TypeAdapter
+
+    from grc_agent.agent import BlockAdd, JsonCoercedSequence
+
+    ta = TypeAdapter(Annotated[list[BlockAdd], JsonCoercedSequence])
+    raw_str = (
+        '[{"id": "analog_random_source_x", "instance_name": "src", "params": {"min": 0}}]'
+    )
+    items = ta.validate_python(raw_str)
+    assert len(items) == 1
+    assert items[0].block_id == "analog_random_source_x"
+    assert items[0].params == {"min": 0}
+
+
+def test_json_repair_capability_decodes_composite_parameters():
+    """JsonRepairCapability unpacks JSON-stringified arrays and objects while preserving string fields."""
+    import asyncio
+
+    from pydantic_ai.messages import ToolCallPart
+    from pydantic_ai.tools import ToolDefinition
+
+    from grc_agent.agent import JsonRepairCapability
+
+    cap = JsonRepairCapability()
+    tool_def = ToolDefinition(
+        name="test_tool",
+        description="test",
+        parameters_json_schema={
+            "type": "object",
+            "properties": {
+                "text": {"type": "string"},
+                "items": {"type": "array"},
+                "meta": {"type": "object"},
+            },
+        },
+    )
+
+    raw_args = json.dumps({
+        "text": '{"not": "decoded"}',
+        "items": json.dumps([1, 2, 3]),
+        "meta": json.dumps({"key": "val"}),
+    })
+
+    call = ToolCallPart(tool_name="test_tool", args=raw_args)
+
+    repaired = asyncio.run(
+        cap.before_tool_validate(
+            None,  # pyright: ignore[reportArgumentType]
+            call=call,
+            tool_def=tool_def,
+            args=raw_args,
+        )
+    )
+
+    assert repaired["text"] == '{"not": "decoded"}'
+    assert repaired["items"] == [1, 2, 3]
+    assert repaired["meta"] == {"key": "val"}
+
+
+def test_agent_executes_change_graph_with_stringified_json_args():
+    """Simulates real provider tool call with stringified nested JSON arrays in change_graph."""
+    import asyncio
+    import json
+    from unittest.mock import MagicMock
+
+    from pydantic_ai import Agent
+    from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart
+    from pydantic_ai.models.function import FunctionModel
+    from pydantic_ai.tools import DeferredToolRequests
+
+    from grc_agent.agent import GrcAgentResponse, grc_tools, json_repair_cap
+    from grc_agent.chat.approvals import DeferredToolResults, ToolApproved
+
+    mock_deps = MagicMock()
+    mock_fg = MagicMock()
+    mock_deps.flow_graph = mock_fg
+    mock_deps.current_page.flow_graph = mock_fg
+
+    mock_block = MagicMock()
+    mock_block.name = "random_source"
+    mock_block.params = {
+        "id": MagicMock(),
+        "type": MagicMock(),
+        "min": MagicMock(),
+        "max": MagicMock(),
+        "num_samps": MagicMock(),
+        "repeat": MagicMock(),
+    }
+    mock_fg.get_block.side_effect = KeyError("not found")
+    mock_fg.new_block.return_value = mock_block
+    mock_fg.is_valid.return_value = True
+
+    call_count = 0
+
+    def mock_model(messages, info):  # noqa: ARG001
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            raw_args = json.dumps({
+                "reason": "Add QPSK source",
+                "add_blocks": json.dumps([
+                    {
+                        "id": "analog_random_source_x",
+                        "label": "Random Source",
+                        "instance_name": "random_source",
+                        "params": {"type": "byte", "min": 0, "max": 3, "num_samps": 1000, "repeat": True},
+                    }
+                ]),
+            })
+            return ModelResponse(parts=[ToolCallPart(tool_name="change_graph", args=raw_args)])
+        return ModelResponse(parts=[TextPart(content="Flowgraph edited successfully")])
+
+    agent = Agent(
+        FunctionModel(mock_model),
+        deps_type=MagicMock,
+        output_type=[GrcAgentResponse, str, DeferredToolRequests],
+        tools=grc_tools(),
+        capabilities=[json_repair_cap],
+    )
+
+    async def run_test():
+        res1 = await agent.run("add blocks", deps=mock_deps)
+        assert isinstance(res1.output, DeferredToolRequests)
+        assert len(res1.output.approvals) == 1
+        approval_call = res1.output.approvals[0]
+
+        deferred_results = DeferredToolResults(approvals={approval_call.tool_call_id: ToolApproved()})
+        res2 = await agent.run(
+            None,
+            deps=mock_deps,
+            message_history=res1.all_messages(),
+            deferred_tool_results=deferred_results,
+        )
+        assert res2.output == "Flowgraph edited successfully"
+
+    asyncio.run(run_test())
+
+

@@ -52,6 +52,7 @@ from grc_agent.agent import (
     GrcAgentResponse,
     StopGracefully,
     grc_tools,
+    json_repair_cap,
     prompt_injection_cap,
     validate_flowgraph_state,
     web_fetch_cap,
@@ -173,8 +174,11 @@ def coerce_plan_items(v: Any) -> list[Any]:
                 d = dict(item)
                 if "id" in d and d["id"] is not None:
                     d["id"] = str(d["id"])
-                if "content" not in d and "name" in d:
-                    d["content"] = d.pop("name")
+                if "content" not in d:
+                    for alias in ("title", "name", "step", "description", "desc"):
+                        if alias in d and isinstance(d[alias], str):
+                            d["content"] = d.pop(alias)
+                            break
                 try:
                     PlanItem.model_validate(d)
                 except Exception as exc:
@@ -940,6 +944,7 @@ def build_agents_from_cfg(cfg: dict) -> AgentBundle:
         instructions=build_system_prompt("pai-desktop-chat"),
         tools=grc_tools(),
         capabilities=[
+            json_repair_cap,
             StopGracefully(),
             ModelRequestLogger(),
             StepPersistence(
@@ -967,6 +972,7 @@ def build_agents_from_cfg(cfg: dict) -> AgentBundle:
         instructions=build_planner_prompt("pai-desktop-planner"),
         tools=grc_tools(),
         capabilities=[
+            json_repair_cap,
             StopGracefully(),
             ModelRequestLogger(),
             StepPersistence(
