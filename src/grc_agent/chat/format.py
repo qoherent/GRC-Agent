@@ -89,8 +89,10 @@ def _transcript_tool_call(name: str, args: str, result: str | None = None) -> st
 
 
 def _transcript_tool_result(result: str) -> str:
-    """The Copy-action fragment for a tool return that arrived separately from
-    its call (the streaming path sees the two as distinct events)."""
+    """The standalone fallback fragment for a tool result whose call fragment
+    is no longer patchable in the streaming accumulator's window. The normal
+    path renders the result inside its own ``<Tool Call: ...>`` block, as the
+    history path does."""
     return f"<Tool Result: {result}>\n"
 
 

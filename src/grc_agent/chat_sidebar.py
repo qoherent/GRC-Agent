@@ -39,7 +39,7 @@ from pydantic_graph import End
 from .agent_factory import aresolve_model_context_length, describe_model
 from .chat.approvals import ApprovalsMixin
 from .chat.composer import _DROP_TARGET_INFO, ComposerMixin
-from .chat.constants import _SCROLL_STICK_THRESHOLD
+from .chat.constants import _is_near_bottom
 from .chat.errors import _format_turn_error
 from .chat.format import format_tokens
 from .chat.history import (
@@ -253,8 +253,6 @@ class ChatSidebar(
         # Catalog and docs build independently and can run concurrently.
         self._last_index_state: dict[str, str] = {}
         self._last_index_msg: str | None = None
-        self._active_graph_name: str | None = None
-        self._active_graph_path: str | None = None
         self._open_dialog: Gtk.Dialog | None = None
 
         # Slim side toggle for GRC block library
@@ -686,10 +684,6 @@ class ChatSidebar(
             GLib.source_remove(self._wait_timer_id)
             self._wait_timer_id = None
         self._wait_label.hide()
-
-    def set_active_graph(self, name: str | None, path: str | None = None) -> None:
-        self._active_graph_name = name
-        self._active_graph_path = path
 
     def _domain_label(self, domain: str | None) -> str:
         if domain == "catalog":
@@ -1837,9 +1831,7 @@ class ChatSidebar(
         Content growth never fires ``value-changed`` (only ``changed``), so
         streaming appends cannot corrupt the intent flag.
         """
-        near_bottom = (
-            adj.get_upper() - adj.get_page_size() - adj.get_value()
-        ) <= _SCROLL_STICK_THRESHOLD
+        near_bottom = _is_near_bottom(adj)
         self._auto_scroll = near_bottom
 
     def _on_expander_toggled(self, exp: Gtk.Expander, _pspec: Any) -> None:

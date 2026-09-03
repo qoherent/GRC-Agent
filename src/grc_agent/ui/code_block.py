@@ -15,8 +15,9 @@ change.
 
 from __future__ import annotations
 
-from gi.repository import Gdk, GLib, Gtk, Pango
+from gi.repository import GLib, Gtk, Pango
 
+from .copy_confirm import confirm_copy
 from .css import get_code_style
 
 # Height cap for the code body: below it the full content shows, above it an
@@ -261,37 +262,10 @@ class CodeBlock(Gtk.Box):
         return False  # one-shot
 
     def _on_copy(self, btn: Gtk.Button) -> None:
-        clipboard = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
-        clipboard.set_text(self._code, -1)
-        btn.set_tooltip_text("Copied!")
-        image = btn.get_image()
-        if isinstance(image, Gtk.Image):
-            image.set_from_icon_name("object-select-symbolic", Gtk.IconSize.MENU)
-
-        if hasattr(btn, "_copy_timeout_id") and btn._copy_timeout_id is not None:
-            GLib.source_remove(btn._copy_timeout_id)
-            btn._copy_timeout_id = None
-
-        def _reset() -> bool:
-            btn._copy_timeout_id = None
-            try:
-                img = btn.get_image()
-                if isinstance(img, Gtk.Image):
-                    img.set_from_icon_name("edit-copy-symbolic", Gtk.IconSize.MENU)
-                btn.set_tooltip_text("Copy code to clipboard")
-            except Exception:
-                pass
-            return False
-
-        btn._copy_timeout_id = GLib.timeout_add_seconds(2, _reset)
-        if not getattr(btn, "_destroy_handler_set", False):
-            btn._destroy_handler_set = True
-            btn.connect(
-                "destroy",
-                lambda b: GLib.source_remove(b._copy_timeout_id)
-                if getattr(b, "_copy_timeout_id", None)
-                else None,
-            )
+        # The shared copy confirmation (one implementation for every copy
+        # button); the code block's old 2 s revert collapsed to the
+        # canonical 1500 ms.
+        confirm_copy(btn, self._code, idle_tooltip="Copy code to clipboard")
 
     def _highlight(self, buffer: Gtk.TextBuffer, lang: str, code: str) -> None:
         try:

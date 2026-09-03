@@ -20,7 +20,7 @@ from gi.repository import Gdk, GLib, Gtk, Pango
 
 from ..native_canvas import sidebar_font_multiplier
 from ..ui.code_block import CodeBlock
-from .constants import _SCROLL_STICK_THRESHOLD
+from .constants import _is_near_bottom
 
 
 class ZoomProjectionMixin:
@@ -63,9 +63,7 @@ class ZoomProjectionMixin:
         # Approach 2): a font inflate changes the list geometry mid-stream,
         # and the snapshot has to describe the pre-relayout viewport.
         adj = self._scrolled.get_vadjustment()
-        was_near_bottom = (
-            adj.get_upper() - adj.get_page_size() - adj.get_value()
-        ) <= _SCROLL_STICK_THRESHOLD
+        was_near_bottom = _is_near_bottom(adj)
         if self._zoom_css_provider is None:
             # Base measured ONCE at provider creation, before this sidebar's
             # own rule exists, so the measurement reflects exactly the size

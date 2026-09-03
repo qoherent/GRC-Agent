@@ -37,7 +37,7 @@ from pydantic_ai.messages import (
     ToolCallPart,
 )
 
-from .constants import _SCROLL_STICK_THRESHOLD
+from .constants import _is_near_bottom
 from .format import (
     _parse_final_summary,
     _tool_args_text,
@@ -405,11 +405,7 @@ class StreamViewMixin:
                 if ctx.think_scrolled is not None
                 else None
             )
-            near_bottom = (
-                adj is None
-                or (adj.get_upper() - adj.get_page_size() - adj.get_value())
-                <= _SCROLL_STICK_THRESHOLD
-            )
+            near_bottom = adj is None or _is_near_bottom(adj)
             buffer.insert(buffer.get_end_iter(), delta)
             if near_bottom:
                 buffer.move_mark(buffer.get_insert(), buffer.get_end_iter())

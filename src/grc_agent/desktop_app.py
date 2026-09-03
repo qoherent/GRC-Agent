@@ -4,7 +4,6 @@ import contextlib
 import os
 import signal
 import sys
-from pathlib import Path
 
 import gi
 
@@ -147,17 +146,6 @@ def _on_new_session(sidebar: ChatSidebar) -> None:
 def _sync_sidebar(canvas: NativeCanvasManager, sidebar: ChatSidebar) -> None:
     """Update sidebar to match the current GRC page state."""
     sidebar.stop_chat()
-    page = canvas.current_page
-    name = None
-    if page:
-        p = page.file_path
-        if p:
-            name = Path(p).stem
-        elif hasattr(page.flow_graph, "get_option"):
-            with contextlib.suppress(Exception):
-                name = page.flow_graph.get_option("title") or page.flow_graph.get_option("id")
-    p = page.file_path if page else None
-    sidebar.set_active_graph(name, path=p)
     fg = canvas.current_flow_graph
     if fg is not None:
         sidebar.set_input_enabled(True)

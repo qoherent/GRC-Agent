@@ -343,26 +343,6 @@ def test_sidebar_session_no_autoload_on_graph_open(tmp_path, monkeypatch):
     assert sidebar._message_history == []
 
 
-def test_active_graph_tracking():
-    from grc_agent.chat_sidebar import ChatSidebar
-
-    sidebar = ChatSidebar()
-
-    # Initial state
-    assert sidebar._active_graph_name is None
-    assert sidebar._active_graph_path is None
-
-    # Set active graph with path
-    sidebar.set_active_graph("my_cool_flowgraph", "/path/to/my_cool_flowgraph.grc")
-    assert sidebar._active_graph_name == "my_cool_flowgraph"
-    assert sidebar._active_graph_path == "/path/to/my_cool_flowgraph.grc"
-
-    # Clear active graph
-    sidebar.set_active_graph(None)
-    assert sidebar._active_graph_name is None
-    assert sidebar._active_graph_path is None
-
-
 def test_ui_micro_interactions_and_shortcuts():
     from gi.repository import Gdk
 
@@ -4708,3 +4688,89 @@ def walk(root):
     from conftest import walk_widgets
 
     return walk_widgets(root)
+
+
+# ==========================================
+# U4 pins — copy-confirmation revert contract (audit F-03/F-07)
+# ==========================================
+
+
+def _copy_button():
+    import gi
+
+    gi.require_version("Gtk", "3.0")
+    from gi.repository import Gtk
+
+    btn = Gtk.Button()
+    btn.set_tooltip_text("Copy message")
+    btn.set_label("Copy")
+    btn.set_image(Gtk.Image.new_from_icon_name("edit-copy-symbolic", Gtk.IconSize.MENU))
+    return btn
+
+
+def test_copy_confirmation_reverts_after_one_timeout(sidebar, monkeypatch):
+    """U4/F-07: the copy confirmation flips the button to its copied state,
+    reverts after exactly one timeout, and a re-copy re-arms exactly one new
+    timeout — never stacking."""
+    import gi
+
+    gi.require_version("Gtk", "3.0")
+    from gi.repository import GLib
+
+    armed = []
+    removed = []
+
+    def spy_add(interval, callback, *_data):
+        sid = 1000 + len(armed) + 1
+        armed.append((interval, callback, sid))
+        return sid
+
+    def spy_remove(sid):
+        removed.append(sid)
+        return True
+
+    monkeypatch.setattr(GLib, "timeout_add", spy_add)
+    monkeypatch.setattr(GLib, "source_remove", spy_remove)
+    # The status-clear timer shares GLib.timeout_add; silence it so the spy
+    # sees only the copy button's own arm/remove calls.
+    monkeypatch.setattr(sidebar, "set_status", lambda *_: None)
+
+    def button_arms():
+        """The GLib sources armed by the copy confirmation itself, identified
+        by the revert closure — foreign GTK timers may share the spy."""
+        return [rec for rec in armed if "revert" in getattr(rec[1], "__qualname__", "")]
+
+    btn = _copy_button()
+    sidebar._copy_to_clipboard("payload", btn)
+
+    arms = button_arms()
+    assert len(arms) == 1, "first copy must arm exactly one timeout"
+    assert arms[0][0] == 1500
+    assert btn._copy_timeout_id == arms[0][2]
+    btn_tooltip = btn.get_tooltip_text()
+    assert btn_tooltip == "Copied!"
+    assert btn.get_label() == "Copied"
+    image = btn.get_image()
+    assert image.get_icon_name()[0] == "object-select-symbolic"
+
+    # The revert is the one timeout callback; firing it restores the
+    # pre-copy state and disarms itself.
+    assert arms[0][1]() is False
+    assert btn.get_tooltip_text() == "Copy message"
+    assert btn.get_label() == "Copy"
+    assert image.get_icon_name()[0] == "edit-copy-symbolic"
+    assert btn._copy_timeout_id is None
+
+    # Copying again after a fired revert arms fresh (nothing pending); copying
+    # again while one is pending replaces it — the superseded source is
+    # removed, one new arm, never stacking.
+    sidebar._copy_to_clipboard("again", btn)
+    arms = button_arms()
+    assert len(arms) == 2
+    assert removed == []
+    sidebar._copy_to_clipboard("once more", btn)
+    arms = button_arms()
+    assert len(arms) == 3
+    assert all(rec[0] == 1500 for rec in arms)
+    assert [sid for sid in removed if sid == arms[1][2]] == [arms[1][2]]
+    assert btn._copy_timeout_id == arms[2][2]

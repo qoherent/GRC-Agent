@@ -22,7 +22,7 @@ gi.require_version("Gtk", "3.0")
 gi.require_version("Gdk", "3.0")
 gi.require_version("Pango", "1.0")
 
-from gi.repository import Gdk, GLib, Gtk, Pango
+from gi.repository import GLib, Gtk, Pango
 from pydantic_ai.messages import (
     BinaryContent,
     ModelMessage,
@@ -39,6 +39,7 @@ from pydantic_ai.messages import (
 )
 
 from ..db import prompt_images, user_prompt_text
+from ..ui.copy_confirm import confirm_copy
 from .format import (
     _format_tool_display,
     _parse_final_summary,
@@ -121,45 +122,8 @@ class TranscriptViewMixin:
         self._scroll_to_bottom()
 
     def _copy_to_clipboard(self, text: str, btn: Gtk.Button | None = None) -> None:
-        if not text:
-            return
-        clipboard = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
-        clipboard.set_text(text, -1)
-        self.set_status("Copied message to clipboard.")
-        if btn is not None:
-            btn.set_tooltip_text("Copied!")
-            image = btn.get_image()
-            if isinstance(image, Gtk.Image):
-                image.set_from_icon_name("object-select-symbolic", Gtk.IconSize.MENU)
-            if btn.get_label():
-                btn.set_label("Copied")
-
-            if hasattr(btn, "_copy_timeout_id") and btn._copy_timeout_id is not None:
-                GLib.source_remove(btn._copy_timeout_id)
-                btn._copy_timeout_id = None
-
-            def _revert() -> bool:
-                btn._copy_timeout_id = None
-                try:
-                    img = btn.get_image()
-                    if isinstance(img, Gtk.Image):
-                        img.set_from_icon_name("edit-copy-symbolic", Gtk.IconSize.MENU)
-                    btn.set_tooltip_text("Copy message")
-                    if btn.get_label():
-                        btn.set_label("Copy")
-                except Exception:
-                    pass
-                return False
-
-            btn._copy_timeout_id = GLib.timeout_add(1500, _revert)
-            if not getattr(btn, "_destroy_handler_set", False):
-                btn._destroy_handler_set = True
-                btn.connect(
-                    "destroy",
-                    lambda b: GLib.source_remove(b._copy_timeout_id)
-                    if getattr(b, "_copy_timeout_id", None)
-                    else None,
-                )
+        if confirm_copy(btn, text, idle_tooltip="Copy message", revert_label_to="Copy"):
+            self.set_status("Copied message to clipboard.")
 
     def _update_copy_text(self, box: Gtk.Box, text: Any) -> None:
         btn = getattr(box, "_grc_copy_btn", None)
