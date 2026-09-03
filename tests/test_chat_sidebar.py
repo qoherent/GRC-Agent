@@ -3937,16 +3937,20 @@ def test_render_history_multimodal(tmp_path):
 
 
 def test_drag_drop_registration_and_batch_attach(tmp_path):
-    """The sidebar is a URI-list drop target, and _attach_paths queues a whole
-    batch of files with one refresh (the same seam the chooser and drag use)."""
+    """The input area is the sidebar's one URI-list drop target, and
+    _attach_paths queues a whole batch of files with one refresh (the same
+    seam the chooser and drag use). The transcript itself carries no drop
+    target, so a mouse drag there selects message text instead of starting
+    a file drop."""
     from gi.repository import Gdk
 
     from grc_agent.chat_sidebar import ChatSidebar
 
     sidebar = ChatSidebar()
-    targets = sidebar.drag_dest_get_target_list()
+    targets = sidebar._input_area.drag_dest_get_target_list()
     assert targets is not None
     assert targets.find(Gdk.atom_intern("text/uri-list", False))
+    assert sidebar.drag_dest_get_target_list() is None
 
     img_a, img_b = tmp_path / "a.png", tmp_path / "b.png"
     _write_test_png(img_a)
@@ -4774,3 +4778,146 @@ def test_copy_confirmation_reverts_after_one_timeout(sidebar, monkeypatch):
     assert all(rec[0] == 1500 for rec in arms)
     assert [sid for sid in removed if sid == arms[1][2]] == [arms[1][2]]
     assert btn._copy_timeout_id == arms[2][2]
+
+
+# ==========================================
+# User-directed UI fixes: copy affordance + text selection
+# ==========================================
+
+
+def _msg_boxes(sidebar, cls_name):
+    """Every widget under the message list carrying the style class."""
+    import gi
+
+    gi.require_version("Gtk", "3.0")
+    from gi.repository import Gtk
+
+    found = []
+
+    def walk(w):
+        if w.get_style_context().has_class(cls_name):
+            found.append(w)
+        if isinstance(w, Gtk.Container):
+            for c in w.get_children():
+                walk(c)
+
+    walk(sidebar._listbox)
+    return found
+
+
+def _copy_buttons(root):
+    import gi
+
+    gi.require_version("Gtk", "3.0")
+    from gi.repository import Gtk
+
+    found = []
+
+    def walk(w):
+        if w.get_style_context().has_class("chat-copy-btn"):
+            found.append(w)
+        if isinstance(w, Gtk.Container):
+            for c in w.get_children():
+                walk(c)
+
+    walk(root)
+    return found
+
+
+def _attached_to_listbox(sidebar, w):
+    seen = w
+    while seen is not None:
+        if seen is sidebar._listbox:
+            return True
+        seen = seen.get_parent()
+    return False
+
+
+def test_copy_rows_cover_user_and_agent_in_every_render_path(sidebar):
+    """Every user/agent render path ends with an attached, visible copy row.
+
+    Render-path matrix: full history rebuild (both message kinds, agent with
+    text + thinking + tool), rich re-render, and single-turn replace after
+    streaming. The input area is the one file-drop surface so transcript
+    drags select text; the always-visible row is the copy affordance."""
+    from types import SimpleNamespace
+
+    import gi
+
+    gi.require_version("Gtk", "3.0")
+    from gi.repository import Gdk, Gtk
+    from pydantic_ai.messages import (
+        ModelRequest,
+        ModelResponse,
+        TextPart,
+        ThinkingPart,
+        ToolCallPart,
+        UserPromptPart,
+    )
+
+    window = Gtk.OffscreenWindow()
+    window.add(sidebar)
+    window.show_all()
+
+    def assert_box_has_working_row(box, *, is_user=False):
+        btns = _copy_buttons(box)
+        assert btns, "copy button missing from a rendered message box"
+        btn = btns[0]
+        assert _attached_to_listbox(sidebar, btn), "copy button detached from the widget tree"
+        assert btn.get_visible(), "copy button not visible"
+        if is_user:
+            # The user path binds the message text in the click closure; the
+            # button deliberately carries no _grc_copy_text attribute (the
+            # golden projection's copy= field would change otherwise).
+            assert not hasattr(btn, "_grc_copy_text")
+        else:
+            assert getattr(btn, "_grc_copy_text", "") != "", "agent copy text not bound"
+
+    try:
+        sidebar._message_history = [
+            ModelRequest(parts=[UserPromptPart(content="hello")]),
+            ModelResponse(
+                parts=[
+                    TextPart(content="world"),
+                    ThinkingPart(content="pondering"),
+                    ToolCallPart(tool_name="inspect_graph", args='{"k": 1}'),
+                ]
+            ),
+        ]
+
+        # Path 1: full history rebuild.
+        sidebar._render_history()
+        _settle_events()
+        users = _msg_boxes(sidebar, "chat-user-msg-box")
+        agents = _msg_boxes(sidebar, "chat-agent-msg-box")
+        assert len(users) == 1, "user message not rendered"
+        assert len(agents) == 1, "agent message not rendered"
+        assert_box_has_working_row(users[0], is_user=True)
+        assert_box_has_working_row(agents[0])
+        agent_copy = _copy_buttons(agents[0])[0]._grc_copy_text
+        assert "world" in agent_copy
+        assert "<Thinking>" in agent_copy and "</Thinking>" in agent_copy
+        assert "<Tool Call: inspect_graph>" in agent_copy
+
+        # Path 2: rich re-render (e.g. a settings live-swap) — row survives.
+        sidebar._render_last_message_rich(agents[0], sidebar._message_history[1])
+        _settle_events()
+        assert_box_has_working_row(agents[0])
+
+        # Path 3: single-turn replace after streaming.
+        ctx = SimpleNamespace(box=agents[0])
+        replacement = ModelResponse(parts=[TextPart(content="replacement text")])
+        sidebar._replace_streaming_turn(ctx, [replacement])
+        _settle_events()
+        agents_after = _msg_boxes(sidebar, "chat-agent-msg-box")
+        assert len(agents_after) == 1, "replaced turn not rendered"
+        assert_box_has_working_row(agents_after[0])
+        assert "replacement text" in _copy_buttons(agents_after[0])[0]._grc_copy_text
+
+        # The input area is the one file-drop surface; the transcript has none.
+        targets = sidebar._input_area.drag_dest_get_target_list()
+        assert targets is not None
+        assert targets.find(Gdk.atom_intern("text/uri-list", False))
+        assert sidebar.drag_dest_get_target_list() is None
+    finally:
+        window.destroy()

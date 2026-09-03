@@ -38,7 +38,7 @@ from pydantic_graph import End
 
 from .agent_factory import aresolve_model_context_length, describe_model
 from .chat.approvals import ApprovalsMixin
-from .chat.composer import _DROP_TARGET_INFO, ComposerMixin
+from .chat.composer import ComposerMixin
 from .chat.constants import _is_near_bottom
 from .chat.errors import _format_turn_error
 from .chat.format import format_tokens
@@ -131,16 +131,9 @@ class ChatSidebar(
         super().__init__(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
         _apply_css()
         self.get_style_context().add_class("chat-sidebar")
-        # File-manager drag-and-drop: dropped files queue as pending image
-        # attachments through the same seam as the paperclip button. GTK3's
-        # widget-method DND API (drag_dest_set) with DestDefaults.ALL handles
-        # highlight + drop acceptance; drag-data-received does the work.
-        self.drag_dest_set(
-            Gtk.DestDefaults.ALL,
-            [Gtk.TargetEntry.new("text/uri-list", Gtk.TargetFlags.OTHER_APP, _DROP_TARGET_INFO)],
-            Gdk.DragAction.COPY,
-        )
-        self.connect("drag-data-received", self._on_drag_data_received)
+        # File drag-and-drop registers on the input area (composer.py), not
+        # here: a sidebar-wide uri-list target turned every text-selection
+        # drag in the transcript into a file-drop gesture.
         self._agent: Agent[Any, Any] | None = None
         self._executor_agent: Agent[Any, Any] | None = None
         self._planner_agent: Agent[Any, Any] | None = None

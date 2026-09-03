@@ -193,11 +193,10 @@ textview.chat-thinking-textview text {
     padding: 3px 5px;
     min-height: 22px;
     min-width: 22px;
-    opacity: 0.60;
+    opacity: 1.0;
 }
 .chat-copy-btn:hover {
     background: alpha(@theme_fg_color, 0.14);
-    opacity: 1.0;
 }
 .chat-msg-actions {
     margin-top: 4px;

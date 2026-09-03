@@ -107,6 +107,17 @@ class ComposerMixin:
         vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
         vbox.get_style_context().add_class("chat-input-area")
         vbox.set_border_width(4)
+        # The sidebar's one file-drop surface. It lives on the input area —
+        # not the whole sidebar — so a mouse drag inside the transcript
+        # selects message text instead of starting a file drop: with no
+        # uri-list target above the message list, GTK lets the label/textview
+        # selection gesture win. The entry keeps its own text drag-paste: a
+        # TextView accepts text targets at the innermost site, and this
+        # container only answers uri-list, so a file lands here and text
+        # lands in the entry. GTK3's widget-method DnD API (drag_dest_set)
+        # with DestDefaults.ALL handles highlight + drop acceptance;
+        # drag-data-received does the work.
+        self._input_area = vbox
 
         box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
 
@@ -143,6 +154,12 @@ class ComposerMixin:
         self._input_box = box
         vbox.pack_start(self._attachment_row, False, False, 0)
         vbox.pack_start(box, False, False, 0)
+        vbox.drag_dest_set(
+            Gtk.DestDefaults.ALL,
+            [Gtk.TargetEntry.new("text/uri-list", Gtk.TargetFlags.OTHER_APP, _DROP_TARGET_INFO)],
+            Gdk.DragAction.COPY,
+        )
+        vbox.connect("drag-data-received", self._on_drag_data_received)
 
         # Context and conversation controls share one compact row under the
         # composer. These are turn/session controls, not global toolbar actions.
