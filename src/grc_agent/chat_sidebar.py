@@ -456,10 +456,16 @@ class ChatSidebar(Gtk.Box):
         # while that save is in flight, the saved row is removed so a cleared
         # session can't resurrect.
         self._clear_generation: int = 0
+        # Named references exist only where a call site must ask "is THIS
+        # specific kind of task running" (e.g. the implement-plan guard).
+        # Lifecycle (cancel-all-on-clear/stop) reads _background_tasks, the
+        # one set every task actually lives in, instead of two methods each
+        # hand-enumerating the same four names.
         self._chat_task: asyncio.Task | None = None
         self._compact_task: asyncio.Task | None = None
         self._fix_task: asyncio.Task | None = None
         self._implement_plan_task: asyncio.Task | None = None
+        self._background_tasks: set[asyncio.Task] = set()
         self._implement_plan_row: Gtk.ListBoxRow | None = None
         self._implement_plan_button: Gtk.Button | None = None
         self._project_directory: Path | None = None
@@ -875,13 +881,27 @@ class ChatSidebar(Gtk.Box):
         self._context_window_tasks.add(task)
         task.add_done_callback(self._context_window_tasks.discard)
 
-    def _update_context_label(self) -> None:
-        """Update the context usage label under the input box using Pydantic AI's native msg.usage."""
-        msgs = (
+    def _current_messages(self) -> list[ModelMessage]:
+        """The one authoritative answer to "what are the messages right now".
+
+        self._message_history is the STABLE snapshot, only reassigned at a
+        few discrete points in the turn's lifecycle (a new prompt appended,
+        the turn's final result, an approval-pause checkpoint) — it goes
+        stale the moment a run starts streaming and stays stale until one of
+        those points lands. self._active_run.all_messages() is live and
+        current for exactly the window a run is in flight. Everything that
+        needs "the current transcript" reads through this one method rather
+        than re-deriving which of the two to trust.
+        """
+        return (
             self._active_run.all_messages()
             if self._active_run is not None
             else self._message_history
         )
+
+    def _update_context_label(self) -> None:
+        """Update the context usage label under the input box using Pydantic AI's native msg.usage."""
+        msgs = self._current_messages()
         (
             last_input_tokens,
             last_output_tokens,
@@ -1191,7 +1211,9 @@ class ChatSidebar(Gtk.Box):
                 )
                 return
             self._set_busy(True)
-            self._compact_task = asyncio.ensure_future(self._run_compact_now())
+            self._compact_task = self._track_background_task(
+                asyncio.ensure_future(self._run_compact_now())
+            )
 
         dialog.connect("response", _on_response)
         dialog.show()
@@ -1302,7 +1324,7 @@ class ChatSidebar(Gtk.Box):
         if enabled:
             path = ""
             if self._flowgraph_proxy is not None:
-                cm = getattr(self._flowgraph_proxy, "_canvas_manager", None)
+                cm = self._get_cm()
                 path = cm.path if cm else ""
             if not path:
                 self._entry.set_placeholder_text(
@@ -1494,7 +1516,7 @@ class ChatSidebar(Gtk.Box):
     def current_page(self) -> Any:
         if self._flowgraph_proxy is None:
             return None
-        cm = getattr(self._flowgraph_proxy, "_canvas_manager", None)
+        cm = self._get_cm()
         return cm.current_page if cm else None
 
     def sync_to_file(self) -> None:
@@ -1529,14 +1551,7 @@ class ChatSidebar(Gtk.Box):
         # in-flight _run_agent_turn's CancelledError handler recognizes this
         # clear and skips re-populating the listbox it just wiped.
         self._clear_generation += 1
-        if self._chat_task and not self._chat_task.done():
-            self._chat_task.cancel()
-        if self._compact_task and not self._compact_task.done():
-            self._compact_task.cancel()
-        if self._fix_task and not self._fix_task.done():
-            self._fix_task.cancel()
-        if self._implement_plan_task and not self._implement_plan_task.done():
-            self._implement_plan_task.cancel()
+        self._cancel_background_tasks()
         self._implement_plan_task = None
         self._remove_implement_plan_action()
         self._message_history = []
@@ -1563,7 +1578,7 @@ class ChatSidebar(Gtk.Box):
         # A full rebuild destroys any badge pill mid-hover without a
         # leave-notify-event (GTK3 doesn't synthesize one on widget
         # destruction), which could otherwise leave a stale canvas highlight.
-        cm = getattr(self._flowgraph_proxy, "_canvas_manager", None)
+        cm = self._get_cm()
         if cm:
             cm.clear_highlight()
 
@@ -1651,11 +1666,7 @@ class ChatSidebar(Gtk.Box):
             self._loading_session_id = None
 
     def _switch_or_open_file(self, path: str) -> None:
-        cm = (
-            getattr(self._flowgraph_proxy, "_canvas_manager", None)
-            if self._flowgraph_proxy
-            else None
-        )
+        cm = self._get_cm()
         if not cm or not cm.window:
             self.set_status("GRC window not available.", error=True)
             return
@@ -1693,7 +1704,7 @@ class ChatSidebar(Gtk.Box):
     def _get_effective_path(self) -> str | None:
         if self._flowgraph_proxy is None:
             return None
-        cm = getattr(self._flowgraph_proxy, "_canvas_manager", None)
+        cm = self._get_cm()
         if cm is None:
             return None
         if cm.path:
@@ -1751,16 +1762,33 @@ class ChatSidebar(Gtk.Box):
             _log.exception("Failed to archive truncated thinking transcript")
             return False
 
+    def _track_background_task(self, task: asyncio.Task) -> asyncio.Task:
+        """Register a fire-and-forget task in the one set lifecycle reads.
+
+        Returns the same task so a call site can still keep its own named
+        reference where it needs to ask "is THIS kind of task running"
+        (e.g. the implement-plan guard) — this only adds the task to the
+        shared set that _cancel_background_tasks reads, so clear_messages
+        and stop_chat stop hand-enumerating the same task attributes.
+        """
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+        return task
+
+    def _cancel_background_tasks(self) -> None:
+        """Cancel every still-running task this sidebar has dispatched.
+
+        One list, read by both clear_messages (a global Clear History) and
+        stop_chat (app shutdown) — previously each hand-enumerated the same
+        four named attributes.
+        """
+        for task in list(self._background_tasks):
+            if not task.done():
+                task.cancel()
+
     def stop_chat(self) -> None:
-        if self._chat_task and not self._chat_task.done():
-            self._chat_task.cancel()
-        if self._compact_task and not self._compact_task.done():
-            self._compact_task.cancel()
-        if self._fix_task and not self._fix_task.done():
-            self._fix_task.cancel()
-        if self._implement_plan_task and not self._implement_plan_task.done():
-            self._implement_plan_task.cancel()
-            self._implement_plan_task = None
+        self._cancel_background_tasks()
+        self._implement_plan_task = None
 
     def _remove_timers(self) -> None:
         """Disarm the two repeating sources __init__ armed.
@@ -2371,7 +2399,7 @@ class ChatSidebar(Gtk.Box):
         # leave-notify-event (GTK3 doesn't synthesize one on widget removal),
         # which could leave a stale canvas highlight — same guard as
         # _render_history's full rebuild.
-        cm = getattr(self._flowgraph_proxy, "_canvas_manager", None)
+        cm = self._get_cm()
         if cm:
             cm.clear_highlight()
 
@@ -2522,8 +2550,8 @@ class ChatSidebar(Gtk.Box):
         if self._busy or self._implement_plan_task is not None:
             return
         button.set_sensitive(False)
-        self._implement_plan_task = asyncio.ensure_future(
-            self._implement_durable_plan(session_id)
+        self._implement_plan_task = self._track_background_task(
+            asyncio.ensure_future(self._implement_durable_plan(session_id))
         )
 
     async def _implement_durable_plan(self, session_id: int) -> None:
@@ -2698,7 +2726,9 @@ class ChatSidebar(Gtk.Box):
             f"Flowgraph run failed (return code {return_code}). "
             "Use the get_run_log tool to read the console output and diagnose the error."
         )
-        self._fix_task = asyncio.ensure_future(self._send_fix_when_free(prompt, origin_page))
+        self._fix_task = self._track_background_task(
+            asyncio.ensure_future(self._send_fix_when_free(prompt, origin_page))
+        )
 
     async def _send_fix_when_free(self, text: str, origin_page: Any) -> None:
         """Wait out any in-flight agent turn, then send `text` as the next
@@ -2936,7 +2966,9 @@ class ChatSidebar(Gtk.Box):
         self._append_user_message(text, images)
 
         self._set_busy(True)
-        self._chat_task = asyncio.ensure_future(self._run_agent_turn(prompt))
+        self._chat_task = self._track_background_task(
+            asyncio.ensure_future(self._run_agent_turn(prompt))
+        )
         self._chat_task.add_done_callback(self._on_chat_task_done)
         return True
 
