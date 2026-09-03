@@ -1744,50 +1744,6 @@ def test_save_history_deletes_session_resurrected_by_concurrent_clear(monkeypatc
     mock_delete.assert_called_once_with(42)
 
 
-def test_clean_message_history_for_new_turn():
-    """_clean_message_history_for_new_turn must pop trailing ModelResponses
-    that contain unprocessed tool calls so PydanticAI accepts a subsequent
-    user prompt without raising UserError."""
-    from pydantic_ai.messages import (
-        ModelRequest,
-        ModelResponse,
-        RetryPromptPart,
-        TextPart,
-        ToolCallPart,
-        UserPromptPart,
-    )
-
-    from grc_agent.chat_sidebar import _clean_message_history_for_new_turn
-
-    # Case 1: Trailing ModelResponse with ToolCallPart is trimmed
-    msgs = [
-        ModelRequest(parts=[UserPromptPart(content="turn 1")]),
-        ModelResponse(parts=[ToolCallPart("change_graph", {})]),
-    ]
-    cleaned = _clean_message_history_for_new_turn(msgs)
-    assert len(cleaned) == 1
-    assert isinstance(cleaned[0].parts[0], UserPromptPart)
-
-    # Case 2: Multi-retry failure ending in ToolCallPart is trimmed
-    msgs = [
-        ModelRequest(parts=[UserPromptPart(content="turn 1")]),
-        ModelResponse(parts=[ToolCallPart("change_graph", {})]),
-        ModelRequest(parts=[RetryPromptPart(content="retry 1")]),
-        ModelResponse(parts=[ToolCallPart("change_graph", {})]),
-    ]
-    cleaned = _clean_message_history_for_new_turn(msgs)
-    assert len(cleaned) == 3
-    assert isinstance(cleaned[-1].parts[0], RetryPromptPart)
-
-    # Case 3: Completed response with TextPart is preserved intact
-    msgs = [
-        ModelRequest(parts=[UserPromptPart(content="turn 1")]),
-        ModelResponse(parts=[TextPart("all done")]),
-    ]
-    cleaned = _clean_message_history_for_new_turn(msgs)
-    assert len(cleaned) == 2
-
-
 def test_render_last_message_rich_shows_summary_card_for_final_result():
     """A final_result tool call carrying a GrcAgentResponse must render as a
     readable summary card (Done header + action bullets + explanation), not a

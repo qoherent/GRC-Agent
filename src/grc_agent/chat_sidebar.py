@@ -15,7 +15,6 @@ import logging
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
-from decimal import Decimal
 from pathlib import Path
 from typing import Any, get_args
 
@@ -72,6 +71,17 @@ from .chat.format import (
     _transcript_tool_call,
     _transcript_tool_result,
     format_tokens,
+)
+from .chat.history import (
+    _clean_message_history_for_new_turn,
+    _messages_call_tool,
+    _without_truncated_thinking_tail,
+)
+from .chat.usage import (
+    _collect_token_usage,
+    _format_native_cost,
+    _run_usage_cost_override,
+    _run_usage_output_override,
 )
 from .native_canvas import sidebar_font_multiplier
 from .settings import get_approval_mode, set_approval_mode
@@ -178,67 +188,6 @@ _SCROLL_STICK_THRESHOLD = 80
 # append-only and drain into Gtk.TextBuffer in batches; the final markdown
 # render still replaces only this turn's temporary stream row.
 _STREAM_FLUSH_INTERVAL = 0.033
-
-
-def _clean_message_history_for_new_turn(
-    messages: list[ModelMessage],
-) -> list[ModelMessage]:
-    """Ensure message_history is valid for a new user prompt.
-
-    PydanticAI rejects any run whose message_history ends on a ModelResponse
-    with unfulfilled tool_calls (raising UserError: "Cannot provide a new user
-    prompt when the message history contains unprocessed tool calls.").
-
-    If an earlier turn aborted, hit max retries, or was persisted with
-    trailing unprocessed tool calls, pop trailing ModelResponse messages with
-    tool_calls so the next turn can start cleanly.
-    """
-    cleaned = list(messages)
-    while cleaned:
-        last = cleaned[-1]
-        if isinstance(last, ModelResponse) and last.tool_calls:
-            _log.warning(
-                "cleaning history for a new turn: dropping a response with %d unprocessed "
-                "tool call(s) %s — the calls stay recoverable in the step-store snapshots",
-                len(last.tool_calls),
-                [tc.tool_name for tc in last.tool_calls],
-            )
-            cleaned.pop()
-            continue
-        break
-    return cleaned
-
-
-def _messages_call_tool(messages: list[ModelMessage], tool_name: str) -> bool:
-    """Whether this run emitted a call to one exact Pydantic AI function tool."""
-    return any(
-        isinstance(part, ToolCallPart) and part.tool_name == tool_name
-        for message in messages
-        for part in getattr(message, "parts", [])
-    )
-
-
-def _without_truncated_thinking_tail(
-    messages: list[ModelMessage],
-) -> tuple[list[ModelMessage], bool]:
-    """Detach a provider-length response that contains reasoning and no output.
-
-    Pydantic AI raises ``UnexpectedModelBehavior`` for this exact structural
-    state. Keeping the 65k-token repetition in active history makes the next
-    request and every re-render pay for unusable output; callers archive the
-    full transcript before accepting this cleaned history.
-    """
-    if not messages:
-        return messages, False
-    last = messages[-1]
-    if (
-        isinstance(last, ModelResponse)
-        and last.finish_reason == "length"
-        and last.parts
-        and all(isinstance(part, ThinkingPart) for part in last.parts)
-    ):
-        return messages[:-1], True
-    return messages, False
 
 
 class _ChunkAccumulator:
@@ -371,93 +320,6 @@ class _ChatTextView(Gtk.ScrolledWindow):
         if detailed_signal == "changed":
             return self.tv.get_buffer().connect("changed", handler, *args)
         return self.tv.connect(detailed_signal, handler, *args)
-
-
-def _collect_token_usage(msgs) -> tuple[int, int, int, int, Decimal | None, bool]:
-    """Extract token totals and native Pydantic AI cost for the latest turn.
-
-    A turn can contain several model requests around tool calls, so its cost is
-    the sum after the latest user prompt. It is complete only when every such
-    response has ``usage.cost``; otherwise ``None`` prevents a partial sum.
-    """
-    last_input = last_output = last_reasoning = total = 0
-    turn_cost = Decimal(0)
-    has_usage = False
-    cost_complete = True
-    for msg in msgs:
-        if isinstance(msg, ModelRequest):
-            if any(isinstance(part, UserPromptPart) for part in msg.parts):
-                turn_cost = Decimal(0)
-                has_usage = False
-                cost_complete = True
-            continue
-        if not isinstance(msg, ModelResponse) or not msg.usage:
-            continue
-        u = msg.usage
-        inp = getattr(u, "input_tokens", 0) or 0
-        out = getattr(u, "output_tokens", 0) or 0
-        native_cost = getattr(u, "cost", None)
-        if inp or out or native_cost is not None:
-            has_usage = True
-            if native_cost is None:
-                cost_complete = False
-            else:
-                turn_cost += native_cost
-        if inp:
-            last_input = inp
-            last_output = out
-            reasoning = 0
-            if hasattr(u, "details") and isinstance(u.details, dict):
-                reasoning = u.details.get("reasoning_tokens", 0) or 0
-            elif hasattr(u, "reasoning_tokens"):
-                reasoning = getattr(u, "reasoning_tokens", 0) or 0
-            last_reasoning = reasoning
-        total += getattr(u, "total_tokens", 0) or 0
-    return (
-        last_input,
-        last_output,
-        last_reasoning,
-        total,
-        turn_cost if has_usage and cost_complete else None,
-        has_usage,
-    )
-
-
-def _format_native_cost(cost: Decimal) -> str:
-    """Render Pydantic AI's exact USD Decimal without inventing precision."""
-    return f"${format(cost.normalize(), 'f')}"
-
-
-def _run_usage_output_override(run: Any, last_output: int, last_reasoning: int) -> tuple[int, int]:
-    """Replace last-response-only output/reasoning with the run's aggregated
-    totals when a live run is available (see _update_context_label)."""
-    if run is None:
-        return last_output, last_reasoning
-    u = getattr(run, "usage", None)
-    if u is None:
-        return last_output, last_reasoning
-    details = getattr(u, "details", None) or {}
-    return (
-        getattr(u, "output_tokens", 0) or 0,
-        details.get("reasoning_tokens", 0) or 0,
-    )
-
-
-def _run_usage_cost_override(
-    run: Any, last_turn_cost: Decimal | None, has_usage: bool
-) -> tuple[Decimal | None, bool]:
-    """Use the active run's aggregate native cost while it is available."""
-    if run is None:
-        return last_turn_cost, has_usage
-    usage = getattr(run, "usage", None)
-    if usage is None or not (
-        getattr(usage, "requests", 0)
-        or getattr(usage, "input_tokens", 0)
-        or getattr(usage, "output_tokens", 0)
-        or getattr(usage, "cost", None) is not None
-    ):
-        return last_turn_cost, has_usage
-    return getattr(usage, "cost", None), True
 
 
 class ChatSidebar(Gtk.Box):
