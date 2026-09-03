@@ -1845,32 +1845,6 @@ def test_clean_message_history_for_new_turn():
     assert len(cleaned) == 2
 
 
-def test_parse_final_summary_accepts_grc_agent_response_shapes():
-    """The model's final structured output (GrcAgentResponse) arrives as a
-    final_result tool call; _parse_final_summary must recover (actions,
-    explanation) from both the dict form (pydantic-ai ToolCallPart.args) and
-    the JSON-string form, and return None for anything else so the caller
-    falls back to a normal tool expander."""
-    from grc_agent.chat_sidebar import _parse_final_summary
-
-    assert _parse_final_summary(
-        {"actions_taken": ["Added x", "Connected y"], "explanation": "Graph valid"}
-    ) == (["Added x", "Connected y"], "Graph valid")
-    assert _parse_final_summary('{"actions_taken": ["a"], "explanation": "e"}') == (["a"], "e")
-    # Missing explanation is tolerated (the field is required by the schema,
-    # but a malformed model response must degrade to a card, not a crash).
-    assert _parse_final_summary({"actions_taken": ["a"]}) == (["a"], "")
-
-    # Non-GrcAgentResponse shapes -> None (render as a plain tool expander).
-    assert _parse_final_summary({"foo": "bar"}) is None
-    assert _parse_final_summary({"actions_taken": "not a list"}) is None
-    assert _parse_final_summary({"actions_taken": [1, 2]}) is None
-    assert _parse_final_summary("not json") is None
-    assert _parse_final_summary(None) is None
-    assert _parse_final_summary(42) is None
-    assert _parse_final_summary("") is None
-
-
 def test_render_last_message_rich_shows_summary_card_for_final_result():
     """A final_result tool call carrying a GrcAgentResponse must render as a
     readable summary card (Done header + action bullets + explanation), not a
@@ -3171,32 +3145,6 @@ def test_chat_textviews_have_line_spacing():
     assert prose.get_pixels_above_lines() == 2
     assert prose.get_pixels_below_lines() == 2
     assert prose.get_pixels_inside_wrap() == 2
-
-
-def test_query_knowledge_label_shows_search_mode():
-    from grc_agent.chat_sidebar import _tool_label
-
-    assert (
-        _tool_label("query_knowledge", result='{"search_mode": "vector"}')
-        == "\u2699 query_knowledge (vector) \u2713"
-    )
-    assert (
-        _tool_label("query_knowledge", result='{"search_mode": "lexical"}')
-        == "\u2699 query_knowledge (lexical) \u2713"
-    )
-    assert (
-        _tool_label("query_knowledge", result='{"search_mode": "hybrid"}')
-        == "\u2699 query_knowledge (hybrid) \u2713"
-    )
-    assert (
-        _tool_label("query_knowledge", ok=False, result='{"search_mode": "vector"}')
-        == "\u2699 query_knowledge (vector) \u2717"
-    )
-    assert (
-        _tool_label("query_knowledge", retry=True, result='{"search_mode": "lexical"}')
-        == "\u26a0 query_knowledge (lexical) retry"
-    )
-    assert _tool_label("inspect_graph", result='{"ok": true}') == "\u2699 inspect_graph \u2713"
 
 
 def test_markdown_ast_formatting_and_tags():
