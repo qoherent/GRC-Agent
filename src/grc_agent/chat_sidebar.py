@@ -888,12 +888,18 @@ class ChatSidebar(Gtk.Box):
         # Refresh relative timestamps ("2m ago") on the recent-sessions list
         # while the welcome screen is visible. Re-renders only when idle and
         # empty so live-streaming bubbles are never wiped.
-        GLib.timeout_add_seconds(60, self._refresh_welcome_times)
+        # Source ids are retained so destroy() can remove them. Without that
+        # every sidebar ever constructed keeps polling the shared default
+        # GMainContext for the life of the process, holding a strong reference
+        # to a widget that is otherwise gone.
+        self._welcome_timer_id: int | None = GLib.timeout_add_seconds(
+            60, self._refresh_welcome_times
+        )
 
         # Poll the RAG index-build status (set by the worker thread that runs
         # ingest) and surface progress in the status bar. Cheap dict reads; the
         # build itself runs off the main loop via asyncio.to_thread.
-        GLib.timeout_add(500, self._poll_indexing)
+        self._indexing_timer_id: int | None = GLib.timeout_add(500, self._poll_indexing)
 
     def _on_key_press_event(self, _widget: Gtk.Widget, event: Gdk.EventKey) -> bool:
         if (event.state & Gdk.ModifierType.CONTROL_MASK) and event.keyval == Gdk.KEY_comma:
@@ -2124,11 +2130,31 @@ class ChatSidebar(Gtk.Box):
             self._implement_plan_task.cancel()
             self._implement_plan_task = None
 
+    def _remove_timers(self) -> None:
+        """Disarm the two repeating sources __init__ armed.
+
+        Both return True forever, so nothing ever removed them: a destroyed
+        sidebar went on polling the default context, and with enough of them
+        armed a `while Gtk.events_pending()` drain never runs dry. That is what
+        made the GTK suite order-dependent.
+        """
+        for attr in ("_welcome_timer_id", "_indexing_timer_id"):
+            source_id = getattr(self, attr, None)
+            if source_id is not None:
+                GLib.source_remove(source_id)
+                setattr(self, attr, None)
+
+    def destroy(self) -> None:
+        """Remove this sidebar's timers before GTK tears the widget down."""
+        self._remove_timers()
+        super().destroy()
+
     def shutting_down(self) -> None:
         """Signal that the app is shutting down — any in-flight widget cleanup
         (streaming flush, scroll-to-bottom, busy reset) should be skipped to
         avoid GTK warnings/crashes on mid-destroy widgets (L7)."""
         self._shutting_down = True
+        self._remove_timers()
         self._model_wait_stop()
         if self._md is not None:
             self._md.set_shutting_down(True)

@@ -75,6 +75,11 @@ dev = [
     # marker is unknown and pytest >= 9 fails the test outright rather than
     # silently not running it.
     "pytest-asyncio>=1.0",
+    # The GTK suite is asserted to pass in reverse declaration order as well
+    # as forwards: order-dependence there was a real defect (sidebars leaking
+    # repeating GLib sources), and a gate that can only run one way cannot
+    # prove it is fixed.
+    "pytest-reverse>=1.7",
 ]
 
 [project.scripts]

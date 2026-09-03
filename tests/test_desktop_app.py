@@ -91,6 +91,16 @@ def test_build_app_shows_fatal_error_when_gnuradio_missing(monkeypatch):
     monkeypatch.setattr(desktop_app, "get_gui_platform", _boom)
     fatal = MagicMock()
     monkeypatch.setattr(desktop_app, "_show_fatal_error", fatal)
+    # build_app() calls _apply_global_css() unconditionally before either
+    # failure branch. That installs a module-global Gtk.CssProvider on the
+    # DEFAULT SCREEN via add_provider_for_screen, at APPLICATION priority,
+    # and never removes it -- a real, process-wide, permanent side effect
+    # this test has no interest in. Left in place, it leaks into every later
+    # test in the process (observed: it silently defeats
+    # ChatSidebar.set_zoom_projection's own same-priority widget-scoped
+    # provider in test_chat_sidebar.py, deterministically, whenever this test
+    # runs first). Not the subject of this test, so it is stubbed out.
+    monkeypatch.setattr(desktop_app, "_apply_global_css", lambda: None)
 
     with pytest.raises(SystemExit):
         desktop_app.build_app()
@@ -129,6 +139,11 @@ def test_build_app_shows_fatal_error_when_window_not_found(monkeypatch):
     monkeypatch.setattr(Gtk.Application, "get_default", staticmethod(lambda: None))
     fatal = MagicMock()
     monkeypatch.setattr(desktop_app, "_show_fatal_error", fatal)
+    # Same leak as test_build_app_shows_fatal_error_when_gnuradio_missing:
+    # _apply_global_css() runs unconditionally at the top of build_app() and
+    # installs a permanent, process-wide screen CSS provider this test does
+    # not exercise or need.
+    monkeypatch.setattr(desktop_app, "_apply_global_css", lambda: None)
 
     with pytest.raises(SystemExit):
         desktop_app.build_app()

@@ -1041,6 +1041,7 @@ dev = [
     { name = "mypy" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
+    { name = "pytest-reverse" },
     { name = "ruff" },
 ]
 
@@ -1063,6 +1064,7 @@ requires-dist = [
     { name = "pygments", specifier = ">=2.17" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0.0" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=1.0" },
+    { name = "pytest-reverse", marker = "extra == 'dev'", specifier = ">=1.7" },
     { name = "python-dotenv", specifier = ">=1.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.15.9" },
     { name = "sqlite-vec", specifier = ">=0.1.9,<0.2" },
@@ -2639,6 +2641,18 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/43/7c/d36d04db312ecf4298932ef77e6e4a9e8ad017906e24e34f0b0c361a2473/pytest_asyncio-1.4.0.tar.gz", hash = "sha256:c6c0d2259945122819f171a32ecea2c349ead889ee28176caaf492143424be42", size = 58514, upload-time = "2026-05-26T09:56:04.083Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/03/e2/08a497ef684b88559c9cc5f4ad53a37e7b99e727094a86d6ea32536d5d3c/pytest_asyncio-1.4.0-py3-none-any.whl", hash = "sha256:933ca923a23075a87fb7070c0ec272a6848489824d887c85c812670932835aa1", size = 16930, upload-time = "2026-05-26T09:56:02.576Z" },
+]
+
+[[package]]
+name = "pytest-reverse"
+version = "1.9.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pytest" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/d0/5f/9f3227f0c1ae1411fa5921af8f9cb88ac71f988750ab0bc27f4a29179a64/pytest_reverse-1.9.0.tar.gz", hash = "sha256:a3b756f13bfc5b9aa39bfc57d2d5e03ec62f7fdfed2c04cad664c283d63ce94a", size = 4708, upload-time = "2025-09-09T10:39:02.084Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/29/1c/126e8d934e8852c89fb898f77512050c0c34cf96f195f02cbd36c5dd0356/pytest_reverse-1.9.0-py3-none-any.whl", hash = "sha256:3cb9cb2403eea2f953fd6b9629637387cf6e75594f8573738f68ec1aca11dcd1", size = 4156, upload-time = "2025-09-09T10:39:00.744Z" },
 ]
 
 [[package]]

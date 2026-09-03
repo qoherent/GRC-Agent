@@ -8,7 +8,9 @@ requirement. Pinning here (before any test module runs) makes the suite
 deterministic regardless of test execution order.
 """
 
+import contextlib
 import shutil
+import sys
 import tempfile
 from pathlib import Path
 
@@ -20,13 +22,15 @@ from grc_agent.adapter import change_graph
 gi.require_version("Gtk", "3.0")
 gi.require_version("Gdk", "3.0")
 
+
 """Shared fixtures/helpers/constants split out of the former test_unit.py god
 file. The epy sources and dial-tone block names feed adapter/graph, layout,
 block_library, and chat tests; _seed_session/_count_sessions_for_path feed the
 session-DB tests; _FakeResponse feeds probe_backend tests."""
 
 
-FIXTURES_DIR = Path("tests/data")
+# Absolute so the suite does not depend on being invoked from the repo root.
+FIXTURES_DIR = Path(__file__).resolve().parent / "data"
 
 
 _DIAL_TONE_FLOW_BLOCKS = {
@@ -223,3 +227,125 @@ def temp_hier_block_lib_dir(tmp_path):
     finally:
         Config.hier_block_lib_dir = original
         get_platform().build_library()
+
+
+# ---------------------------------------------------------------------------
+# Shared fixtures
+#
+# These replace per-file copies that had drifted: the environment-isolation
+# setenv appeared 108 times across 14 files with the fixture itself redeclared
+# verbatim four times, ChatSidebar() was constructed 95 times against 21
+# teardowns, the canvas manager was built by __new__ at 20 sites with 6-8
+# hand-set attributes each, and the fake-deps harness was byte-identical
+# across two files (which one of them documented in its own docstring).
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def isolated_env(tmp_path, monkeypatch):
+    """Point .env, the session DB and the vector store at a temp directory.
+
+    Every test that touches settings or persistence needs this; without it a
+    run writes to the developer's real .env and chat DB.
+    """
+    env_path = tmp_path / ".env"
+    monkeypatch.setenv("GRC_AGENT_ENV", str(env_path))
+    vectors = tmp_path / "vectors"
+    vectors.mkdir(exist_ok=True)
+    monkeypatch.setenv("GRC_AGENT_VECTORS_DIR", str(vectors))
+    return env_path
+
+
+@pytest.fixture
+def sidebar(isolated_env):  # noqa: ARG001
+    """A ChatSidebar that actually gets torn down.
+
+    ChatSidebar.__init__ arms a 60s and a 500ms repeating GLib source, and
+    until they were removable nothing ever disarmed them — every sidebar a
+    test constructed went on polling the shared default GMainContext for the
+    rest of the session. With enough armed, a `while Gtk.events_pending()`
+    drain never runs dry, which is what made the GTK suite order-dependent.
+    """
+    from grc_agent.chat_sidebar import ChatSidebar
+
+    widget = ChatSidebar()
+    try:
+        yield widget
+    finally:
+        widget.destroy()
+
+
+@pytest.fixture
+def canvas_manager():
+    """A NativeCanvasManager built through its real constructor.
+
+    Tests used to build it with __new__ and hand-set 6-8 attributes, so the
+    object under test was a hand-maintained shadow of the real shape — and
+    because the polled method swallows exceptions, a renamed __init__
+    attribute vanished instead of failing a test.
+
+    __init__ itself arms nothing: the 1.5s safety-net poll
+    (_check_for_unsynced_edit) is armed by setup_signal_handlers(), which
+    also wires real notebook signals and so is deliberately NOT called here
+    -- a test that needs the poll armed calls it explicitly (and is then
+    responsible for that source, same as any other GLib.timeout_add call
+    a test triggers directly).
+    """
+    from unittest.mock import MagicMock
+
+    from grc_agent.adapter import graph as adapter_graph
+    from grc_agent.native_canvas import NativeCanvasManager
+
+    # GRC's own GUI package (gnuradio.grc.gui) must be bootstrapped top-down
+    # once per process before anything under it is constructed directly, or
+    # a lazy internal import (Bars.py importing Actions mid-init) hits its
+    # own circular-import failure -- the same gotcha
+    # test_untitled_save_dialog_seeded_to_project_dir works around the same
+    # way. get_gui_platform() is the app's own bootstrap entry point and is
+    # idempotent.
+    adapter_graph.get_gui_platform()
+
+    window = MagicMock()
+    platform = MagicMock()
+    return NativeCanvasManager(window, platform)
+
+
+def walk_widgets(root):
+    """Every descendant of `root`, depth-first.
+
+    Eleven copies of this walker lived in test_chat_sidebar.py alone.
+    """
+    yield root
+    children = getattr(root, "get_children", None)
+    if not callable(children):
+        return
+    for child in children():
+        yield from walk_widgets(child)
+
+
+@pytest.fixture(autouse=True)
+def _disarm_leaked_sidebar_timers():
+    """Disarm repeating GLib sources left behind by any sidebar a test built.
+
+    The `sidebar` fixture below is the right way to get one, but ~95 tests
+    construct ChatSidebar directly. Each arms a 60s and a 500ms repeating
+    source; left armed they accumulate on the shared default GMainContext
+    until a `while Gtk.events_pending()` drain never runs dry and the suite
+    hangs — reproducible today by running the GTK file in reverse order.
+
+    This sweeps test-side rather than adding a registry to ChatSidebar:
+    production code must not carry scaffolding that exists only for tests.
+    """
+    yield
+    import gc
+
+    sidebar_cls = sys.modules.get("grc_agent.chat_sidebar")
+    if sidebar_cls is None:
+        return
+    cls = getattr(sidebar_cls, "ChatSidebar", None)
+    if cls is None:
+        return
+    for obj in gc.get_objects():
+        if isinstance(obj, cls):
+            with contextlib.suppress(Exception):
+                obj._remove_timers()

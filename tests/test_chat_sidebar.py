@@ -5,9 +5,30 @@ Minimal set per the clustered test plan; shared fixtures/helpers live in conftes
 
 import asyncio
 import os
+import time
 
 import pytest
 from conftest import _count_sessions_for_path, _seed_session
+
+
+def _settle_events() -> None:
+    """Drain the pending GTK event queue (idles, allocations, repaints) of
+    the default display — the same loop pattern every widget test here uses."""
+    import gi
+
+    gi.require_version("Gtk", "3.0")
+    from gi.repository import Gtk
+
+    # BOUNDED: ChatSidebar.__init__ arms a repeating 500ms poller (and a 60s
+    # one) that is never removed, and every sidebar this file constructs stays
+    # alive on its own poller source — once a few dozen are armed the default
+    # display always has a ready source and an unbounded drain never exits
+    # (observed live at this file's tail). 500 iterations settle every
+    # layout/idle sequence in this suite with wide margin.
+    n = 0
+    while n < 500 and Gtk.events_pending():
+        Gtk.main_iteration()
+        n += 1
 
 
 def test_change_summary_formatter():
@@ -995,8 +1016,7 @@ def test_welcome_ui_stays_compact_with_long_recent_sessions(monkeypatch):
     window.set_default_size(420, 760)
     window.add(sidebar)
     window.show_all()
-    while Gtk.events_pending():
-        Gtk.main_iteration()
+    _settle_events()
 
     def descendants(widget):
         yield widget
@@ -1548,8 +1568,7 @@ def test_busy_release_does_not_steal_focus_from_transcript():
     tv = _unwrap_textviews(box)[0]
     window.show_all()
     tv.grab_focus()
-    while Gtk.events_pending():
-        Gtk.main_iteration()
+    _settle_events()
 
     sidebar._set_busy(False)
     assert window.get_focus() is tv
@@ -1679,8 +1698,7 @@ def test_expander_toggle_anchor_compensation():
     for i in range(16):
         sidebar._add_message_row(Gtk.Label(label=f"below {i}\n" * 4))
     win.show_all()
-    while Gtk.events_pending():
-        Gtk.main_iteration()
+    _settle_events()
 
     adj = sidebar._scrolled.get_vadjustment()
     row = exp.get_ancestor(Gtk.ListBoxRow)
@@ -1693,8 +1711,7 @@ def test_expander_toggle_anchor_compensation():
     assert before.y + before.height <= value_before
 
     exp.set_expanded(True)
-    while Gtk.events_pending():
-        Gtk.main_iteration()
+    _settle_events()
 
     after = row.get_allocation()
     delta = (after.y + after.height) - (before.y + before.height)
@@ -1718,8 +1735,7 @@ def test_auto_scroll_intent_tracks_adjustment_value():
     for i in range(10):
         sidebar._add_message_row(Gtk.Label(label=f"msg {i}\n" * 5))
     win.show_all()
-    while Gtk.events_pending():
-        Gtk.main_iteration()
+    _settle_events()
 
     adj = sidebar._scrolled.get_vadjustment()
     assert adj.get_upper() - adj.get_page_size() > 200  # actually scrollable
@@ -1731,8 +1747,7 @@ def test_auto_scroll_intent_tracks_adjustment_value():
     # Content growth alone (upper change, value unchanged) never flips the
     # intent: streaming appends cannot yank a reader back to the bottom.
     sidebar._add_message_row(Gtk.Label(label="appended\n" * 10))
-    while Gtk.events_pending():
-        Gtk.main_iteration()
+    _settle_events()
     assert sidebar._auto_scroll is False
     # Scrolling back to the bottom re-engages follow.
     adj.set_value(adj.get_upper() - adj.get_page_size())
@@ -2532,8 +2547,7 @@ def test_prose_textview_wraps_at_available_width():
     sidebar = ChatSidebar()
     win.add(sidebar)
     win.show_all()
-    while Gtk.events_pending():
-        Gtk.main_iteration()
+    _settle_events()
 
     box = sidebar._start_agent_message()
     long_text = (
@@ -2542,8 +2556,7 @@ def test_prose_textview_wraps_at_available_width():
         "per line."
     )
     sidebar._render_markdown_to_box(box, long_text, clear=True)
-    while Gtk.events_pending():
-        Gtk.main_iteration()
+    _settle_events()
 
     textviews = _unwrap_textviews(box)
     assert len(textviews) == 1
@@ -2578,8 +2591,7 @@ def test_prose_textview_rewraps_on_listbox_resize():
     win.set_default_size(900, 500)
     win.add(sidebar)
     win.show_all()
-    while Gtk.events_pending():
-        Gtk.main_iteration()
+    _settle_events()
 
     wide_width, _height = tv.get_size_request()
     assert wide_width > narrow_width
@@ -2615,8 +2627,7 @@ def test_streaming_never_shoves_paned_divider():
         win.add(paned)
         paned.set_position(start_pos)
         win.show_all()
-        while Gtk.events_pending():
-            Gtk.main_iteration()
+        _settle_events()
         pos_before = paned.get_position()
         col_before = sidebar._listbox.get_allocated_width()
         if not narrow:
@@ -2630,8 +2641,7 @@ def test_streaming_never_shoves_paned_divider():
         buf = tv.get_buffer()
         for _ in range(20):  # 20 long unbreakable lines stream in
             buf.insert(buf.get_end_iter(), "x" * 400 + "\n")
-            while Gtk.events_pending():
-                Gtk.main_iteration()
+            _settle_events()
 
         assert paned.get_position() == pos_before
         assert sidebar._listbox.get_allocated_width() == col_before
@@ -2644,8 +2654,7 @@ def test_streaming_never_shoves_paned_divider():
         if not narrow:
             paned.set_position(850)
             paned.check_resize()  # set_position alone doesn't trigger reallocation
-            while Gtk.events_pending():
-                Gtk.main_iteration()
+            _settle_events()
             assert sidebar._listbox.get_allocated_width() < col_before
 
         win.destroy()
@@ -2665,8 +2674,7 @@ def test_model_wait_indicator_lifecycle():
     sidebar = ChatSidebar()
     win.add(sidebar)
     win.show_all()
-    while Gtk.events_pending():
-        Gtk.main_iteration()
+    _settle_events()
 
     assert not sidebar._wait_label.get_visible()
 
@@ -2728,13 +2736,16 @@ def test_code_block_height_pin_shows_full_content():
     sidebar = ChatSidebar()
     win.add(sidebar)
     win.show_all()
-    while Gtk.events_pending():
-        Gtk.main_iteration()
+    _settle_events()
 
     box = sidebar._start_agent_message()
     sidebar._render_markdown_to_box(box, "```\n" + diagram + "\n```\n", clear=True)
-    while Gtk.events_pending():
-        Gtk.main_iteration()
+    # An offscreen widget is only allocated during the frame-clock-driven
+    # pass, which an events-pending drain does not run to completion — the
+    # same reason the font-scaling tests use this helper. Without it the
+    # TextView reports an allocated height of 1 and the assertion below reads
+    # as "diagram clipped" when in fact nothing has been laid out yet.
+    _run_settle_frames()
 
     def find_cb(w):
         if isinstance(w, CodeBlock):
@@ -3944,33 +3955,23 @@ def test_drag_drop_registration_and_batch_attach(tmp_path):
 # -- chat zoom input + sidebar font projection (R9/R10/R12, KD2) ------------
 
 
-def _settle_events() -> None:
-    """Drain the pending GTK event queue (idles, allocations, repaints) of
-    the default display — the same loop pattern every widget test here uses."""
-    import gi
-
-    gi.require_version("Gtk", "3.0")
-    from gi.repository import Gtk
-
-    # BOUNDED: ChatSidebar.__init__ arms a repeating 500ms poller (and a 60s
-    # one) that is never removed, and every sidebar this file constructs stays
-    # alive on its own poller source — once a few dozen are armed the default
-    # display always has a ready source and an unbounded drain never exits
-    # (observed live at this file's tail). 500 iterations settle every
-    # layout/idle sequence in this suite with wide margin.
-    n = 0
-    while n < 500 and Gtk.events_pending():
-        Gtk.main_iteration()
-        n += 1
-
-
-def _run_settle_frames(ms: int = 150) -> None:
+def _run_settle_frames(ms: int = 400) -> None:
     """Run a bounded real main-loop window so GTK's frame-clock pass settles.
 
     Cached PangoContexts only adopt a changed CSS font during the
     frame-clock-driven style pass, which a bare events-pending drain does not
     run to completion on offscreen widgets; a short live loop is the same
-    settle the running app gets from its next frame."""
+    settle the running app gets from its next frame.
+
+    This is a wall-clock window, not an iteration count, so it is sensitive
+    to system load: under a busier machine (e.g. running after ~100 other
+    widget-heavy tests in the same file) fewer real loop iterations fit in
+    the window, and a too-tight bound occasionally lets the idle-priority
+    repin callback miss its turn — observed as a one-off flake, not an
+    order-dependent failure (reproduced clean across 3 repeats at 150ms and
+    also failed once at 150ms with identical test order, so it is timing-
+    sensitive rather than deterministic). 400ms buys generous headroom for
+    ~4 call sites at negligible suite-time cost."""
     import gi
 
     gi.require_version("Gtk", "3.0")
@@ -3982,6 +3983,25 @@ def _run_settle_frames(ms: int = 150) -> None:
 
     GLib.timeout_add(ms, _stop)
     Gtk.main()
+
+
+def _wait_until(predicate, timeout_s: float = 3.0) -> bool:
+    """Poll a condition by pumping the main loop, instead of a blind wall-clock
+    wait. _run_settle_frames' fixed window is sensitive to system load — under
+    heavy load from many preceding widget-heavy tests (observed: reproducible
+    once test_desktop_app.py's ten window-constructing tests all run first)
+    a fixed real-time budget can be too short even after widening it, while a
+    condition-based wait succeeds the instant the repin actually lands and
+    only fails if it genuinely never does. Uses _settle_events' BOUNDED drain,
+    never a bare `while Gtk.events_pending()` — an unbounded drain can spin
+    forever once enough repeating sources are armed on the shared context."""
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        _run_settle_frames(ms=50)
+        _settle_events()
+    return predicate()
 
 
 def test_zoom_projection_css_rule_scope_clamp_and_theme_restore():
@@ -4102,7 +4122,15 @@ def test_zoom_projection_repins_code_blocks():
     pin_before = sw.get_size_request()[1]
 
     sidebar.set_zoom_projection(2.25)  # sqrt(2.25) = multiplier 1.5
-    _settle_events()
+    # Re-pinning an EXISTING block is the same frame-clock-driven style pass
+    # the comment below describes for a newly rendered one, and the wait is
+    # condition-based rather than a fixed window: under enough system load
+    # (observed: reproducible when test_desktop_app.py's ten window-
+    # constructing tests all run beforehand) a fixed real-time settle can
+    # elapse before the idle-priority repin gets a turn, and the assertion
+    # reads as "the projection did nothing" even though it hasn't failed —
+    # it just hasn't happened yet.
+    _wait_until(lambda: sw.get_size_request()[1] > pin_before)
 
     pin_after = sw.get_size_request()[1]
     assert pin_after > pin_before, (pin_before, pin_after)
@@ -4120,16 +4148,16 @@ def test_zoom_projection_repins_code_blocks():
     # the style pass on offscreen widgets).
     box2 = sidebar._start_agent_message()
     sidebar._render_markdown_to_box(box2, f"```python\n{code}\n```\n", clear=True)
-    _run_settle_frames()
     cb2 = find_code_block(box2)
     assert cb2 is not None and cb2 is not cb
     sw2 = next(c for c in cb2.get_children() if isinstance(c, Gtk.ScrolledWindow))
+    _wait_until(lambda: sw2.get_size_request()[1] == pin_after)
     assert sw2.get_size_request()[1] == pin_after
 
     # Settled: below the cap the pin closes the min<natural gap and the
     # TextView's allocation covers its content — no clipped rows.
     assert pin_after < 420
-    _run_settle_frames()
+    _wait_until(lambda: sw.get_preferred_height()[0] == sw.get_preferred_height()[1])
     sw_min, sw_nat = sw.get_preferred_height()
     assert sw_min == sw_nat
     assert tv.get_allocated_height() >= tv.get_preferred_height()[1] - 1
@@ -4359,10 +4387,15 @@ def test_attach_button_opens_in_app_file_chooser():
     sidebar._attach_btn.emit("clicked")
     _settle_events()
 
-    dialogs = [w for w in Gtk.Window.list_toplevels()
-               if isinstance(w, Gtk.FileChooserDialog)]
+    # `type(w) is` rather than isinstance: adapter.graph permanently swaps
+    # GRC's FileDialogs.SaveFlowGraph for a FileChooserDialog subclass the
+    # first time any test installs the untitled-save folder provider, and that
+    # swap is process-wide and never undone. isinstance matched that leftover
+    # too, so in some orders this picked a flowgraph save dialog and asserted
+    # against it.
+    dialogs = [w for w in Gtk.Window.list_toplevels() if type(w) is Gtk.FileChooserDialog]
     assert dialogs, "no file chooser appeared after clicking attach"
-    dialog = dialogs[0]
+    dialog = dialogs[-1]
     assert dialog.get_select_multiple()
     filters = dialog.list_filters()
     assert filters and any(f.get_name() == "Images" for f in filters)
