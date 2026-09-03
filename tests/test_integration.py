@@ -85,14 +85,15 @@ def _selected_backends():
     """Backends the scenario suite can run against. Override via
     GRC_TEST_BACKEND=ollama|openai_compatible|ollama_cloud|openrouter to force one.
 
-    With no override, this prefers Ollama Cloud alone (the project's standard
-    real-LLM backend for tests) when it's configured — it deliberately does
-    NOT union every detected backend by default, since a dev machine that
-    also happens to have local Ollama running and/or OPENROUTER_API_KEY set
+    With no override, this prefers OpenRouter alone when OPENROUTER_API_KEY is
+    configured — the project's standard real-LLM backend for tests — then
+    Ollama Cloud, then whatever other detected backends exist. It deliberately
+    does NOT union every detected backend by default, since a dev machine that
+    also happens to have local Ollama running and/or OLLAMA_CLOUD_API_KEY set
     would otherwise silently run the whole scenario suite 2-3x, against
     backends other than the intended one. Only falls back to running
-    whatever combination of local ollama/openrouter is available if Ollama
-    Cloud itself isn't configured.
+    whatever combination of ollama_cloud/local backends is available if
+    OpenRouter itself isn't configured.
     """
     forced = os.getenv("GRC_TEST_BACKEND")
     if forced:
@@ -103,6 +104,8 @@ def _selected_backends():
                 " never silently fall back to local Ollama."
             )
         return [forced]
+    if _BACKEND_AVAILABILITY["openrouter"]():
+        return ["openrouter"]
     if _BACKEND_AVAILABILITY["ollama_cloud"]():
         return ["ollama_cloud"]
     return [name for name, check in _BACKEND_AVAILABILITY.items() if check()]
@@ -111,8 +114,8 @@ def _selected_backends():
 _AVAILABLE_BACKENDS = _selected_backends()
 if not _AVAILABLE_BACKENDS:
     pytest.skip(
-        "No LLM backend available. Set OLLAMA_CLOUD_API_KEY (preferred), "
-        "OPENROUTER_API_KEY, or start Ollama on 127.0.0.1:11434, or force one "
+        "No LLM backend available. Set OPENROUTER_API_KEY (preferred), "
+        "OLLAMA_CLOUD_API_KEY, or start Ollama on 127.0.0.1:11434, or force one "
         "with GRC_TEST_BACKEND=ollama|ollama_cloud|openrouter|openai_compatible.",
         allow_module_level=True,
     )
@@ -121,7 +124,7 @@ if not _AVAILABLE_BACKENDS:
 # Default chat model for OpenRouter scenarios. The agent.py harness keeps its
 # own fixed MODEL constant for Ollama; OpenRouter uses whatever the caller
 # points at.
-_OPENROUTER_DEFAULT_MODEL = os.getenv("GRC_OPENROUTER_MODEL", "openai/gpt-4o-mini")
+_OPENROUTER_DEFAULT_MODEL = os.getenv("GRC_OPENROUTER_MODEL", "dots-studio/dots-3-note-preview:free")
 
 
 def _build_model_for_backend(backend: str):
