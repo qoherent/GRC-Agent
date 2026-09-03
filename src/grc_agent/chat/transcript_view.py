@@ -46,6 +46,7 @@ from .format import (
     _tool_label,
     _tool_label_running,
     _transcript_summary,
+    _transcript_thinking,
     _transcript_tool_call,
 )
 from .images import _thumbnail
@@ -273,7 +274,15 @@ class TranscriptViewMixin:
         return by_id
 
     def _render_last_message_rich(self, box: Gtk.Box, msg: ModelMessage) -> None:  # noqa: C901
+        # The copy-button action row is not content: _start_agent_message
+        # packed it once, and the button it carries is the box's copy-text
+        # accumulator. Wiping it detached the button from the widget tree
+        # while its text kept updating on the orphaned object (U3/F-01). The
+        # badge-pill hover guard below only concerns content children.
+        action_row = getattr(box, "_grc_action_row", None)
         for child in box.get_children():
+            if child is action_row:
+                continue
             box.remove(child)
 
         # A re-render destroys any badge pill mid-hover without a
@@ -305,7 +314,7 @@ class TranscriptViewMixin:
                 )
                 box.pack_start(exp, False, False, 0)
                 exp.show_all()
-                full_text += f"<Thinking>\n{part.content}\n</Thinking>\n"
+                full_text += _transcript_thinking(part.content)
             elif isinstance(part, ToolCallPart | NativeToolCallPart):
                 tool_name = part.tool_name or "?"
                 if isinstance(part, ToolCallPart):

@@ -30,11 +30,13 @@ the conftest walker, and ``ChatSidebar``/``_StreamCtx`` from
 ``grc_agent.chat_sidebar`` — never from ``grc_agent.chat.*`` mixin modules,
 which do not exist at the baseline commit.
 
-The post-render literal currently pins a known defect the plan tracks (U3):
-the history render path wraps thinking text in ``<Thinking>`` tags while the
-streaming accumulator appends it bare, so mid-stream and post-render copy
-text diverge on reasoning turns. ``test_known_thinking_copy_divergence``
-makes that divergence explicit so the fix updates the literal deliberately.
+The decomposition range shipped one copy-path defect this file pinned on
+arrival (U2 audit F-02): the history render path wrapped thinking text in
+``<Thinking>`` tags while the streaming accumulator appended it bare, so
+mid-stream and post-render copy text diverged on reasoning turns.
+``test_thinking_copy_converges_mid_stream_and_post_render`` was committed
+red as ``test_known_thinking_copy_divergence`` and flipped green by U3's
+source fix; the literals below pin the converged behavior.
 """
 
 import asyncio
@@ -298,6 +300,11 @@ EXPECTED_POST_RENDER = r"""[ListBox]
 [Label text='⚙ change_graph ✓']
 [ScrolledWindow]
 [TextView .view chat-agent-label buffer='Added the low-pass filter and wired it into the audio sink.\n']
+[Box .horizontal chat-msg-actions]
+[Button .image-button chat-copy-btn copy='<Thinking>\nThe sink chain ends at audio_sink. I will add an LPF block and wire noise_source_0 through it.\n</Thinking>\n<Tool Call: change_graph>\nArgs: {"add_blocks":[{"block_id":"low_pass_filter","instance_name":"lpf_0","params":{"cutoff":"10e3"}}],"add_connections":["noise_source_0:0 -> lpf_0:0","lpf_0:0 -> audio_sink:0"]}\nResult: Added 1 block and 2 connections.\nAdded the low-pass filter and wired it into the audio sink.']
+[Alignment]
+[Box .horizontal]
+[Image]
 [ListBoxRow]
 [Box .vertical chat-user-msg-box]
 [Label text='Now check the graph and run it.']
@@ -315,10 +322,15 @@ EXPECTED_POST_RENDER = r"""[ListBox]
 [Label text='Missing required argument: timeout.\n\nFix the errors and try again.']
 [Label text='⚠ run_command retry']
 [ScrolledWindow]
-[TextView .view chat-agent-label buffer='The graph validates; the run hit a device error.\n']"""
+[TextView .view chat-agent-label buffer='The graph validates; the run hit a device error.\n']
+[Box .horizontal chat-msg-actions]
+[Button .image-button chat-copy-btn copy='<Tool Call: inspect_graph>\nArgs: \nResult: 5 blocks, 4 connections, flow graph is valid.\n<Tool Call: run_command>\nArgs: {"command":"python dial_tone.py"}\nResult: Missing required argument: timeout.\n\nFix the errors and try again.\nThe graph validates; the run hit a device error.']
+[Alignment]
+[Box .horizontal]
+[Image]"""
 
-EXPECTED_MID_STREAM = r"""full_raw_text='I should add the filter block and wire it in. The sink expects floats.<Tool Call: change_graph>\nArgs: {"add_blocks":[{"block_id":"low_pass_filter","instance_name":"lpf_0","params":{"cutoff":"10e3"}}],"add_connections":["noise_source_0:0 -> lpf_0:0","lpf_0:0 -> audio_sink:0"]}\nResult: Added 1 block and 2 connections.\nAdded the filter. Wiring it now.'
-[Box .vertical chat-agent-msg-box btn_copy='I should add the filter block and wire it in. The sink expects floats.<Tool Call: change_graph>\nArgs: {"add_blocks":[{"block_id":"low_pass_filter","instance_name":"lpf_0","params":{"cutoff":"10e3"}}],"add_connections":["noise_source_0:0 -> lpf_0:0","lpf_0:0 -> audio_sink:0"]}\nResult: Added 1 block and 2 connections.\nAdded the filter. Wiring it now.']
+EXPECTED_MID_STREAM = r"""full_raw_text='<Thinking>\nI should add the filter block and wire it in. The sink expects floats.\n</Thinking>\n<Tool Call: change_graph>\nArgs: {"add_blocks":[{"block_id":"low_pass_filter","instance_name":"lpf_0","params":{"cutoff":"10e3"}}],"add_connections":["noise_source_0:0 -> lpf_0:0","lpf_0:0 -> audio_sink:0"]}\nResult: Added 1 block and 2 connections.\nAdded the filter. Wiring it now.'
+[Box .vertical chat-agent-msg-box btn_copy='<Thinking>\nI should add the filter block and wire it in. The sink expects floats.\n</Thinking>\n<Tool Call: change_graph>\nArgs: {"add_blocks":[{"block_id":"low_pass_filter","instance_name":"lpf_0","params":{"cutoff":"10e3"}}],"add_connections":["noise_source_0:0 -> lpf_0:0","lpf_0:0 -> audio_sink:0"]}\nResult: Added 1 block and 2 connections.\nAdded the filter. Wiring it now.']
 [Expander .chat-thinking-expander label='Thought']
 [ScrolledWindow]
 [TextView .view chat-thinking-textview buffer='I should add the filter block and wire it in. The sink expects floats.']
@@ -329,7 +341,7 @@ EXPECTED_MID_STREAM = r"""full_raw_text='I should add the filter block and wire 
 [ScrolledWindow]
 [TextView .view chat-agent-label buffer='Added the filter. Wiring it now.']
 [Box .horizontal chat-msg-actions]
-[Button .image-button chat-copy-btn copy='I should add the filter block and wire it in. The sink expects floats.<Tool Call: change_graph>\nArgs: {"add_blocks":[{"block_id":"low_pass_filter","instance_name":"lpf_0","params":{"cutoff":"10e3"}}],"add_connections":["noise_source_0:0 -> lpf_0:0","lpf_0:0 -> audio_sink:0"]}\nResult: Added 1 block and 2 connections.\nAdded the filter. Wiring it now.']
+[Button .image-button chat-copy-btn copy='<Thinking>\nI should add the filter block and wire it in. The sink expects floats.\n</Thinking>\n<Tool Call: change_graph>\nArgs: {"add_blocks":[{"block_id":"low_pass_filter","instance_name":"lpf_0","params":{"cutoff":"10e3"}}],"add_connections":["noise_source_0:0 -> lpf_0:0","lpf_0:0 -> audio_sink:0"]}\nResult: Added 1 block and 2 connections.\nAdded the filter. Wiring it now.']
 [Alignment]
 [Box .horizontal]
 [Image]"""
@@ -378,11 +390,16 @@ def test_golden_projection_is_deterministic():
     assert projections[0] == EXPECTED_POST_RENDER
 
 
-def test_known_thinking_copy_divergence_is_characterized(sidebar):
-    """The streaming accumulator appends thinking text bare while the history
-    renderer wraps it in <Thinking> tags — so the same reasoning turn copies
-    differently mid-stream vs after re-render. Pinned here so U3's fix flips
-    the golden literal (and this test) deliberately rather than silently."""
+def test_thinking_copy_converges_mid_stream_and_post_render(sidebar):
+    """The same reasoning turn must copy identically mid-stream and after
+    re-render (the origin U15 scenario the decomposition range violated).
+
+    Historical note: the range shipped a divergence — the streaming
+    accumulator appended thinking text bare while the history renderer
+    wrapped it in <Thinking> tags. This test was committed red as
+    ``test_known_thinking_copy_divergence_is_characterized`` so the fix had
+    to flip it deliberately; U3 closed the divergence at the source with one
+    wrapped-form builder in ``chat/format.py`` shared by both paths."""
     window = Gtk.OffscreenWindow()
     window.add(sidebar)
     window.show_all()
@@ -410,11 +427,19 @@ def test_known_thinking_copy_divergence_is_characterized(sidebar):
         sidebar._message_history = sidebar2_messages
         sidebar._render_history()
         _settle_events()
-        post_texts = [
-            getattr(getattr(w, "_grc_copy_btn", None), "_grc_copy_text", "")
+        # Read the post-render copy from the box's own button reference so the
+        # assertion is about copy content, not action-row attachment (that is
+        # the F-01 pin's job in test_chat_sidebar.py).
+        boxes = [
+            w
             for w in walk_widgets(sidebar._listbox)
+            if w.get_style_context().has_class("chat-agent-msg-box")
         ]
-        assert "<Thinking>" in "".join(post_texts)
-        assert "<Thinking>" not in mid_copy
+        assert boxes, "agent message box not rendered"
+        post_copy = getattr(boxes[0], "_grc_copy_btn", None)
+        assert post_copy is not None, "agent box lost its copy button reference"
+        post_copy = post_copy._grc_copy_text
+        assert "<Thinking>" in post_copy
+        assert mid_copy == post_copy
     finally:
         window.destroy()

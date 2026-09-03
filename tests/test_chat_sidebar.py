@@ -4506,3 +4506,205 @@ def test_ctrl_v_with_clipboard_image_attaches_png():
     assert sidebar._on_entry_key_press(sidebar._entry, ev2) is False
     assert len(sidebar._attachments) == 1
     win.destroy()
+
+
+# ==========================================
+# U3 pins — verified behavioral findings from the U2 audit
+# ==========================================
+
+
+def _turn_ready_sidebar(sidebar, canvas_path=None):
+    """Minimum attribute setup so a REAL _run_agent_turn can drive a
+    TestModel agent (same pattern as the end-to-end persistence tests)."""
+    from unittest.mock import MagicMock
+
+    sidebar._agent = None  # replaced by the caller
+    sidebar._active_provider = "test-provider"
+    sidebar._active_model = "test-model"
+    sidebar._active_base_url = "test://base"
+    sidebar._flowgraph_proxy = MagicMock()
+    if canvas_path is None:
+        sidebar._flowgraph_proxy._canvas_manager = None
+    else:
+        cm = MagicMock()
+        cm.path = canvas_path
+        sidebar._flowgraph_proxy._canvas_manager = cm
+    sidebar._render_history = MagicMock()
+    sidebar._scroll_to_bottom = MagicMock()
+    sidebar._update_context_label = MagicMock()
+    return sidebar
+
+
+def _blocking_tool_agent():
+    """A TestModel agent whose single tool blocks until released — a turn
+    that can genuinely be cancelled mid-tool-call."""
+    from pydantic_ai import Agent
+    from pydantic_ai.models.test import TestModel
+
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def hang_tool() -> str:
+        entered.set()
+        await release.wait()
+        return "released"
+
+    return Agent(TestModel(), tools=[hang_tool], output_type=str), entered, release
+
+
+def _cancel_mid_tool(sidebar, prompt="cancel me", *, timeout=5.0):
+    """Drive a real turn into its blocking tool, then cancel it. Returns
+    (entered, release); the turn task is finished (cancelled) on return."""
+    agent, entered, release = _blocking_tool_agent()
+    sidebar._agent = agent
+
+    async def _scenario():
+        turn = asyncio.ensure_future(sidebar._run_agent_turn(prompt))
+        for _ in range(int(timeout * 100)):
+            await asyncio.sleep(0.01)
+            if entered.is_set():
+                break
+        assert entered.is_set(), "blocking tool never entered"
+        turn.cancel()
+        import contextlib
+
+        with contextlib.suppress(asyncio.CancelledError):
+            await turn
+
+    asyncio.run(_scenario())
+    return entered, release
+
+
+def test_agent_copy_action_row_survives_rich_render(sidebar):
+    """U3/F-01 (U2 audit): _render_last_message_rich wiped every child of the
+    agent box — including the action row _start_agent_message had just packed
+    — leaving the copy button orphaned out of the widget tree while its copy
+    text kept updating on the detached object."""
+    import gi
+
+    gi.require_version("Gtk", "3.0")
+    from gi.repository import Gtk
+
+    window = Gtk.OffscreenWindow()
+    window.add(sidebar)
+    window.show_all()
+    try:
+        from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, UserPromptPart
+
+        sidebar._message_history = [
+            ModelRequest(parts=[UserPromptPart(content="hello")]),
+            ModelResponse(parts=[TextPart(content="world")]),
+        ]
+        sidebar._render_history()
+        _settle_events()
+
+        boxes = [
+            w
+            for w in walk(sidebar._listbox)
+            if w.get_style_context().has_class("chat-agent-msg-box")
+        ]
+        assert boxes, "agent message box not rendered"
+        rows = [
+            w for w in walk(boxes[0]) if w.get_style_context().has_class("chat-msg-actions")
+        ]
+        assert rows, "agent copy action row missing from the widget tree after render"
+        buttons = [
+            w
+            for w in walk(rows[0])
+            if isinstance(w, Gtk.Button) and w.get_style_context().has_class("chat-copy-btn")
+        ]
+        assert buttons, "agent copy button missing from the action row"
+        assert getattr(buttons[0], "_grc_copy_text", "") == "world"
+    finally:
+        window.destroy()
+
+
+def test_cancelled_turn_tracks_the_history_save(sidebar):
+    """U3/F-04 (U2 audit): the CancelledError path scheduled _save_history
+    with a bare asyncio.ensure_future, never registered in _background_tasks
+    — a clear/stop racing the save orphaned the handle and could persist
+    pre-clear history."""
+    _turn_ready_sidebar(sidebar)
+
+    save_started = asyncio.Event()
+    release_save = asyncio.Event()
+    seen = {}
+
+    async def fake_save():
+        seen["task"] = asyncio.current_task()
+        save_started.set()
+        await release_save.wait()
+
+    sidebar._save_history = fake_save
+
+    agent, entered, release = _blocking_tool_agent()
+    sidebar._agent = agent
+
+    async def _scenario():
+        turn = asyncio.ensure_future(sidebar._run_agent_turn("cancel me"))
+        for _ in range(500):
+            await asyncio.sleep(0.01)
+            if entered.is_set():
+                break
+        assert entered.is_set(), "blocking tool never entered"
+        turn.cancel()
+        import contextlib
+
+        with contextlib.suppress(asyncio.CancelledError):
+            await turn
+        await asyncio.wait_for(save_started.wait(), 5)
+        # The save task the cancel path scheduled must be tracked.
+        assert seen["task"] in sidebar._background_tasks
+        release_save.set()
+
+    asyncio.run(_scenario())
+
+
+def test_aborted_turn_persists_history_needing_no_repair(sidebar, tmp_path):
+    """Origin U15 scenario 6 end to end: an aborted turn persists a history
+    the next send can use without any repair pass. The cleaner runs on the
+    recovered history today; this test asserts it has nothing left to do."""
+    from grc_agent.chat.history import _clean_message_history_for_new_turn
+    from grc_agent.db import deserialize_messages, load_session, save_session
+
+    f = tmp_path / "g.grc"
+    f.touch()
+    sid = save_session(None, str(f), [])
+    _turn_ready_sidebar(sidebar, canvas_path=str(f))
+    sidebar._active_session_id = sid
+
+    _cancel_mid_tool(sidebar, "cancel me mid tool")
+
+    history = sidebar._message_history
+    assert history, "aborted turn left no history to persist"
+    # The persisted history needs no repair: the cleaner is a no-op on it.
+    assert _clean_message_history_for_new_turn(list(history)) == history
+
+    # The history actually reached the database (the save is tracked and
+    # runs on a worker thread — poll briefly rather than sleep-and-hope).
+    deadline = time.monotonic() + 5
+    reloaded = None
+    while time.monotonic() < deadline:
+        row = load_session(sid)
+        if row and deserialize_messages(row["messages"]) == history:
+            reloaded = row
+            break
+        time.sleep(0.05)
+    assert reloaded is not None, "aborted turn's history never reached the database"
+
+    # The abort rendered as a muted status row, not an error.
+    import gi
+
+    gi.require_version("Gtk", "3.0")
+    from gi.repository import Gtk
+
+    labels = [w for w in walk(sidebar._listbox) if isinstance(w, Gtk.Label)]
+    assert any(lbl.get_text() == "[aborted]" for lbl in labels)
+
+
+def walk(root):
+    """Depth-first walk — the conftest helper, imported locally to keep the
+    module header GTK-free like the rest of this file."""
+    from conftest import walk_widgets
+
+    return walk_widgets(root)

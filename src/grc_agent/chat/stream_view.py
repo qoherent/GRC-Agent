@@ -43,6 +43,8 @@ from .format import (
     _tool_args_text,
     _tool_label,
     _transcript_summary,
+    _transcript_thinking_close,
+    _transcript_thinking_open,
     _transcript_tool_call,
     _transcript_tool_result,
 )
@@ -149,6 +151,12 @@ class _StreamCtx:
     # differently-tagged fragment once the result arrives separately.
     tool_call_fragments: dict[str, tuple[str, str, str]] = field(default_factory=dict)
     full_raw_text: _ChunkAccumulator = field(default_factory=_ChunkAccumulator)
+    # Whether full_raw_text currently carries an unclosed <Thinking> region:
+    # opened at the thinking part start, closed at _close_thinking — or at
+    # the next thinking part start, which replaces the buffer in place.
+    # Without this, mid-stream copy text carried thinking bare and diverged
+    # from the post-render copy (U3/F-02).
+    thinking_transcript_open: bool = False
     last_flush: float = 0.0
     last_event_ts: float = 0.0
     pending_chars: int = 0
@@ -277,12 +285,19 @@ class StreamViewMixin:
                 self._update_copy_text(ctx.box, ctx.full_raw_text)
         elif isinstance(part, ThinkingPart):
             self._close_text(ctx)
+            if ctx.thinking_transcript_open:
+                # Consecutive thinking parts reuse the buffer in place; the
+                # transcript region still needs its closer before the new
+                # part's opener.
+                ctx.full_raw_text += _transcript_thinking_close()
+                ctx.thinking_transcript_open = False
             self._ensure_thinking(ctx)
             ctx.think_acc.reset(part.content or "")
             # A new part replaces the previous one's content: clear the buffer
             # so only this part is shown.
             ctx.think_body.get_buffer().set_text("")
-            ctx.full_raw_text += part.content or ""
+            ctx.full_raw_text += _transcript_thinking_open(part.content or "")
+            ctx.thinking_transcript_open = True
             ctx.think_dirty = True
             self._update_copy_text(ctx.box, ctx.full_raw_text)
             self._flush_streaming(ctx, force=True)
@@ -428,6 +443,10 @@ class StreamViewMixin:
         if ctx.think_body is None:
             return
         self._flush_streaming(ctx, force=True)
+        if ctx.thinking_transcript_open:
+            ctx.full_raw_text += _transcript_thinking_close()
+            ctx.thinking_transcript_open = False
+            self._update_copy_text(ctx.box, ctx.full_raw_text)
         if ctx.think_expander is not None:
             ctx.think_expander.set_label(self._thinking_label(streaming=False))
             ctx.think_expander.set_expanded(False)

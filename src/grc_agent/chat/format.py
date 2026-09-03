@@ -94,6 +94,34 @@ def _transcript_tool_result(result: str) -> str:
     return f"<Tool Result: {result}>\n"
 
 
+_THINKING_OPEN = "<Thinking>\n"
+_THINKING_CLOSE = "\n</Thinking>\n"
+
+
+def _transcript_thinking(text: str) -> str:
+    """The Copy-action fragment for one complete thinking part.
+
+    One owner of the wrapped form: the history renderer and the streaming
+    accumulator both build the copy transcript through it, so a reasoning
+    turn copies identically mid-stream and after re-render. The canonical
+    form is the wrapped one — it matches the persistent post-render copy
+    users keep once the turn completes.
+    """
+    return f"{_THINKING_OPEN}{text}{_THINKING_CLOSE}"
+
+
+def _transcript_thinking_open(text: str = "") -> str:
+    """The streaming path grows a thinking region incrementally: the opener
+    carries any content that arrived with the part start; deltas append raw
+    and the closer lands when the part closes. Open + deltas + close is
+    exactly ``_transcript_thinking``."""
+    return f"{_THINKING_OPEN}{text}"
+
+
+def _transcript_thinking_close() -> str:
+    return _THINKING_CLOSE
+
+
 def _transcript_summary(actions: list[str], explanation: str) -> str:
     return f"<Summary>\n{actions}\n{explanation}\n</Summary>\n"
 

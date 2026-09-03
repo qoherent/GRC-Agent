@@ -1715,7 +1715,10 @@ class ChatSidebar(
                     agent_mode=origin_agent_mode,
                     fallback_text=prompt,
                 )
-                asyncio.ensure_future(self._save_history())
+                # Tracked like every other fire-and-forget: a bare
+                # ensure_future here was invisible to _cancel_background_tasks,
+                # so a racing clear orphaned the handle (U3/F-04).
+                self._track_background_task(asyncio.ensure_future(self._save_history()))
                 self._append_error("[aborted]", style="aborted")
                 rich_rendered = True
             raise
