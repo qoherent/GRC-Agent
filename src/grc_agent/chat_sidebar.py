@@ -1655,7 +1655,16 @@ class ChatSidebar(Gtk.Box):
             return
 
         self._active_session_id = session_id
-        self._message_history = deserialize_messages(session_data["messages"])
+        loaded = _clean_message_history_for_new_turn(
+            deserialize_messages(session_data["messages"])
+        )
+        loaded, had_truncated_thinking = _without_truncated_thinking_tail(loaded)
+        if had_truncated_thinking:
+            _log.warning(
+                "Dropped an unarchived truncated-thinking tail while loading session %d",
+                session_id,
+            )
+        self._message_history = loaded
         self._select_executor()
         self._render_history()
 
@@ -3058,16 +3067,6 @@ class ChatSidebar(Gtk.Box):
                 return
 
             ctx = _StreamCtx(self._start_agent_message())
-            cleaned_history, had_truncated_thinking = _without_truncated_thinking_tail(
-                self._message_history
-            )
-            if had_truncated_thinking and await self._archive_truncated_thinking(
-                self._message_history,
-                origin_session_id,
-                origin_agent_mode,
-            ):
-                self._message_history = cleaned_history
-            self._message_history = _clean_message_history_for_new_turn(self._message_history)
 
             # Human-in-the-loop approval loop: change_graph requires approval
             # (pydantic-ai requires_approval=True), so a run can END with a

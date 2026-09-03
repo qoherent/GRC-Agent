@@ -240,6 +240,61 @@ def test_open_recent_session_tab_switching(tmp_path):
     notebook.set_current_page.assert_called_once_with(0)
 
 
+def test_open_recent_session_cleans_a_dangling_tool_call(tmp_path):
+    """A session persisted mid-approval-pause (or by a pre-fix build) can end
+    on a ModelResponse with an unfulfilled tool call — pydantic-ai rejects any
+    new prompt sent against such a history. Loading it now cleans it at the
+    read boundary, so U15's turn-start no longer needs to repair it again on
+    every send (AGENTS.md section 1: fix state problems at the source)."""
+    from unittest.mock import MagicMock, patch
+
+    from pydantic_ai.messages import ModelRequest, ModelResponse, ToolCallPart, UserPromptPart
+
+    from grc_agent.chat_sidebar import ChatSidebar
+    from grc_agent.db import serialize_messages
+
+    sidebar = ChatSidebar()
+    proxy = MagicMock()
+    cm = MagicMock()
+    window = MagicMock()
+    notebook = MagicMock()
+    proxy._canvas_manager = cm
+    cm.window = window
+    window.notebook = notebook
+    sidebar.set_flowgraph_proxy(proxy)
+
+    file_real = tmp_path / "dangling.grc"
+    file_real.touch()
+    page = MagicMock()
+    page.file_path = str(file_real)
+    notebook.get_n_pages.return_value = 1
+    notebook.get_nth_page.return_value = page
+
+    dangling_messages = [
+        ModelRequest(parts=[UserPromptPart(content="add a throttle block")]),
+        ModelResponse(
+            parts=[
+                ToolCallPart(
+                    tool_name="change_graph",
+                    args={"add": []},
+                    tool_call_id="call_1",
+                )
+            ]
+        ),
+    ]
+    with patch("grc_agent.chat_sidebar.load_session") as mock_load:
+        mock_load.return_value = {
+            "id": 456,
+            "grc_file_path": str(file_real),
+            "messages": serialize_messages(dangling_messages),
+            "created_at": "...",
+            "updated_at": "...",
+        }
+        sidebar._on_recent_session_clicked(456)
+
+    assert sidebar._message_history == dangling_messages[:1]
+
+
 def test_sidebar_session_no_autoload_on_graph_open(tmp_path, monkeypatch):
     """Graphs never auto-load chats. Opening/switching a graph tab clears the
     chat area to a fresh welcome screen — no session lookup by path. The only
