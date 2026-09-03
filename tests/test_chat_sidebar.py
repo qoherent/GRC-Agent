@@ -813,7 +813,8 @@ def test_streaming_text_flush_is_throttled(monkeypatch):
     bypasses it. Time is mocked for determinism."""
     from gi.repository import Gtk
 
-    from grc_agent.chat_sidebar import ChatSidebar, _ChunkAccumulator, _StreamCtx
+    from grc_agent.chat.stream_view import _ChunkAccumulator
+    from grc_agent.chat_sidebar import ChatSidebar, _StreamCtx
 
     sidebar = ChatSidebar()
     ctx = _StreamCtx(Gtk.Box())
@@ -878,7 +879,7 @@ def test_chunk_accumulator_replace_chunk():
     """replace_chunk patches an unflushed chunk in place without reordering
     -- the mechanism the copy-transcript fix uses to turn a call-only
     fragment into the combined call+result shape once the result arrives."""
-    from grc_agent.chat_sidebar import _ChunkAccumulator
+    from grc_agent.chat.stream_view import _ChunkAccumulator
 
     acc = _ChunkAccumulator()
     acc.append("<Tool Call: x>\n")
@@ -907,7 +908,8 @@ def test_streaming_thinking_flush_throttled(monkeypatch):
     tokens are throttled the same way and force=True flushes them."""
     from gi.repository import Gtk
 
-    from grc_agent.chat_sidebar import ChatSidebar, _ChunkAccumulator, _StreamCtx
+    from grc_agent.chat.stream_view import _ChunkAccumulator
+    from grc_agent.chat_sidebar import ChatSidebar, _StreamCtx
 
     sidebar = ChatSidebar()
     ctx = _StreamCtx(Gtk.Box())
@@ -1026,7 +1028,8 @@ def test_thinking_expander_auto_scroll_and_tall_sizing():
     """Thinking widget is configured with increased height and auto-scrolls during streaming."""
     from gi.repository import Gtk
 
-    from grc_agent.chat_sidebar import ChatSidebar, _ChunkAccumulator, _StreamCtx
+    from grc_agent.chat.stream_view import _ChunkAccumulator
+    from grc_agent.chat_sidebar import ChatSidebar, _StreamCtx
 
     sidebar = ChatSidebar()
     ctx = _StreamCtx(Gtk.Box())
@@ -4281,7 +4284,8 @@ def test_chat_ctrl_scroll_zooms_canvas_and_consumes_gesture():
     gi.require_version("Gdk", "3.0")
     from gi.repository import Gdk, Gtk
 
-    from grc_agent.chat_sidebar import _SCROLL_STICK_THRESHOLD, ChatSidebar
+    from grc_agent.chat.constants import _SCROLL_STICK_THRESHOLD
+    from grc_agent.chat_sidebar import ChatSidebar
 
     sidebar = ChatSidebar()
     proxy = MagicMock()
