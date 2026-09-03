@@ -111,7 +111,7 @@ Active feature requests, architectural improvements, and planned capabilities. C
 
 ### 10. Scenario suite needs a stronger default model than the free tiers
 * **Status**: 🧪 Open finding (recorded 2026-09-03)
-* **Evidence**: all three free OpenRouter models tried this session fail the schema-strict `01_add_throttle` scenario — `dots-studio/dots-3-note-preview:free` exhausted `inspect_graph` retries; `poolside/laguna-s-2.1:free` saturated upstream (HTTP 429); `inclusionai/ling-3.0-flash-fin:free` (the current default, matching `.env`) produced a schema-invalid `change_graph` call and exhausted retries.
+* **Evidence**: all three free OpenRouter models tried this session fail the schema-strict `01_add_throttle` scenario — `dots-studio/dots-3-note-preview:free` exhausted `inspect_graph` retries; `poolside/laguna-s-2.1:free` saturated upstream (HTTP 429); `inclusionai/ling-3.0-flash-fin:free` (the current default, matching `.env`) double-encoded `add_blocks` as a JSON string instead of an array — the only validation error in the call, repeated across all 3 retries. Minimal-probe verification shows ling conforms on the identical nested-array shape in small contexts, so it is encoding reliability under the full tool surface, not missing capability. Decision (2026-09-03): the tool contract stays strict — no tolerated coercion of string-encoded arrays (user-directed).
 * **Options**: default scenarios to a stronger OpenRouter model (per-run `GRC_OPENROUTER_MODEL` override until chosen), or run scenarios on `GRC_TEST_BACKEND=ollama_cloud` (the origin plan's baseline shows the selected scenarios passing there).
 
 ---
