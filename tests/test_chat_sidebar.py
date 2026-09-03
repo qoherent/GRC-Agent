@@ -225,7 +225,7 @@ def test_open_recent_session_tab_switching(tmp_path):
     orig_cwd = os.getcwd()
     os.chdir(str(tmp_path))
     try:
-        with patch("grc_agent.chat_sidebar.load_session") as mock_load:
+        with patch("grc_agent.chat.session.load_session") as mock_load:
             mock_load.return_value = {
                 "id": 123,
                 "grc_file_path": str(file_real.resolve()),
@@ -282,7 +282,7 @@ def test_open_recent_session_cleans_a_dangling_tool_call(tmp_path):
             ]
         ),
     ]
-    with patch("grc_agent.chat_sidebar.load_session") as mock_load:
+    with patch("grc_agent.chat.session.load_session") as mock_load:
         mock_load.return_value = {
             "id": 456,
             "grc_file_path": str(file_real),
@@ -417,7 +417,7 @@ def test_delete_recent_session_ui(monkeypatch):
     sidebar._render_history = MagicMock()
 
     mock_delete = MagicMock()
-    monkeypatch.setattr("grc_agent.chat_sidebar.delete_session", mock_delete)
+    monkeypatch.setattr("grc_agent.chat.session.delete_session", mock_delete)
 
     mock_dialog = MagicMock()
     monkeypatch.setattr(Gtk, "MessageDialog", MagicMock(return_value=mock_dialog))
@@ -802,7 +802,7 @@ def test_streaming_text_flush_is_throttled(monkeypatch):
     assert ctx.text_lbl is not None
 
     t = [0.0]
-    monkeypatch.setattr("grc_agent.chat_sidebar.time.monotonic", lambda: t[0])
+    monkeypatch.setattr("grc_agent.chat.stream_view.time.monotonic", lambda: t[0])
 
     # First flush at t=0 with last_flush=0.0 -> (0 - 0.0) < interval -> skip.
     ctx.text_acc = _ChunkAccumulator("chunk1")
@@ -898,7 +898,7 @@ def test_streaming_thinking_flush_throttled(monkeypatch):
     ctx.think_expander.set_expanded(True)
 
     t = [0.0]
-    monkeypatch.setattr("grc_agent.chat_sidebar.time.monotonic", lambda: t[0])
+    monkeypatch.setattr("grc_agent.chat.stream_view.time.monotonic", lambda: t[0])
 
     ctx.think_acc = _ChunkAccumulator("thought1")
     ctx.think_dirty = True
@@ -1592,7 +1592,8 @@ def test_truncated_thinking_is_archived_before_active_history_cleanup(tmp_path, 
     from pydantic_ai.messages import ModelRequest, ModelResponse, ThinkingPart, UserPromptPart
     from pydantic_ai_harness.step_persistence import continue_run
 
-    from grc_agent.chat_sidebar import ChatSidebar, _without_truncated_thinking_tail
+    from grc_agent.chat.history import _without_truncated_thinking_tail
+    from grc_agent.chat_sidebar import ChatSidebar
     from grc_agent.db import conversation_id_for_session, get_step_store, save_session
 
     monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
@@ -1646,7 +1647,7 @@ def test_save_history_is_async_and_offloads_to_thread(monkeypatch):
         return asyncio.to_thread(fn, *a, **k)
 
     monkeypatch.setattr("grc_agent.chat_sidebar.asyncio.to_thread", fake_to_thread)
-    monkeypatch.setattr("grc_agent.chat_sidebar.save_session", MagicMock(return_value=7))
+    monkeypatch.setattr("grc_agent.chat.session.save_session", MagicMock(return_value=7))
 
     asyncio.run(sidebar._save_history())
     assert used["to_thread"] is True
@@ -1919,9 +1920,9 @@ def test_save_history_deletes_session_resurrected_by_concurrent_clear(monkeypatc
         return _runner()
 
     monkeypatch.setattr("grc_agent.chat_sidebar.asyncio.to_thread", fake_to_thread)
-    monkeypatch.setattr("grc_agent.chat_sidebar.save_session", MagicMock(return_value=42))
+    monkeypatch.setattr("grc_agent.chat.session.save_session", MagicMock(return_value=42))
     mock_delete = MagicMock()
-    monkeypatch.setattr("grc_agent.chat_sidebar.delete_session", mock_delete)
+    monkeypatch.setattr("grc_agent.chat.session.delete_session", mock_delete)
 
     async def _run():
         task = asyncio.ensure_future(sidebar._save_history())
@@ -2126,7 +2127,8 @@ def test_context_label_updates_with_pydantic_ai_usage(tmp_path, monkeypatch):
         _context_negative_cache,
         resolve_model_context_length,
     )
-    from grc_agent.chat_sidebar import ChatSidebar, format_tokens
+    from grc_agent.chat.format import format_tokens
+    from grc_agent.chat_sidebar import ChatSidebar
     from grc_agent.db import deserialize_messages, serialize_messages
 
     assert format_tokens(1200) == "1.2k"

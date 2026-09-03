@@ -11,7 +11,6 @@ Message history is stored as pydantic-ai's native ``ModelMessage`` objects.
 
 import asyncio
 import logging
-import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -30,35 +29,20 @@ from pydantic_ai.messages import (
     ModelMessage,
 )
 
-from .agent_factory import aresolve_model_context_length, describe_model
+from .agent_factory import describe_model
 from .chat.approvals import ApprovalsMixin
 from .chat.composer import ComposerMixin
 from .chat.constants import _is_near_bottom
-from .chat.format import format_tokens
-from .chat.history import (
-    _clean_message_history_for_new_turn,
-    _without_truncated_thinking_tail,
-)
+from .chat.session import SessionMixin
 from .chat.settings_controller import SettingsControllerMixin
+from .chat.status_view import StatusContextMixin
 from .chat.stream_view import StreamViewMixin
 from .chat.transcript_view import TranscriptViewMixin
 from .chat.turn_driver import TurnDriverMixin
-from .chat.usage import (
-    _collect_token_usage,
-    _format_native_cost,
-    _run_usage_cost_override,
-    _run_usage_output_override,
-)
 from .chat.zoom_projection import ZoomProjectionMixin
 from .db import (
     archive_transcript,
     conversation_id_for_session,
-    delete_all_sessions,
-    delete_session,
-    deserialize_messages,
-    load_plan_items,
-    load_session,
-    save_session,
 )
 from .settings import (
     get_env_value,
@@ -85,6 +69,8 @@ class ChatSidebar(
     ApprovalsMixin,
     ZoomProjectionMixin,
     SettingsControllerMixin,
+    SessionMixin,
+    StatusContextMixin,
     TurnDriverMixin,
     Gtk.Box,
 ):
@@ -459,133 +445,6 @@ class ChatSidebar(
 
         content.pack_start(self._scrolled, True, True, 0)
 
-    def _schedule_context_window_probe(self, provider: str, model: str) -> None:
-        """Resolve the model's context window once, off the unified loop."""
-        if not provider or not model:
-            return
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            # Called from a synchronous render path with no loop running (a
-            # headless test, or before install()). Leave the key unprobed so
-            # the next call under the unified loop schedules it.
-            return
-        key = (provider, model)
-        self._context_window_probed.add(key)
-
-        async def _probe() -> None:
-            try:
-                window = await aresolve_model_context_length(provider, model)
-            except Exception as exc:  # never let a probe break a turn
-                _log.debug("context-window probe failed for %s/%s: %s", provider, model, exc)
-                return
-            if window is not None:
-                self._context_window_cache[key] = window
-                self._update_context_label()
-
-        task = loop.create_task(_probe())
-        self._context_window_tasks.add(task)
-        task.add_done_callback(self._context_window_tasks.discard)
-
-    def _current_messages(self) -> list[ModelMessage]:
-        """The one authoritative answer to "what are the messages right now".
-
-        self._message_history is the STABLE snapshot, only reassigned at a
-        few discrete points in the turn's lifecycle (a new prompt appended,
-        the turn's final result, an approval-pause checkpoint) — it goes
-        stale the moment a run starts streaming and stays stale until one of
-        those points lands. self._active_run.all_messages() is live and
-        current for exactly the window a run is in flight. Everything that
-        needs "the current transcript" reads through this one method rather
-        than re-deriving which of the two to trust.
-        """
-        return (
-            self._active_run.all_messages()
-            if self._active_run is not None
-            else self._message_history
-        )
-
-    def _update_context_label(self) -> None:
-        """Update the context usage label under the input box using Pydantic AI's native msg.usage."""
-        msgs = self._current_messages()
-        (
-            last_input_tokens,
-            last_output_tokens,
-            last_reasoning_tokens,
-            total_session_tokens,
-            last_turn_cost,
-            has_usage,
-        ) = _collect_token_usage(msgs)
-        # The run's own aggregated usage is the authoritative per-turn total:
-        # all_messages() includes prior turns' responses, and the
-        # last-response-only extraction undercounts multi-request turns. The
-        # context label's main number (last_input_tokens) keeps the
-        # last-response semantic — it is the context size at the end of the
-        # turn.
-        last_output_tokens, last_reasoning_tokens = _run_usage_output_override(
-            self._active_run, last_output_tokens, last_reasoning_tokens
-        )
-        last_turn_cost, has_usage = _run_usage_cost_override(
-            self._active_run, last_turn_cost, has_usage
-        )
-
-        active_provider = self._active_provider or ""
-        active_model = self._active_model or ""
-        # Read a cached value only. This runs inside the agent.iter() node
-        # loop — after every node — and resolve_model_context_length makes a
-        # blocking 3s HTTP request on a cache miss, which stalled the unified
-        # GTK+asyncio loop mid-stream and did it again whenever the 60s
-        # negative-cache TTL expired. The refresh happens off-loop instead,
-        # scheduled once per (provider, model).
-        max_context = self._context_window_cache.get((active_provider, active_model))
-        if max_context is None and (active_provider, active_model) not in self._context_window_probed:
-            self._schedule_context_window_probe(active_provider, active_model)
-
-        pct: float | None = None
-        if not msgs or last_input_tokens == 0:
-            text = f"0 / {format_tokens(max_context)} tok" if max_context else "0 tok"
-        else:
-            if max_context:
-                pct = min(100.0, (last_input_tokens / max_context) * 100)
-                text = (
-                    f"{format_tokens(last_input_tokens)} / {format_tokens(max_context)} tok ({pct:.0f}%)"
-                )
-            else:
-                text = f"{format_tokens(last_input_tokens)} tok"
-
-        if has_usage:
-            cost_text = (
-                f"Cost: {_format_native_cost(last_turn_cost)}"
-                if last_turn_cost is not None
-                else "Cost: N/A"
-            )
-            text = f"{text} · {cost_text}"
-
-        # Escalation ramp via CSS classes (ui/css.py): quiet at 0-74%,
-        # bold at 75-89%, theme accent at >=90%. No hardcoded colors.
-        ctx_classes = self._context_label.get_style_context()
-        ctx_classes.remove_class("warn")
-        ctx_classes.remove_class("alarm")
-        if pct is not None:
-            if pct >= 90:
-                ctx_classes.add_class("alarm")
-            elif pct >= 75:
-                ctx_classes.add_class("warn")
-        self._context_label.set_text(text)
-        reasoning_str = (
-            f" ({last_reasoning_tokens:,} reasoning)" if last_reasoning_tokens else ""
-        )
-        self._context_label.set_tooltip_text(
-            f"Active model: {active_model or 'default'}\n"
-            f"Provider: {active_provider or 'unknown'}\n"
-            f"Last turn input context: {last_input_tokens:,} tokens\n"
-            f"Last turn output: {last_output_tokens:,} tokens{reasoning_str}\n"
-            f"Total session tokens: {total_session_tokens:,} tokens\n"
-            f"Native Pydantic AI last-turn cost: "
-            f"{_format_native_cost(last_turn_cost) if last_turn_cost is not None else 'unavailable for one or more provider/model responses'}\n"
-            f"Max model context: {f'{max_context:,}' if max_context else 'unknown'}"
-        )
-
     def _build_status_bar(self, content: Gtk.Box) -> None:
         bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         bar.get_style_context().add_class("chat-status-bar")
@@ -610,307 +469,6 @@ class ChatSidebar(
         bar.pack_end(self._wait_label, False, False, 0)
 
         content.pack_start(bar, False, False, 0)
-
-    def set_status(self, msg: str, *, error: bool = False, background: bool = False) -> None:
-        """Update the status bar.
-
-        Errors are sticky — a background message (``background=True``, e.g.
-        the indexing poll) cannot overwrite a current error. User-initiated
-        actions (the default) and other errors always overwrite. One uniform
-        rule that keeps save errors / preflight failures / unreachable-backend
-        warnings visible past the next "Catalog indexed" transition (M5).
-        """
-        if background and not error and self._status_is_error:
-            return
-        self._status_label.set_text(msg)
-        self._status_is_error = error
-        if error:
-            self._status_label.get_style_context().add_class("validation-invalid")
-        else:
-            self._status_label.get_style_context().remove_class("validation-invalid")
-
-    # -- model-wait elapsed indicator --------------------------------------
-    # One uniform rule: the label is visible exactly while a model request
-    # is awaited in the turn loop (start before `await _stream_request`, stop
-    # in the finally). Tool execution shows its own expanders — no timer
-    # there.
-
-    def _model_wait_start(self) -> None:
-        if self._wait_timer_id is not None:
-            return
-        self._wait_started = time.monotonic()
-        self._update_wait_label()
-        self._wait_label.show()
-        self._wait_timer_id = GLib.timeout_add_seconds(1, self._on_wait_tick)
-
-    def _on_wait_tick(self) -> bool:
-        self._update_wait_label()
-        return GLib.SOURCE_CONTINUE
-
-    def _update_wait_label(self) -> None:
-        secs = max(0, int(time.monotonic() - self._wait_started))
-        text = f"{secs}s" if secs < 60 else f"{secs // 60}m{secs % 60:02d}s"
-        self._wait_label.set_text(f"Waiting for model\u2026 {text}")
-
-    def _model_wait_stop(self) -> None:
-        if self._wait_timer_id is not None:
-            GLib.source_remove(self._wait_timer_id)
-            self._wait_timer_id = None
-        self._wait_label.hide()
-
-    def _domain_label(self, domain: str | None) -> str:
-        if domain == "catalog":
-            return "block library"
-        if domain == "docs":
-            return "documentation"
-        return "index"
-
-    def _poll_indexing(self) -> bool:
-        """Surface RAG index-build progress in the status bar.
-
-        Builds run on worker threads (dispatched via ``asyncio.to_thread`` from
-        the agent tools) and mutate the per-domain ``_rag_building`` entries in
-        place. This polls from the main loop so no cross-thread widget calls are
-        needed (CPython per-key dict reads/writes are atomic). Catalog and docs
-        builds can run concurrently (pydantic-ai runs tools in parallel), so
-        status is tracked per-domain. Only writes the status bar while a build
-        is in progress or on a transition — never when idle — so it can't
-        clobber other messages.
-        """
-        from .adapter import build_status
-
-        # build_status() returns a snapshot: the worker thread may add a
-        # domain entry concurrently, and iterating the live dict raises.
-        building_msg: str | None = None
-        for domain, entry in build_status().items():
-            if not entry:
-                continue
-            status = entry.get("status")
-            last = self._last_index_state.get(domain)
-            label = self._domain_label(domain)
-            if status == "building":
-                self._last_index_state[domain] = "building"
-                # Show progress for the first building domain found; a second
-                # concurrent build is rare and its transition is still notified.
-                if building_msg is None:
-                    current = entry.get("current", 0)
-                    total = entry.get("total", 0)
-                    if total:
-                        building_msg = f"Indexing {label} for search\u2026 {current}/{total}"
-                    else:
-                        building_msg = f"Indexing {label} for search\u2026"
-            elif status in ("ready", "failed") and last != status:
-                # Terminal transition for this domain — notify exactly once.
-                self._last_index_state[domain] = status
-                self._last_index_msg = None
-                if status == "ready":
-                    # `indexed` is the actually-embedded count (may be < total).
-                    n = entry.get("indexed", entry.get("total", 0))
-                    # background=True so a "Catalog indexed" transition can't
-                    # clobber a sticky save/preflight error the user still
-                    # needs to read (M5).
-                    self.set_status(
-                        f"{label.capitalize()} indexed \u2014 {n} entries ready for search.",
-                        background=True,
-                    )
-                else:
-                    # Indexing failures ARE surfaced — they're actionable
-                    # ("search may return no or stale results") and the
-                    # error class is preserved by the sticky rule.
-                    self.set_status(
-                        f"{label.capitalize()} indexing failed; search may return no or stale results.",
-                        error=True,
-                    )
-                return True  # re-arm
-        if building_msg is not None and building_msg != self._last_index_msg:
-            self._last_index_msg = building_msg
-            self.set_status(building_msg, background=True)
-        return True  # re-arm
-
-    def _on_clear_history_clicked(self, _widget: Gtk.Button | None = None) -> None:
-        _log.info("Clear History: button clicked")
-        dialog = Gtk.MessageDialog(
-            transient_for=self.get_toplevel()
-            if isinstance(self.get_toplevel(), Gtk.Window)
-            else None,
-            modal=True,
-            message_type=Gtk.MessageType.QUESTION,
-            buttons=Gtk.ButtonsType.YES_NO,
-            text="Clear ALL Chat History",
-        )
-        dialog.format_secondary_text(
-            "This will permanently delete EVERY saved chat session for all flowgraphs. "
-            "This cannot be undone."
-        )
-        self._open_dialog = dialog
-
-        def _on_response(_dlg: Gtk.Dialog, response: int) -> None:
-            _log.info("Clear History: dialog response=%s (YES=%s)", response, Gtk.ResponseType.YES)
-            self._open_dialog = None
-            dialog.destroy()
-            if response != Gtk.ResponseType.YES:
-                return
-            # Global clear: delete every saved session. The toolbar button is not
-            # tied to a specific flowgraph, and the welcome screen lists sessions
-            # across all files — so scoping the delete to "the active flowgraph's
-            # path" (the old behavior) silently did nothing when no flowgraph was
-            # saved/active (path=None, sid=None), which is exactly the case where
-            # the user is staring at the recent-sessions list. Per-session
-            # deletion stays available via the per-row delete buttons.
-            try:
-                delete_all_sessions()
-                _log.info("Clear History: deleted all sessions")
-            except Exception as e:
-                _log.exception("Failed to delete all sessions")
-                self.clear_messages()
-                self.set_status(f"Failed to clear history ({e})", error=True)
-                return
-            self.clear_messages()
-            self.set_status("All chat history cleared.")
-
-        dialog.connect("response", _on_response)
-        dialog.show()
-        _log.info("Clear History: dialog shown, awaiting response")
-
-    def _on_compact_clicked(self, _btn: Gtk.Button) -> None:
-        """Confirm before manual compaction to prevent accidental summaries."""
-        if self._busy or self._agent is None or not self._message_history:
-            return
-        if self._active_session_id is None:
-            # No session row = no conversation id: the pre-compact snapshot
-            # cannot be registered, so compacting would destroy the only
-            # (in-memory) copy of the summarized turns. Refuse.
-            self.set_status("Cannot compact — history is not saved to a session yet.", error=True)
-            return
-
-        dialog = Gtk.MessageDialog(
-            transient_for=self.get_toplevel()
-            if isinstance(self.get_toplevel(), Gtk.Window)
-            else None,
-            modal=True,
-            destroy_with_parent=True,
-            message_type=Gtk.MessageType.QUESTION,
-            buttons=Gtk.ButtonsType.YES_NO,
-            text="Compact Conversation?",
-        )
-        dialog.format_secondary_text(
-            "Older messages in the active context will be summarized using the current model. "
-            "The complete pre-compaction transcript remains saved for history and dataset collection."
-        )
-        dialog.set_default_response(Gtk.ResponseType.NO)
-        self._open_dialog = dialog
-
-        def _on_response(_dlg: Gtk.Dialog, response: int) -> None:
-            self._open_dialog = None
-            dialog.destroy()
-            if response != Gtk.ResponseType.YES:
-                return
-            if self._busy or self._agent is None or not self._message_history:
-                return
-            if self._active_session_id is None:
-                self.set_status(
-                    "Cannot compact — history is not saved to a session yet.", error=True
-                )
-                return
-            self._set_busy(True)
-            self._compact_task = self._track_background_task(
-                asyncio.ensure_future(self._run_compact_now())
-            )
-
-        dialog.connect("response", _on_response)
-        dialog.show()
-
-    async def _run_compact_now(self) -> None:
-        try:
-            from pydantic_ai_harness.compaction import compact_now
-
-            from .agent_factory import make_summarizing_strategy
-
-            # _on_compact_clicked guarantees an agent before spawning; derive
-            # the model here (inside the try, so no early return can skip the
-            # finally that clears busy).
-            agent = self._agent
-            model = agent.model if agent is not None else None
-
-            # D3: snapshot the pre-compact history first so ConversationSearch
-            # can still recall what the summary drops.
-            sid = self._active_session_id
-            if sid is not None:
-                await archive_transcript(
-                    self._message_history,
-                    conversation_id=conversation_id_for_session(sid),
-                    agent_name=self._archive_agent_name(),
-                    kind="manual_compaction_transcript",
-                )
-
-            strategy = make_summarizing_strategy()
-            compacted = await compact_now(
-                strategy,
-                self._message_history,
-                model=model,  # D1: model=None inherits this
-            )
-            strategy_keep = strategy.keep_messages
-            had_work = len(self._message_history) > strategy_keep
-            if compacted is not self._message_history and compacted != self._message_history:
-                self._message_history = compacted
-                await self._save_history()
-                self._render_history()
-                self.set_status("History compacted — older messages summarized.")
-            elif had_work:
-                # More than keep_messages messages and STILL unchanged: the
-                # summary call itself failed (D2 kept the history — e.g. Codex,
-                # whose transport rejects the non-streaming summarizer).
-                self.set_status(
-                    "Compaction failed — summary unavailable, history unchanged.",
-                    error=True,
-                )
-            else:
-                self.set_status("History is already compact — nothing to summarize.")
-        except Exception as e:
-            _log.warning("compact_now failed: %s", e, exc_info=True)
-            self.set_status("Compaction failed — history unchanged.", error=True)
-        finally:
-            self._set_busy(False)
-            self._update_context_label()
-
-    def _on_delete_recent_session(self, session_id: int) -> None:
-        """Delete a saved conversation after a confirmation dialog — mirrors the
-        per-row delete-with-confirm of the reference web UI sidebar. The dialog
-        is non-blocking (signal-based under gbulb) and anchored on `self` so
-        PyGObject doesn't GC it mid-response (same pattern as Clear History)."""
-        toplevel = self.get_toplevel()
-        if not isinstance(toplevel, Gtk.Window):
-            toplevel = None
-        dialog = Gtk.MessageDialog(
-            transient_for=toplevel,
-            modal=True,
-            destroy_with_parent=True,
-            message_type=Gtk.MessageType.QUESTION,
-            buttons=Gtk.ButtonsType.YES_NO,
-            text="Delete this conversation?",
-        )
-        dialog.format_secondary_text(
-            "This will permanently delete the conversation and cannot be undone."
-        )
-        self._open_dialog = dialog
-
-        def _on_response(_dlg: Gtk.Dialog, response: int) -> None:
-            self._open_dialog = None
-            dialog.destroy()
-            if response != Gtk.ResponseType.YES:
-                return
-            try:
-                delete_session(session_id)
-                if self._active_session_id == session_id:
-                    self._active_session_id = None
-                    self._message_history = []
-            except Exception as e:
-                _log.error("Failed to delete session %s: %s", session_id, e)
-                self.set_status(f"Failed to delete session: {e}", error=True)
-            self._render_history()
-
-        dialog.connect("response", _on_response)
-        dialog.show()
 
     def set_blocks_expanded(self, expanded: bool) -> None:
         self._blocks_expanded = expanded
@@ -1108,22 +666,6 @@ class ChatSidebar(
         self._select_executor()
         self._render_history()
 
-    def clear_messages(self) -> None:
-        # Bump the generation first so any in-flight _save_history worker
-        # (uncancellable) will undo its own INSERT instead of resurrecting a
-        # session the user just cleared (see _save_history), and so any
-        # in-flight _run_agent_turn's CancelledError handler recognizes this
-        # clear and skips re-populating the listbox it just wiped.
-        self._clear_generation += 1
-        self._cancel_background_tasks()
-        self._implement_plan_task = None
-        self._remove_implement_plan_action()
-        self._message_history = []
-        self._active_session_id = None
-        self._select_executor()
-        self._compact_btn.set_sensitive(False)
-        self._render_history()
-
     def _refresh_welcome_times(self) -> bool:
         """Periodically re-render the welcome/recent-sessions list so the
         relative timestamps ("2m ago") stay fresh. Only runs when idle and the
@@ -1144,78 +686,6 @@ class ChatSidebar(
         self.grab_entry_focus()
         self.send_message(text)
 
-    def _on_recent_session_clicked(self, session_id: int) -> None:
-        if self._busy:
-            self.set_status(
-                "Stop or wait for the current response before switching sessions.", error=True
-            )
-            return
-        session_data = load_session(session_id)
-        if not session_data:
-            self.set_status("Session not found in database.", error=True)
-            return
-
-        path = session_data["grc_file_path"]
-        if not path or not Path(path).exists():
-            self.set_status("Associated file not found on disk.", error=True)
-            return
-
-        self._active_session_id = session_id
-        loaded = _clean_message_history_for_new_turn(
-            deserialize_messages(session_data["messages"])
-        )
-        loaded, had_truncated_thinking = _without_truncated_thinking_tail(loaded)
-        if had_truncated_thinking:
-            _log.warning(
-                "Dropped an unarchived truncated-thinking tail while loading session %d",
-                session_id,
-            )
-        self._message_history = loaded
-        self._select_executor()
-        self._render_history()
-
-        self._loading_session_id = session_id
-        try:
-            self._switch_or_open_file(path)
-        finally:
-            self._loading_session_id = None
-
-    def _switch_or_open_file(self, path: str) -> None:
-        cm = self._get_cm()
-        if not cm or not cm.window:
-            self.set_status("GRC window not available.", error=True)
-            return
-
-        notebook = getattr(cm.window, "notebook", None)
-        if not notebook:
-            self.set_status("GRC notebook not available.", error=True)
-            return
-
-        target_path = Path(path).resolve()
-        switched = False
-        for i in range(notebook.get_n_pages()):
-            p = notebook.get_nth_page(i)
-            p_path = getattr(p, "file_path", None)
-            if p_path:
-                try:
-                    if Path(p_path).resolve() == target_path:
-                        notebook.set_current_page(i)
-                        self.set_status("Switched to active tab.")
-                        switched = True
-                        break
-                except Exception:
-                    _log.debug(
-                        "recent-session: skipping page %r during resolve", p_path, exc_info=True
-                    )
-
-        if not switched:
-            try:
-                cm.window.new_page(path, show=True)
-                self.set_status("Opened session file.")
-            except Exception as e:
-                _log.error("Failed to open recent session file %s: %s", path, e)
-                self.set_status(f"Failed to open session: {e}", error=True)
-
     def _get_effective_path(self) -> str | None:
         if self._flowgraph_proxy is None:
             return None
@@ -1226,35 +696,6 @@ class ChatSidebar(
             return cm.path
         page_title = getattr(cm, "page_title", "untitled.grc") or "untitled.grc"
         return f"untitled:{page_title}"
-
-    async def _save_history(self) -> None:
-        if self._active_session_id is None:
-            return
-        path = self._get_effective_path()
-        if not path:
-            return
-        # Capture the clear-generation BEFORE dispatching. The save runs on a
-        # worker thread that can't be cancelled; if a global Clear History runs
-        # while it's in flight, the worker's save_session can INSERT a row that
-        # resurrects a session the user just deleted. After the await, if the
-        # generation changed, undo that resurrection. (Both reads of
-        # _clear_generation happen on the main loop — no cross-thread access.)
-        gen = self._clear_generation
-        try:
-            new_id = await asyncio.to_thread(
-                save_session, self._active_session_id, path, self._message_history
-            )
-        except Exception as e:
-            _log.error("Failed to save chat history to database: %s", e)
-            return
-        if new_id is not None and gen != self._clear_generation:
-            try:
-                # Off-thread like the save two lines above: this is the undo for
-                # that same write, and it was the one SQLite call in this async
-                # function still running on the GLib loop.
-                await asyncio.to_thread(delete_session, new_id)
-            except Exception:
-                _log.exception("Failed to remove session resurrected by in-flight save")
 
     async def _archive_truncated_thinking(
         self,
@@ -1347,95 +788,6 @@ class ChatSidebar(
         """StepPersistence's agent name for the active role — the same value
         `agent_factory` passes as `agent_name=`, derived in one place."""
         return f"grc_{self._agent_mode}"
-
-    def _remove_implement_plan_action(self) -> None:
-        row = self._implement_plan_row
-        if row is not None and row.get_parent() is self._listbox:
-            self._listbox.remove(row)
-        self._implement_plan_row = None
-        self._implement_plan_button = None
-
-    def _append_implement_plan_action(self, session_id: int) -> None:
-        """Render the user-controlled planner → executor handoff in chat."""
-        self._remove_implement_plan_action()
-
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
-        box.set_hexpand(True)
-        box.get_style_context().add_class("chat-plan-action-box")
-
-        label = Gtk.Label(label="Plan ready for the GRC agent.")
-        label.set_xalign(0.0)
-        label.set_halign(Gtk.Align.FILL)
-        box.pack_start(label, False, False, 0)
-
-        button = Gtk.Button(label="Implement the Plan")
-        button.set_hexpand(True)
-        button.set_halign(Gtk.Align.FILL)
-        button.set_tooltip_text(
-            "Switch to GRC-Agent and begin implementing the durable plan"
-        )
-        button.get_accessible().set_name("Implement the Plan")
-        button.get_style_context().add_class("chat-implement-plan-btn")
-        button.set_sensitive(not self._busy)
-        button.connect(
-            "clicked",
-            lambda clicked: self._on_implement_plan_clicked(clicked, session_id),
-        )
-        box.pack_start(button, False, False, 0)
-
-        self._implement_plan_button = button
-        self._implement_plan_row = self._add_message_row(box)
-
-    async def _show_implement_plan_if_ready(self, session_id: int) -> None:
-        """Show the handoff only when the planner left a durable plan."""
-        try:
-            items = await load_plan_items(session_id)
-        except Exception:
-            _log.exception("Failed to read durable plan for implementation action")
-            self.set_status("Plan saved, but its implementation action could not be loaded.", error=True)
-            return
-        if (
-            items
-            and self._active_session_id == session_id
-            and self._agent_mode == "planner"
-        ):
-            self._append_implement_plan_action(session_id)
-
-    def _on_implement_plan_clicked(self, button: Gtk.Button, session_id: int) -> None:
-        if self._busy or self._implement_plan_task is not None:
-            return
-        button.set_sensitive(False)
-        self._implement_plan_task = self._track_background_task(
-            asyncio.ensure_future(self._implement_durable_plan(session_id))
-        )
-
-    async def _implement_durable_plan(self, session_id: int) -> None:
-        try:
-            if self._active_session_id != session_id:
-                self.set_status("The plan belongs to a different chat session.", error=True)
-                return
-            items = await load_plan_items(session_id)
-            if not items:
-                self._remove_implement_plan_action()
-                self.set_status("The durable plan is empty. Ask Planner to create it again.", error=True)
-                return
-
-            self._select_executor()
-            self._remove_implement_plan_action()
-            sent = self.send_message(
-                "Implement the approved plan now. Re-inspect the live graph before editing, "
-                "follow the durable plan, and report the completed changes."
-            )
-            if not sent and self._implement_plan_button is not None:
-                self._implement_plan_button.set_sensitive(True)
-        except Exception:
-            _log.exception("Failed to start durable plan implementation")
-            if self._implement_plan_button is not None:
-                self._implement_plan_button.set_sensitive(True)
-            self.set_status("Could not start plan implementation. Try again.", error=True)
-        finally:
-            self._implement_plan_task = None
-
 
     def _set_busy(self, busy: bool) -> None:
         self._busy = busy

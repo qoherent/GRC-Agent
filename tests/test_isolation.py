@@ -1947,7 +1947,7 @@ def test_run_usage_output_override_uses_run_totals():
 
     from pydantic_ai.usage import RunUsage
 
-    from grc_agent.chat_sidebar import _run_usage_output_override
+    from grc_agent.chat.usage import _run_usage_output_override
 
     run = SimpleNamespace(usage=RunUsage(output_tokens=13, details={"reasoning_tokens": 5}))
     assert _run_usage_output_override(run, 9, 0) == (13, 5)
