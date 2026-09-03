@@ -1842,7 +1842,8 @@ def test_thinking_delta_without_content_does_not_crash_the_turn():
     """
     from pydantic_ai.messages import PartDeltaEvent, ThinkingPartDelta
 
-    from grc_agent.chat_sidebar import ChatSidebar, _StreamCtx
+    from grc_agent.chat.stream_view import _StreamCtx
+    from grc_agent.chat_sidebar import ChatSidebar
 
     # The field really is optional — that is what makes this reachable.
     assert ThinkingPartDelta.__dataclass_fields__["content_delta"].type == "str | None"

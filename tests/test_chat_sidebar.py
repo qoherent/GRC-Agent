@@ -793,8 +793,8 @@ def test_streaming_text_flush_is_throttled(monkeypatch):
     bypasses it. Time is mocked for determinism."""
     from gi.repository import Gtk
 
-    from grc_agent.chat.stream_view import _ChunkAccumulator
-    from grc_agent.chat_sidebar import ChatSidebar, _StreamCtx
+    from grc_agent.chat.stream_view import _ChunkAccumulator, _StreamCtx
+    from grc_agent.chat_sidebar import ChatSidebar
 
     sidebar = ChatSidebar()
     ctx = _StreamCtx(Gtk.Box())
@@ -888,8 +888,8 @@ def test_streaming_thinking_flush_throttled(monkeypatch):
     tokens are throttled the same way and force=True flushes them."""
     from gi.repository import Gtk
 
-    from grc_agent.chat.stream_view import _ChunkAccumulator
-    from grc_agent.chat_sidebar import ChatSidebar, _StreamCtx
+    from grc_agent.chat.stream_view import _ChunkAccumulator, _StreamCtx
+    from grc_agent.chat_sidebar import ChatSidebar
 
     sidebar = ChatSidebar()
     ctx = _StreamCtx(Gtk.Box())
@@ -952,7 +952,8 @@ def test_thinking_expander_label_changes_on_close():
     """Thinking expander shows 'Thinking...' and expands during streaming, then collapses to 'Thought' when closed."""
     from gi.repository import Gtk
 
-    from grc_agent.chat_sidebar import ChatSidebar, _StreamCtx
+    from grc_agent.chat.stream_view import _StreamCtx
+    from grc_agent.chat_sidebar import ChatSidebar
 
     sidebar = ChatSidebar()
     ctx = _StreamCtx(Gtk.Box())
@@ -973,7 +974,8 @@ def test_thinking_expander_label_codex_summary():
     from gi.repository import Gtk
     from pydantic_ai.messages import ModelResponse, ThinkingPart
 
-    from grc_agent.chat_sidebar import ChatSidebar, _StreamCtx
+    from grc_agent.chat.stream_view import _StreamCtx
+    from grc_agent.chat_sidebar import ChatSidebar
 
     sidebar = ChatSidebar()
     sidebar.set_active_provider("openai_codex", "gpt-5.3-codex")
@@ -1008,8 +1010,8 @@ def test_thinking_expander_auto_scroll_and_tall_sizing():
     """Thinking widget is configured with increased height and auto-scrolls during streaming."""
     from gi.repository import Gtk
 
-    from grc_agent.chat.stream_view import _ChunkAccumulator
-    from grc_agent.chat_sidebar import ChatSidebar, _StreamCtx
+    from grc_agent.chat.stream_view import _ChunkAccumulator, _StreamCtx
+    from grc_agent.chat_sidebar import ChatSidebar
 
     sidebar = ChatSidebar()
     ctx = _StreamCtx(Gtk.Box())
@@ -1518,7 +1520,8 @@ def test_collapsed_thinking_stream_does_not_force_flush_every_delta():
         ThinkingPartDelta,
     )
 
-    from grc_agent.chat_sidebar import ChatSidebar, _StreamCtx
+    from grc_agent.chat.stream_view import _StreamCtx
+    from grc_agent.chat_sidebar import ChatSidebar
 
     sidebar = ChatSidebar()
     sidebar._scroll_to_bottom = lambda *_args, **_kwargs: None
@@ -1543,7 +1546,8 @@ def test_turn_completion_preserves_selection_in_older_message():
     """Finalizing one stream replaces only its temporary row, never older widgets."""
     from pydantic_ai.messages import ModelResponse, TextPart
 
-    from grc_agent.chat_sidebar import ChatSidebar, _StreamCtx
+    from grc_agent.chat.stream_view import _StreamCtx
+    from grc_agent.chat_sidebar import ChatSidebar
 
     sidebar = ChatSidebar()
     old_box = sidebar._start_agent_message()
@@ -1738,7 +1742,8 @@ def test_streaming_copy_transcript_matches_history_render_shape():
     )
 
     from grc_agent.chat.format import _transcript_tool_call
-    from grc_agent.chat_sidebar import ChatSidebar, _StreamCtx
+    from grc_agent.chat.stream_view import _StreamCtx
+    from grc_agent.chat_sidebar import ChatSidebar
 
     sidebar = ChatSidebar()
     ctx = _StreamCtx(Gtk.Box())
@@ -2670,7 +2675,8 @@ def test_streaming_never_shoves_paned_divider():
     stay freely shrinkable afterwards (divider drag)."""
     from gi.repository import Gtk
 
-    from grc_agent.chat_sidebar import ChatSidebar, _StreamCtx
+    from grc_agent.chat.stream_view import _StreamCtx
+    from grc_agent.chat_sidebar import ChatSidebar
 
     for start_pos, narrow in ((500, False), (782, True)):
         win = Gtk.OffscreenWindow()

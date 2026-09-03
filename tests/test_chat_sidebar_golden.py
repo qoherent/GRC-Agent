@@ -259,7 +259,7 @@ def _mid_stream_events():
 
 
 def _render_mid_stream(sidebar):
-    from grc_agent.chat_sidebar import _StreamCtx
+    from grc_agent.chat.stream_view import _StreamCtx
 
     request_events, tool_events = _mid_stream_events()
     ctx = _StreamCtx(sidebar._start_agent_message())
