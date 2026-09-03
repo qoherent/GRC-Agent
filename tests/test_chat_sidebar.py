@@ -4043,7 +4043,8 @@ def test_zoom_projection_css_rule_scope_clamp_and_theme_restore():
 
     from gi.repository import Gtk
 
-    from grc_agent.chat_sidebar import ChatSidebar, sidebar_font_multiplier
+    from grc_agent.chat_sidebar import ChatSidebar
+    from grc_agent.native_canvas import sidebar_font_multiplier
 
     sidebar = ChatSidebar()
     win = Gtk.OffscreenWindow()
