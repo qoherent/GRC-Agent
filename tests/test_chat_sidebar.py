@@ -819,6 +819,34 @@ def test_streaming_text_flush_is_throttled(monkeypatch):
     )
 
 
+def test_chunk_accumulator_replace_chunk():
+    """replace_chunk patches an unflushed chunk in place without reordering
+    -- the mechanism the copy-transcript fix uses to turn a call-only
+    fragment into the combined call+result shape once the result arrives."""
+    from grc_agent.chat_sidebar import _ChunkAccumulator
+
+    acc = _ChunkAccumulator()
+    acc.append("<Tool Call: x>\n")
+    acc.append(" some unrelated text in between ")
+    assert acc.replace_chunk("<Tool Call: x>\n", "<Tool Call: x>\nResult: y\n") is True
+    assert str(acc) == "<Tool Call: x>\nResult: y\n some unrelated text in between "
+
+    # A chunk that was already flushed (sent downstream) cannot be patched --
+    # taking it back would silently un-send something the UI already painted.
+    acc2 = _ChunkAccumulator()
+    acc2.append("call-fragment")
+    acc2.drain_new()
+    acc2.append("more text")
+    assert acc2.replace_chunk("call-fragment", "patched") is False
+    assert str(acc2) == "call-fragmentmore text"
+
+    # No match at all -> False, no mutation.
+    acc3 = _ChunkAccumulator()
+    acc3.append("something else")
+    assert acc3.replace_chunk("not present", "x") is False
+    assert str(acc3) == "something else"
+
+
 def test_streaming_thinking_flush_throttled(monkeypatch):
     """Mirror of the text-flush test for the ThinkingPart branch: thinking
     tokens are throttled the same way and force=True flushes them."""
@@ -1597,6 +1625,125 @@ def test_effective_path_unsaved_tab_fallback():
     sidebar._flowgraph_proxy = proxy
 
     assert sidebar._get_effective_path() == "untitled:MyUnsavedTab"
+
+
+def test_set_tool_result_streaming_agrees_with_history_render_on_failure():
+    """A failed tool call must render with the failure marker both while
+    streaming and after a full history re-render.
+
+    _set_tool_result used to default to ok=True unconditionally, so a failed
+    tool showed the success glyph mid-stream and only corrected itself once
+    the turn ended and _render_last_message_rich re-derived ok from
+    ret_part.outcome. Both paths must now agree on the very payload that
+    used to diverge.
+    """
+    from gi.repository import Gtk
+    from pydantic_ai.messages import ModelRequest, ModelResponse, ToolCallPart, ToolReturnPart
+
+    from grc_agent.chat.format import _tool_label
+    from grc_agent.chat_sidebar import ChatSidebar
+
+    sidebar = ChatSidebar()
+
+    # The streaming path, for a FAILED result.
+    exp = sidebar._make_tool_expander("get_run_log")
+    sidebar._set_tool_result(exp, "boom: run monitor unavailable", ok=False)
+    streaming_label = exp.get_label()
+    expected = _tool_label("get_run_log", ok=False, result="boom: run monitor unavailable")
+    assert streaming_label == expected
+    assert "\u2717" in streaming_label  # the failure glyph, not success
+
+    # The history path, for the identical call+result, via the real render.
+    sidebar._message_history = [
+        ModelResponse(
+            parts=[ToolCallPart(tool_name="get_run_log", args={}, tool_call_id="c1")]
+        ),
+        ModelRequest(
+            parts=[
+                ToolReturnPart(
+                    tool_name="get_run_log",
+                    content="boom: run monitor unavailable",
+                    tool_call_id="c1",
+                    outcome="failed",
+                )
+            ]
+        ),
+    ]
+    sidebar._render_history()
+
+    history_labels = [
+        w.get_label()
+        for w in _iter_widgets(sidebar._listbox)
+        if isinstance(w, Gtk.Expander)
+    ]
+    assert streaming_label in history_labels, (streaming_label, history_labels)
+
+
+def test_streaming_copy_transcript_matches_history_render_shape():
+    """The copied transcript must be identical whether taken mid-stream or
+    after re-render.
+
+    The call fragment and its result used to be two separately-appended,
+    differently-tagged blocks in the streaming path (<Tool Call: ...> then a
+    LATER, separate <Tool Result: ...>), while the history path always
+    produced one combined block (<Tool Call: ...> with its own Result: line)
+    -- a divergence the streaming helper's own docstring admitted rather than
+    fixed. Both paths must now build the exact same fragment.
+    """
+    from gi.repository import Gtk
+    from pydantic_ai.messages import (
+        ModelRequest,
+        ModelResponse,
+        PartStartEvent,
+        ToolCallPart,
+        ToolReturnPart,
+    )
+
+    from grc_agent.chat.format import _transcript_tool_call
+    from grc_agent.chat_sidebar import ChatSidebar, _StreamCtx
+
+    sidebar = ChatSidebar()
+    ctx = _StreamCtx(Gtk.Box())
+
+    call_part = ToolCallPart(
+        tool_name="change_graph", args={"reason": "add lpf"}, tool_call_id="c1"
+    )
+    sidebar._on_part_start(ctx, PartStartEvent(index=0, part=call_part))
+
+    result_part = ToolReturnPart(
+        tool_name="change_graph", content='{"ok": true}', tool_call_id="c1", outcome="success"
+    )
+    # This is exactly what _stream_tools' FunctionToolResultEvent handler
+    # does with event.part -- exercised directly since driving the real
+    # handler needs a live node.stream() async generator.
+    sidebar._set_tool_result(
+        ctx.tools["c1"], str(result_part.content), ok=result_part.outcome != "failed"
+    )
+    sidebar._record_tool_result_transcript(ctx, "c1", str(result_part.content))
+
+    streaming_transcript = str(ctx.full_raw_text)
+    expected = _transcript_tool_call("change_graph", '{"reason":"add lpf"}', '{"ok": true}')
+    assert streaming_transcript == expected
+
+    # The history path, for the identical call+result.
+    sidebar2 = ChatSidebar()
+    sidebar2._message_history = [
+        ModelResponse(parts=[call_part]),
+        ModelRequest(parts=[result_part]),
+    ]
+    sidebar2._render_history()
+    rows = list(sidebar2._listbox.get_children())
+    box = rows[-1].get_children()[0]
+    history_copy_text = getattr(box, "_grc_copy_btn", None)
+    history_text = getattr(history_copy_text, "_grc_copy_text", None) if history_copy_text else None
+    if history_text is None:
+        # The copy button lives on the outer row, not the inner box, in some
+        # layouts -- fall back to walking for it.
+        for w in _iter_widgets(rows[-1]):
+            if hasattr(w, "_grc_copy_text"):
+                history_text = w._grc_copy_text
+                break
+    assert history_text == streaming_transcript == expected
 
 
 def test_tool_expander_toggle_keeps_auto_scroll_intent():

@@ -224,6 +224,23 @@ class _ChunkAccumulator:
         self._flushed = len(self._chunks)
         return delta
 
+    def replace_chunk(self, old: str, new: str) -> bool:
+        """Replace the most recent chunk equal to ``old`` with ``new``.
+
+        Used to patch a tool-call fragment in place once its result arrives,
+        without reordering the transcript around it (the call and the
+        eventual result can have unrelated text streamed in between). Only
+        an UNFLUSHED chunk is eligible — one already drained has already
+        been sent downstream and cannot be taken back.
+        """
+        for i in range(len(self._chunks) - 1, self._flushed - 1, -1):
+            if self._chunks[i] == old:
+                self._chunks[i] = new
+                self._length += len(new) - len(old)
+                self._joined = None
+                return True
+        return False
+
     def __iadd__(self, text: str):
         self.append(text)
         return self
@@ -260,6 +277,12 @@ class _StreamCtx:
     think_acc: _ChunkAccumulator = field(default_factory=_ChunkAccumulator)
     think_dirty: bool = False
     tools: dict[str, Gtk.Expander] = field(default_factory=dict)
+    # (fragment, tool_name, args_str) for each in-flight tool call, by call
+    # id — so the eventual result can patch the call-only fragment into the
+    # SAME combined shape the history render path produces (see
+    # _record_tool_result_transcript), rather than appending a second,
+    # differently-tagged fragment once the result arrives separately.
+    tool_call_fragments: dict[str, tuple[str, str, str]] = field(default_factory=dict)
     full_raw_text: _ChunkAccumulator = field(default_factory=_ChunkAccumulator)
     last_flush: float = 0.0
     last_event_ts: float = 0.0
@@ -1799,8 +1822,15 @@ class ChatSidebar(Gtk.Box):
                             exp.set_label(_tool_label(name, retry=True, result=res_str))
                         else:
                             res_str = str(event.part.content)
-                            self._set_tool_result(exp, res_str)
-                        ctx.full_raw_text += _transcript_tool_result(res_str)
+                            # Read the settled outcome, same as the history
+                            # render path (_render_last_message_rich). Before
+                            # this fix _set_tool_result always defaulted to
+                            # ok=True, so a failed tool call rendered as
+                            # succeeded while streaming and as failed only
+                            # after a full re-render.
+                            ok = getattr(event.part, "outcome", "success") != "failed"
+                            self._set_tool_result(exp, res_str, ok=ok)
+                        self._record_tool_result_transcript(ctx, tcid, res_str)
                         self._update_copy_text(ctx.box, ctx.full_raw_text)
 
     def _on_part_start(self, ctx: _StreamCtx, event: PartStartEvent) -> None:
@@ -1839,7 +1869,10 @@ class ChatSidebar(Gtk.Box):
             ctx.box.pack_start(exp, False, False, 0)
             exp.show_all()
             ctx.tools[tcid] = exp
-            ctx.full_raw_text += _transcript_tool_call(part.tool_name or "?", args_str)
+            tool_name = part.tool_name or "?"
+            call_fragment = _transcript_tool_call(tool_name, args_str)
+            ctx.tool_call_fragments[tcid] = (call_fragment, tool_name, args_str)
+            ctx.full_raw_text += call_fragment
             self._update_copy_text(ctx.box, ctx.full_raw_text)
         elif isinstance(part, NativeToolCallPart):
             # Native tool calls (e.g. provider-native web_search/web_fetch) never
@@ -1856,15 +1889,18 @@ class ChatSidebar(Gtk.Box):
             ctx.box.pack_start(exp, False, False, 0)
             exp.show_all()
             ctx.tools[tcid] = exp
-            ctx.full_raw_text += _transcript_tool_call(part.tool_name or "?", args_str)
+            tool_name = part.tool_name or "?"
+            call_fragment = _transcript_tool_call(tool_name, args_str)
+            ctx.tool_call_fragments[tcid] = (call_fragment, tool_name, args_str)
+            ctx.full_raw_text += call_fragment
             self._update_copy_text(ctx.box, ctx.full_raw_text)
         elif isinstance(part, NativeToolReturnPart):
             tcid = part.tool_call_id or ""
             exp = ctx.tools.get(tcid)
             if exp is not None:
                 res_str = str(part.content)
-                self._set_tool_result(exp, res_str)
-                ctx.full_raw_text += _transcript_tool_result(res_str)
+                self._set_tool_result(exp, res_str, ok=part.outcome != "failed")
+                self._record_tool_result_transcript(ctx, tcid, res_str)
                 self._update_copy_text(ctx.box, ctx.full_raw_text)
         elif isinstance(part, ThinkingPart):
             self._close_text(ctx)
@@ -2601,10 +2637,33 @@ class ChatSidebar(Gtk.Box):
         name = getattr(exp, "_grc_tool_name", "?")
         exp.set_label(_tool_label_running(name))
 
-    def _set_tool_result(self, exp: Gtk.Expander, result: str) -> None:
+    def _set_tool_result(self, exp: Gtk.Expander, result: str, *, ok: bool = True) -> None:
         self._set_tool_body(exp, result)
         name = getattr(exp, "_grc_tool_name", "?")
-        exp.set_label(_tool_label(name, result=result))
+        exp.set_label(_tool_label(name, ok=ok, result=result))
+
+    def _record_tool_result_transcript(self, ctx: "_StreamCtx", tcid: str, result: str) -> None:
+        """Append the tool result to the transcript in the SAME combined
+        shape the history render path produces (one <Tool Call: ...> block
+        carrying its own Result: line), instead of a second, separately
+        tagged <Tool Result: ...> block — the divergence
+        _transcript_tool_result's own docstring used to admit rather than fix.
+
+        The call and its result are necessarily two different streaming
+        events, so the call fragment is recorded in ctx.tool_call_fragments
+        when it is appended, then patched in place here. If the original
+        fragment already scrolled out of the accumulator's unflushed window
+        (already sent to the UI), the patch cannot land without reordering
+        the transcript — fall back to the old separately-tagged form rather
+        than silently dropping the result.
+        """
+        recorded = ctx.tool_call_fragments.pop(tcid, None)
+        if recorded is not None:
+            call_fragment, tool_name, args_str = recorded
+            combined = _transcript_tool_call(tool_name, args_str, result)
+            if ctx.full_raw_text.replace_chunk(call_fragment, combined):
+                return
+        ctx.full_raw_text += _transcript_tool_result(result)
 
     def _append_error(self, message: str, style: str = "error") -> None:
         """Append an inline status label to the chat log.
