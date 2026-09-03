@@ -692,7 +692,7 @@ def test_settings_dialog_reports_save_failure(tmp_path, monkeypatch):
     def _boom(*_args, **_kwargs):
         raise OSError("disk full")
 
-    monkeypatch.setattr("grc_agent.chat_sidebar.save_settings", _boom)
+    monkeypatch.setattr("grc_agent.chat.settings_controller.save_settings", _boom)
 
     dlg.emit("response", Gtk.ResponseType.APPLY)
 
