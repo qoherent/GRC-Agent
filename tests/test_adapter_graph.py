@@ -1382,3 +1382,107 @@ def test_agent_executes_change_graph_with_stringified_json_args():
     asyncio.run(run_test())
 
 
+def test_is_composite_schema_detection():
+    from grc_agent.agent import _is_composite_schema
+
+    assert _is_composite_schema({"type": "array"}) is True
+    assert _is_composite_schema({"type": "object"}) is True
+    assert _is_composite_schema({"items": {"type": "string"}}) is True
+    assert _is_composite_schema({"$ref": "#/$defs/BlockAdd"}) is True
+    # anyOf with array branch (e.g. list[str] | None)
+    assert (
+        _is_composite_schema(
+            {"anyOf": [{"type": "array", "items": {"type": "string"}}, {"type": "null"}]}
+        )
+        is True
+    )
+    # oneOf with object branch
+    assert _is_composite_schema({"oneOf": [{"type": "object"}, {"type": "null"}]}) is True
+    # Primitive types
+    assert _is_composite_schema({"type": "string"}) is False
+    assert _is_composite_schema({"type": "integer"}) is False
+    assert _is_composite_schema({"type": "boolean"}) is False
+    assert _is_composite_schema({}) is False
+    assert _is_composite_schema(None) is False
+
+
+def test_coercion_helpers():
+    from typing import Annotated, Any
+
+    from pydantic import TypeAdapter
+
+    from grc_agent.agent import (
+        BlockAdd,
+        ConnectionSpec,
+        JsonCoercedMapping,
+        JsonCoercedSequence,
+        ParamUpdate,
+        StateUpdate,
+    )
+    from grc_agent.agent_factory import coerce_plan_items
+
+    # 1. JsonCoercedSequence
+    ta_seq = TypeAdapter(Annotated[list[str], JsonCoercedSequence])
+    assert ta_seq.validate_python("bare_item") == ["bare_item"]
+    assert ta_seq.validate_python('["item1", "item2"]') == ["item1", "item2"]
+    assert ta_seq.validate_python(["item1"]) == ["item1"]
+    assert ta_seq.validate_python("") == []
+    assert ta_seq.validate_python(None) == []
+
+    # 2. JsonCoercedMapping
+    ta_map = TypeAdapter(Annotated[dict[str, Any], JsonCoercedMapping])
+    assert ta_map.validate_python('{"k": 1, "v": "abc"}') == {"k": 1, "v": "abc"}
+    assert ta_map.validate_python({"k": 1}) == {"k": 1}
+    assert ta_map.validate_python("") == {}
+
+    # 3. BlockAdd, ParamUpdate, StateUpdate with aliases and stringified params
+    b = BlockAdd.model_validate({
+        "id": "blocks_null_sink",
+        "name": "sink_0",
+        "params": '{"bus_structure_sink": "default"}',
+    })
+    assert b.block_id == "blocks_null_sink"
+    assert b.instance_name == "sink_0"
+    assert b.params == {"bus_structure_sink": "default"}
+
+    p = ParamUpdate.model_validate({
+        "block_name": "source_0",
+        "params": '{"freq": 1000}',
+    })
+    assert p.instance_name == "source_0"
+    assert p.params == {"freq": 1000}
+
+    s = StateUpdate.model_validate({
+        "name": "source_0",
+        "state": "disabled",
+    })
+    assert s.instance_name == "source_0"
+    assert s.state == "disabled"
+
+    # 4. ConnectionSpec coercion
+    ta_conn = TypeAdapter(ConnectionSpec)
+    assert ta_conn.validate_python("src:0->dst:0") == "src:0->dst:0"
+    assert ta_conn.validate_python("  src:0  ->  dst:0  ") == "src:0->dst:0"
+    assert ta_conn.validate_python({"src": "src_0", "dst": "dst_0"}) == "src_0:0->dst_0:0"
+    assert (
+        ta_conn.validate_python({"src": "src_0", "src_port": 0, "dst": "dst_0", "dst_port": 1})
+        == "src_0:0->dst_0:1"
+    )
+    assert (
+        ta_conn.validate_python({
+            "source": "src_0",
+            "source_port": "out",
+            "destination": "dst_0",
+            "destination_port": "in",
+        })
+        == "src_0:out->dst_0:in"
+    )
+
+    # 5. coerce_plan_items
+    assert coerce_plan_items({"content": "Step 1"}) == [{"content": "Step 1"}]
+    assert coerce_plan_items('{"content": "Step 1"}') == [{"content": "Step 1"}]
+    assert coerce_plan_items('[{"content": "Step 1"}]') == [{"content": "Step 1"}]
+    assert coerce_plan_items([{"step": "Step 1", "id": 1}]) == [{"content": "Step 1", "id": "1"}]
+
+
+

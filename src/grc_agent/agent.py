@@ -61,6 +61,45 @@ class GrcAgentResponse(BaseModel):
     )
 
 
+def coerce_json_mapping(v: Any) -> Any:
+    """Decode a JSON string if the argument was passed as a serialized JSON object."""
+    if isinstance(v, str):
+        s = v.strip()
+        if s.startswith("{") and s.endswith("}"):
+            try:
+                return json.loads(s)
+            except Exception as exc:
+                raise ModelRetry(f"Invalid JSON object string: {exc}") from exc
+        elif not s:
+            return {}
+    return v
+
+
+JsonCoercedMapping = BeforeValidator(coerce_json_mapping)
+
+
+def coerce_json_sequence(v: Any) -> Any:
+    """Decode a JSON string, wrap a single element, or coerce None/empty to list."""
+    if v is None:
+        return []
+    if isinstance(v, str):
+        s = v.strip()
+        if s.startswith("[") and s.endswith("]"):
+            try:
+                return json.loads(s)
+            except Exception as exc:
+                raise ModelRetry(f"Invalid JSON array string: {exc}") from exc
+        elif not s:
+            return []
+        return [s]
+    elif isinstance(v, dict):
+        return [v]
+    return v
+
+
+JsonCoercedSequence = BeforeValidator(coerce_json_sequence)
+
+
 class BlockAdd(BaseModel):
     block_id: str = Field(
         ...,
@@ -68,9 +107,11 @@ class BlockAdd(BaseModel):
         description="Installed GNU Radio catalog block ID (e.g. 'analog_sig_source_x').",
     )
     instance_name: str = Field(
-        ..., description="New unique graph instance name (e.g. 'my_source')."
+        ...,
+        validation_alias=AliasChoices("instance_name", "name", "block_name"),
+        description="New unique graph instance name (e.g. 'my_source').",
     )
-    params: dict[str, Any] | None = Field(
+    params: Annotated[dict[str, Any] | None, JsonCoercedMapping] = Field(
         None, description="Initial parameter values keyed by parameter ID."
     )
     state: Literal["enabled", "disabled", "bypass"] | None = Field(
@@ -79,12 +120,22 @@ class BlockAdd(BaseModel):
 
 
 class ParamUpdate(BaseModel):
-    instance_name: str = Field(..., description="Target block instance name (e.g. 'my_source').")
-    params: dict[str, Any] = Field(..., description="Param updates keyed by parameter ID.")
+    instance_name: str = Field(
+        ...,
+        validation_alias=AliasChoices("instance_name", "name", "block_name"),
+        description="Target block instance name (e.g. 'my_source').",
+    )
+    params: Annotated[dict[str, Any], JsonCoercedMapping] = Field(
+        ..., description="Param updates keyed by parameter ID."
+    )
 
 
 class StateUpdate(BaseModel):
-    instance_name: str = Field(..., description="Target block instance name (e.g. 'my_source').")
+    instance_name: str = Field(
+        ...,
+        validation_alias=AliasChoices("instance_name", "name", "block_name"),
+        description="Target block instance name (e.g. 'my_source').",
+    )
     state: Literal["enabled", "disabled", "bypass"] = Field(..., description="New block state.")
 
 
@@ -186,6 +237,19 @@ class StopGracefully(AbstractCapability[Any]):
 # retry instead of returning a masked "Web search failed: ..." string).
 # Eager (defer_loading=False) so the tools are always callable — no
 # load_capability round-trip. Defined once here and imported by
+def _is_composite_schema(spec: dict[str, Any]) -> bool:
+    """Check if a JSON schema specification represents a composite type (array or object)."""
+    if not isinstance(spec, dict):
+        return False
+    target_type = spec.get("type")
+    if target_type in ("array", "object") or "items" in spec or "$ref" in spec:
+        return True
+    for branch in spec.get("anyOf", []) + spec.get("oneOf", []) + spec.get("allOf", []):
+        if isinstance(branch, dict) and _is_composite_schema(branch):
+            return True
+    return False
+
+
 @dataclass
 class JsonRepairCapability(AbstractCapability[Any]):
     """Automatically decodes JSON-stringified tool arguments before validation.
@@ -217,13 +281,7 @@ class JsonRepairCapability(AbstractCapability[Any]):
                 if isinstance(v, str):
                     s = v.strip()
                     param_spec = props.get(k, {})
-                    target_type = param_spec.get("type")
-                    is_composite = (
-                        target_type in ("array", "object")
-                        or "items" in param_spec
-                        or "$ref" in param_spec
-                    )
-                    if is_composite and (
+                    if _is_composite_schema(param_spec) and (
                         (s.startswith("[") and s.endswith("]"))
                         or (s.startswith("{") and s.endswith("}"))
                     ):
@@ -272,7 +330,10 @@ prompt_injection_cap = PromptInjectionDefender(
     on_detection=_log_injection_detection,
 )
 # Module-level tool functions
-async def inspect_graph_func(ctx: RunContext[FlowgraphDeps], targets: list[str] | None = None) -> str:
+async def inspect_graph_func(
+    ctx: RunContext[FlowgraphDeps],
+    targets: Annotated[list[str] | None, JsonCoercedSequence] = None,
+) -> str:
     """Read-only inspection of the active graph: topology, block instances, connections, parameter values and validation status.
 
     Advanced parameters at their default value and unconnected optional ports
@@ -297,6 +358,60 @@ _K_DESCRIPTION = (
 )
 ResultCount = Annotated[int, Field(ge=1, le=20, description=_K_DESCRIPTION)]
 
+
+def coerce_connection(v: Any) -> Any:
+    """Coerce a connection dict or cleaned string into the standard 'src_block:src_port->dst_block:dst_port' string."""
+    if isinstance(v, str):
+        s = v.strip()
+        if "->" in s:
+            parts = s.split("->")
+            if len(parts) == 2:
+                return f"{parts[0].strip()}->{parts[1].strip()}"
+        return s
+    if isinstance(v, dict):
+        src = (
+            v.get("src")
+            or v.get("source")
+            or v.get("source_block")
+            or v.get("src_block")
+            or v.get("from")
+        )
+        dst = (
+            v.get("dst")
+            or v.get("destination")
+            or v.get("dest")
+            or v.get("sink")
+            or v.get("destination_block")
+            or v.get("dst_block")
+            or v.get("sink_block")
+            or v.get("to")
+        )
+
+        src_port = None
+        for k in ("src_port", "source_port", "from_port"):
+            if k in v:
+                src_port = v[k]
+                break
+
+        dst_port = None
+        for k in ("dst_port", "destination_port", "dest_port", "sink_port", "to_port"):
+            if k in v:
+                dst_port = v[k]
+                break
+
+        if src and dst:
+            src_str = str(src).strip()
+            dst_str = str(dst).strip()
+            if ":" not in src_str:
+                p = 0 if src_port is None else src_port
+                src_str = f"{src_str}:{p}"
+            if ":" not in dst_str:
+                p = 0 if dst_port is None else dst_port
+                dst_str = f"{dst_str}:{p}"
+            return f"{src_str}->{dst_str}"
+    return v
+
+
 # Exactly one '->' and exactly one ':' on each side — the same rule parse_conn
 # enforces, moved into the schema so a malformed string is an argument-
 # validation error the model can correct cheaply, rather than a burned
@@ -308,6 +423,7 @@ ConnectionSpec = Annotated[
         pattern=_CONNECTION_PATTERN,
         description="'src_block:src_port->dst_block:dst_port', e.g. 'source_0:0->sink_0:0'.",
     ),
+    BeforeValidator(coerce_connection),
 ]
 
 
@@ -347,21 +463,6 @@ async def generate_python_func(ctx: RunContext[FlowgraphDeps], k: ResultCount = 
     except ValueError as exc:
         raise ModelRetry(str(exc)) from exc
     return json.dumps(result)
-
-
-def coerce_json_sequence(v: Any) -> Any:
-    """Decode a JSON string if the argument was passed as a serialized JSON array."""
-    if isinstance(v, str):
-        s = v.strip()
-        if s.startswith("[") and s.endswith("]"):
-            try:
-                return json.loads(s)
-            except Exception as exc:
-                raise ModelRetry(f"Invalid JSON array string: {exc}") from exc
-    return v
-
-
-JsonCoercedSequence = BeforeValidator(coerce_json_sequence)
 
 
 async def change_graph_func(

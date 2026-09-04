@@ -165,6 +165,9 @@ def coerce_plan_items(v: Any) -> list[Any]:
                 f"Error: {exc}"
             ) from exc
 
+    if isinstance(v, dict):
+        v = [v]
+
     if isinstance(v, list):
         parsed: list[dict[str, Any] | Any] = []
         for item in v:
