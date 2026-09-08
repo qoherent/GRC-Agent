@@ -23,15 +23,27 @@ from pydantic_ai.messages import (
 # The step store's ClearToolResults placeholder (agent_factory.py).
 CLEAR_PLACEHOLDER = "[Flowgraph tool output cleared to conserve context"
 
+# Synthetic user prompts injected by notify_run_failure (known prefixes) —
+# the single canonical definition; the runner and the auditor both import it.
+AUTOFIX_PREFIXES = ("Flowgraph run failed",)
+
 # Archive-run kind markers appear in the harness's derived run ids
 # (db.archive_transcript: "{agent_name}-{kind}-{8hex}").
-_ARCHIVE_KIND_MARKERS = (
+ARCHIVE_KIND_MARKERS = (
     "pre_compaction_transcript",
     "manual_compaction_transcript",
     "turn_failure",
     "truncated_thinking_transcript",
     "handoff",
 )
+# Compaction archives that may lawfully restore cleared content (KTD5).
+_RESTORE_KINDS = ("pre_compaction_transcript", "manual_compaction_transcript")
+
+
+def is_archive_run(run_id: str, kind: str | None = None) -> bool:
+    """Deterministic archive-run discriminator (one uniform rule)."""
+    markers = (kind,) if kind else ARCHIVE_KIND_MARKERS
+    return any(marker in run_id for marker in markers)
 
 
 def deserialize(blob: str) -> list[ModelMessage]:
@@ -142,7 +154,7 @@ def runs_shape(rows: list[dict[str, Any]], events: list[dict[str, Any]]) -> list
     for run in rows:
         run_id = run["run_id"]
         kinds = event_kinds_by_run.get(run_id, [])
-        is_archive = any(marker in run_id for marker in _ARCHIVE_KIND_MARKERS)
+        is_archive = any(marker in run_id for marker in ARCHIVE_KIND_MARKERS)
         if is_archive:
             if "run_started" in event_kinds_by_run.get(run_id, []):
                 violations.append(f"archive run {run_id} unexpectedly has run_started")

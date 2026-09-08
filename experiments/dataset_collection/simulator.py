@@ -219,7 +219,7 @@ class OllamaUserSimulator:
                     )
                 resp.raise_for_status()
                 return resp.json()["choices"][0]["message"]["content"]
-            except (httpx.HTTPError, KeyError, IndexError) as e:
+            except (httpx.HTTPError, KeyError, IndexError, ValueError) as e:
                 last_error = e
                 if attempt < _MAX_RETRIES:
                     await asyncio.sleep(2**attempt)

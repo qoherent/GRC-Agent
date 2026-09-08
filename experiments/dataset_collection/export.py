@@ -33,7 +33,7 @@ from pydantic_ai.messages import (
 )
 
 from .audit import audit_campaign, load_conversations
-from .invariants import CLEAR_PLACEHOLDER, deserialize
+from .invariants import CLEAR_PLACEHOLDER, deserialize, is_archive_run
 from .manifest import Manifest, TaskRecord
 from .simulator import filter_secrets
 
@@ -87,12 +87,20 @@ def map_messages(messages: list, *, include_thinking: bool) -> list[dict]:
     return out
 
 
-def restore_from_archives(blob: str, snapshot_blobs: list[str]) -> str:
-    """Restore placeholder-cleared content from the fullest archive snapshot
-    (KTD5): the pre-compaction archive is fuller; adopt the longest parseable
-    snapshot that carries no placeholder. Else the original blob (quarantined)."""
+def restore_from_archives(blob: str, snapshot_blobs: list[tuple[str, str]]) -> str:
+    """Restore placeholder-cleared content from the fullest COMPACT archive
+    snapshot (KTD5): only pre-/manual-compaction archives may restore; the
+    longest parseable snapshot that carries no placeholder wins. Turn-failure
+    and handoff snapshots never restore (failed-branch context)."""
     best, best_len = blob, len(blob)
-    for snap in snapshot_blobs:
+    for run_id, snap in snapshot_blobs:
+        # Only compaction archives may restore cleared content (KTD5);
+        # turn_failure/handoff snapshots carry failed-branch context the
+        # model never saw in the final lineage.
+        if not is_archive_run(run_id, kind="pre_compaction_transcript") and not is_archive_run(
+            run_id, kind="manual_compaction_transcript"
+        ):
+            continue
         try:
             deserialize(snap)
         except Exception:  # noqa: BLE001 - a corrupt snapshot is skipped
@@ -167,7 +175,10 @@ def export_campaign(campaign_dir: Path) -> int:  # noqa: C901 - one linear gate 
         if data is None or data.get("session") is None:
             report[rec.task_id] = {"verdict": rec.verdict, "exported": "refused", "reason": "no session row"}
             continue
-        blob = restore_from_archives(data["session"], [s["messages"] for s in data.get("snapshots", [])])
+        blob = restore_from_archives(
+            data["session"],
+            [(s["run_id"], s["messages"]) for s in data.get("snapshots", [])],
+        )
         messages = deserialize(blob)
         compaction_flagged = CLEAR_PLACEHOLDER in data["session"]
 

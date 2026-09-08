@@ -32,6 +32,7 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 
+from .invariants import AUTOFIX_PREFIXES
 from .manifest import CampaignMeta, Manifest, TaskRecord, TurnRecord
 from .runner_contract import (
     RunnerContractError,
@@ -49,8 +50,6 @@ REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
 REAL_DB = REPO_ROOT / ".grc_agent" / "chat_sessions.db"
 PLAYGROUND = REPO_ROOT / "playground"
-
-_AUTOFIX_PREFIXES = ("Flowgraph run failed",)
 
 
 def _sha(text: str) -> str:
@@ -161,7 +160,7 @@ def _count_autofix_prompts(history) -> int:
                 if (
                     isinstance(part, UserPromptPart)
                     and isinstance(part.content, str)
-                    and part.content.startswith(_AUTOFIX_PREFIXES)
+                    and part.content.startswith(AUTOFIX_PREFIXES)
                 ):
                     count += 1
     return count

@@ -25,12 +25,14 @@ import tempfile
 from pathlib import Path
 
 from .invariants import (
+    AUTOFIX_PREFIXES,
     check_instructions_recorded,
     check_media_markers,
     check_placeholders,
     check_request_response_shape,
     check_tool_call_matching,
     deserialize,
+    is_archive_run,
     runs_shape,
     tool_effects_cover,
 )
@@ -141,7 +143,7 @@ def audit_conversation(
         violations += [f"{conv_id}: {v}" for v in check(messages)]
     placeholders = check_placeholders(messages)
     if placeholders:
-        archives = [r for r in data["runs"] if "pre_compaction_transcript" in r["run_id"]]
+        archives = [r for r in data["runs"] if is_archive_run(r["run_id"], kind="pre_compaction_transcript")]
         if not archives:
             violations.append(f"{conv_id}: {placeholders[0]} with no compaction archive")
     orphaned = data.get("orphans")
@@ -164,7 +166,7 @@ def _call_in_turn_failure(data: dict, call_id: str) -> bool:
     snapshot — the documented approval-crash loss shape, attributed per call
     instead of per conversation."""
     for snap in data.get("snapshots", []):
-        if "turn_failure" not in snap["run_id"]:
+        if not is_archive_run(snap["run_id"], kind="turn_failure"):
             continue
         if call_id in (snap["messages"] or ""):
             return True
@@ -200,7 +202,7 @@ def validate_real_db() -> int:
     all_violations: list[str] = []
     archive_count = 0
     for conv_id, data in sorted(conversations.items()):
-        archive_count += sum(1 for r in data["runs"] if "pre_compaction_transcript" in r["run_id"] or "turn_failure" in r["run_id"] or "handoff" in r["run_id"])
+        archive_count += sum(1 for r in data["runs"] if is_archive_run(r["run_id"], kind="pre_compaction_transcript") or "turn_failure" in r["run_id"] or "handoff" in r["run_id"])
         all_violations += audit_conversation(conv_id, data, loss_as_warning=True)
 
     print(f"conversations: {len(conversations)}; archive/turn-failure runs exercised: {archive_count}")
@@ -369,7 +371,7 @@ def audit_campaign(campaign_dir: Path) -> int:
                 if isinstance(m, ModelRequest)
                 for p in m.parts
                 if isinstance(p, UserPromptPart) and isinstance(p.content, str)
-                and not p.content.startswith(("Flowgraph run failed",))
+                and not p.content.startswith(AUTOFIX_PREFIXES)
             ]
             sim_turns = [t for t in turns if t.task_id == rec.task_id and t.provenance == "simulator"]
             autofix = [t for t in turns if t.task_id == rec.task_id and t.provenance == "autofix"]
