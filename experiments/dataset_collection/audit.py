@@ -370,10 +370,10 @@ def audit_campaign(campaign_dir: Path) -> int:
             ]
             sim_turns = [t for t in turns if t.task_id == rec.task_id and t.provenance == "simulator"]
             autofix = [t for t in turns if t.task_id == rec.task_id and t.provenance == "autofix"]
-            if len(user_prompts) != len(sim_turns) + len(autofix):
+            if len(user_prompts) != len(sim_turns):
                 all_violations.append(
-                    f"{rec.task_id}: {len(user_prompts)} user prompts in history vs "
-                    f"{len(sim_turns)} simulator + {len(autofix)} autofix turn records"
+                    f"{rec.task_id}: {len(user_prompts)} non-autofix user prompts in history vs "
+                    f"{len(sim_turns)} simulator turn records ({len(autofix)} autofix recorded)"
                 )
         if rec.containment_ok is False:
             all_violations.append(f"{rec.task_id}: containment check failed")

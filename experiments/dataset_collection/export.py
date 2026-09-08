@@ -139,7 +139,7 @@ def export_campaign(campaign_dir: Path, *, audit_first: bool = True) -> int:
         return 1
     manifest = Manifest(campaign_dir)
     meta = manifest.load_meta()
-    tasks = [t for t in manifest.load_tasks() if t.verdict == "completed"]
+    tasks = manifest.load_tasks()
     db_path = campaign_dir / ".grc_agent" / "chat_sessions.db"
     conversations = load_conversations(db_path)
     frozen = _load_frozen_tools(campaign_dir)

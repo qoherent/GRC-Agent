@@ -28,6 +28,7 @@ import re
 import sqlite3
 import sys
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 from .manifest import CampaignMeta, Manifest, TaskRecord, TurnRecord
@@ -163,6 +164,7 @@ async def run_task(  # noqa: C901 - one task, one linear contract
     playground_baseline: str,
     real_db_baseline: str | None,
     tasks_completed: int,
+    pre_teardown: Callable[[object], None] | None = None,
 ) -> TaskRecord:
     personas = load_personas()
     record = TaskRecord(
@@ -202,6 +204,7 @@ async def run_task(  # noqa: C901 - one task, one linear contract
     reply = ""
     turn_idx = 0
     unproductive = 0
+    sent_any = False
     verdict = "budget_exhausted"
     stop_reason = "turn budget exhausted"
     autofix_seen = 0
@@ -213,6 +216,7 @@ async def run_task(  # noqa: C901 - one task, one linear contract
 
             await drain(sidebar, monitor)
             await send_or_fail(sidebar, sim_turn.message)
+            sent_any = True
             rec = TurnRecord(
                 task_id=task.id,
                 turn_index=turn_idx,
@@ -284,6 +288,29 @@ async def run_task(  # noqa: C901 - one task, one linear contract
     record.verdict = verdict
     record.stop_reason = stop_reason
 
+    # --- dry-run fault injection hook (U6) + post-hook autofix rescan ---
+    if pre_teardown is not None:
+        try:
+            pre_teardown(sidebar)
+            await drain(sidebar, monitor)
+            autofix_now = _count_autofix_prompts(sidebar._message_history)
+            for _ in range(autofix_seen, autofix_now):
+                manifest.record_turn(
+                    TurnRecord(
+                        task_id=task.id,
+                        turn_index=-1,
+                        provenance="autofix",
+                        message="<auto-fix synthetic turn>",
+                        session_id=sidebar._active_session_id,
+                    )
+                )
+            autofix_seen = autofix_now
+        except Exception as e:  # noqa: BLE001 - an injected fault is a task error
+            verdict = "agent_error"
+            stop_reason = f"pre_teardown fault: {type(e).__name__}: {e}"
+            record.verdict = verdict
+            record.stop_reason = stop_reason
+
     # --- teardown: fixed order, containment checks after settle (U3 step 4) ---
     async def _stop_run() -> None:
         monitor = proxy._exec_monitor
@@ -299,7 +326,7 @@ async def run_task(  # noqa: C901 - one task, one linear contract
             raise RunnerContractError("session id not cleared at teardown")
         if sidebar._message_history:
             raise RunnerContractError("history not empty at teardown")
-        expected_sessions = tasks_completed + 1
+        expected_sessions = tasks_completed + (1 if sent_any else 0)
         actual_sessions = _session_count(db_path)
         if actual_sessions != expected_sessions:
             raise RunnerContractError(
@@ -331,7 +358,9 @@ async def run_task(  # noqa: C901 - one task, one linear contract
     return record
 
 
-async def campaign(args: argparse.Namespace) -> int:
+
+
+async def campaign(args: argparse.Namespace, simulator_factory=None) -> int:  # noqa: C901 - linear contract
     campaign_dir = Path(args.campaign_dir).resolve()
     campaign_dir.mkdir(parents=True, exist_ok=True)
     env_file = campaign_dir / ".env"
@@ -399,19 +428,23 @@ async def campaign(args: argparse.Namespace) -> int:
     frozen_tools, freeze_ok = await freeze_tools(agent)
 
     manifest = Manifest(campaign_dir)
-    from .simulator import OllamaUserSimulator, ScriptedSimulator, SimulatorTurn
+    if simulator_factory is None:
+        from .simulator import OllamaUserSimulator, ScriptedSimulator, SimulatorTurn
 
-    if args.simulator == "scripted":
-        def simulator_factory(task: TaskSpec, persona):  # noqa: ARG001 - uniform factory shape
-            turns = [
-                SimulatorTurn(f"please help me with: {task.goal[:60]}", False, "opening"),
-                SimulatorTurn("nice, keep going", False, "push"),
-                SimulatorTurn("looks good, that's all I needed", True, "satisfied"),
-            ]
-            return ScriptedSimulator(turns=turns)
-    else:
-        def simulator_factory(task: TaskSpec, persona):
-            return OllamaUserSimulator(persona=persona, task=task)
+        if args.simulator == "scripted":
+
+            def simulator_factory(task: TaskSpec, persona):  # noqa: ARG001 - uniform shape
+                turns = [
+                    SimulatorTurn(f"please help me with: {task.goal[:60]}", False, "opening"),
+                    SimulatorTurn("nice, keep going", False, "push"),
+                    SimulatorTurn("looks good, that's all I needed", True, "satisfied"),
+                ]
+                return ScriptedSimulator(turns=turns)
+
+        else:
+
+            def simulator_factory(task: TaskSpec, persona):
+                return OllamaUserSimulator(persona=persona, task=task)
 
     real_db_baseline = None
     if REAL_DB.exists():
@@ -436,6 +469,8 @@ async def campaign(args: argparse.Namespace) -> int:
 
     completed = 0
     results: list[TaskRecord] = []
+    from grc_agent.db import get_step_store  # noqa: F401 - dry-run F3 hook uses it
+
     for task in tasks:
         print(f"[{task.id}] running ...", flush=True)
         try:
