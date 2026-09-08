@@ -49,7 +49,7 @@ class ExecutionErrorMonitor:
 
     def __init__(
         self,
-        on_error: Callable[[int, str], None],
+        on_error: Callable[[int, str, bool], None],
         process_provider: Callable[[], tuple[object, object]] | None = None,
     ) -> None:
         self._on_error = on_error
@@ -385,7 +385,7 @@ class ExecutionErrorMonitor:
             len(log_text),
         )
         try:
-            self._on_error(code, log_text)
+            self._on_error(code, log_text, self._last_run_spawn_failed)
         except Exception:
             _log.exception("exec_monitor: callback raised")
         self._reset()

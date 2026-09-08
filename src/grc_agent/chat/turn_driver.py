@@ -100,7 +100,9 @@ class TurnDriverMixin:
             self._remember_user_message(fallback_text)
             return False
 
-    def notify_run_failure(self, return_code: int, log_text: str) -> None:  # noqa: ARG002
+    def notify_run_failure(
+        self, return_code: int, log_text: str, *, spawn_failed: bool = False
+    ) -> None:  # noqa: ARG002
         """Called by exec_monitor when a flowgraph run fails. Sends a short
         notification to the agent so it can decide whether to investigate via
         ``get_run_log`` and propose a fix — replacing the old Yes/No bubble
@@ -110,12 +112,24 @@ class TurnDriverMixin:
         the ``get_run_log`` tool (one source of truth, structured tool result
         instead of a prompt blob).
         """
-        _log.info("notify_run_failure: code=%d, log=%d chars", return_code, len(log_text))
-        origin_page = self.current_page
-        prompt = (
-            f"Flowgraph run failed (return code {return_code}). "
-            "Use the get_run_log tool to read the console output and diagnose the error."
+        _log.info(
+            "notify_run_failure: code=%d, log=%d chars, spawn_failed=%s",
+            return_code,
+            len(log_text),
+            spawn_failed,
         )
+        origin_page = self.current_page
+        if spawn_failed:
+            prompt = (
+                "Flowgraph run failed to spawn — nothing was executed. "
+                "Use the get_run_log tool to read the retained exception and "
+                "diagnose the environment."
+            )
+        else:
+            prompt = (
+                f"Flowgraph run failed (return code {return_code}). "
+                "Use the get_run_log tool to read the console output and diagnose the error."
+            )
         self._fix_task = self._track_background_task(
             asyncio.ensure_future(self._send_fix_when_free(prompt, origin_page))
         )

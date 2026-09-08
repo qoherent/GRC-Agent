@@ -960,8 +960,15 @@ def test_stream_flush_tick_arms_drains_and_disarms():
 def test_stream_flush_tick_dies_with_the_sidebar():
     """The tick source is owned by the turn's message row: destroying the
     sidebar (or clearing the transcript) removes it with the widget, so a
-    mid-destroy stream cannot keep firing flushes after teardown."""
-    from gi.repository import Gtk
+    mid-destroy stream cannot keep firing flushes after teardown.
+
+    The counter wraps ``_drain_streaming`` — the method the tick actually
+    drains through — and the tick is armed on a box packed into the sidebar
+    so destroy cascades to the tick's owner. The pre-destroy direct tick
+    proves the counter can observe drains at all (guards against a vacuous
+    assertion); the post-destroy contract is that no drain fires and that
+    late disarm/disarm-on-destroyed-row stays silent."""
+    from gi.repository import GLib, Gtk
 
     from grc_agent.chat.stream_view import _StreamCtx
     from grc_agent.chat_sidebar import ChatSidebar
@@ -969,23 +976,39 @@ def test_stream_flush_tick_dies_with_the_sidebar():
     sidebar = ChatSidebar()
     ctx = _StreamCtx(Gtk.Box())
     sidebar._ensure_text(ctx)
+    sidebar._listbox.insert(ctx.box, -1)  # tick owner is inside the widget tree
 
     calls: list[int] = []
-    original_flush = sidebar._flush_streaming
+    original_drain = sidebar._drain_streaming
 
-    def counting_flush(stream_ctx, *, force=False):
+    def counting_drain(stream_ctx, *, force=False):
         calls.append(1)
-        return original_flush(stream_ctx, force=force)
+        return original_drain(stream_ctx, force=force)
 
-    sidebar._flush_streaming = counting_flush
+    sidebar._drain_streaming = counting_drain
+
+    ctx.text_acc += "pending"
+    ctx.text_dirty = True
     sidebar._arm_stream_flush(ctx)
     assert ctx.flush_tick_id is not None
+
+    # Direct drive: the tick drains through the wrapped method. Proves the
+    # observation channel works before anything is destroyed.
+    sidebar._on_stream_flush_tick(ctx)
+    assert calls == [1]
 
     sidebar.destroy()
     for _ in range(20):
         while Gtk.events_pending():
             Gtk.main_iteration()
-    assert calls == []
+    assert calls == [1], "a leaked tick source kept draining after destroy"
+
+    # Late teardown helpers stay silent on destroyed widgets: disarm swallows
+    # the already-removed source, and a stale-id tick removes itself.
+    sidebar._disarm_stream_flush(ctx)
+    sidebar._disarm_stream_flush(ctx)
+    ctx.flush_tick_id = None
+    assert sidebar._on_stream_flush_tick(ctx) == GLib.SOURCE_REMOVE
 
 
 def test_thinking_expander_label_changes_on_close():

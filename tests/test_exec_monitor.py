@@ -9,7 +9,7 @@ from grc_agent.exec_monitor import ExecutionErrorMonitor
 from grc_agent.native_canvas import NativeCanvasManager, NativeFlowgraphProxy
 
 
-def _noop(_code, _log):
+def _noop(_code, _log, _spawn_failed=False):
     """No-op callback for tests that don't care about the on_error path."""
     pass
 
@@ -28,7 +28,7 @@ def _feed_run(monitor, start_cmd, output, code):
 
 def test_failure_callback_receives_code_and_log():
     calls = []
-    monitor = ExecutionErrorMonitor(on_error=lambda code, log: calls.append((code, log)))
+    monitor = ExecutionErrorMonitor(on_error=lambda code, log, _spawn_failed=False: calls.append((code, log)))
     _feed_run(monitor, "/tmp/flow.py", "RuntimeError: boom\n", code=1)
     assert len(calls) == 1
     code, log = calls[0]
@@ -39,14 +39,14 @@ def test_failure_callback_receives_code_and_log():
 
 def test_success_does_not_trigger_callback():
     calls = []
-    monitor = ExecutionErrorMonitor(on_error=lambda code, log: calls.append((code, log)))
+    monitor = ExecutionErrorMonitor(on_error=lambda code, log, _spawn_failed=False: calls.append((code, log)))
     _feed_run(monitor, "/tmp/flow.py", "all good\n", code=0)
     assert calls == []
 
 
 def test_sigterm_does_not_trigger_callback():
     calls = []
-    monitor = ExecutionErrorMonitor(on_error=lambda code, log: calls.append((code, log)))
+    monitor = ExecutionErrorMonitor(on_error=lambda code, log, _spawn_failed=False: calls.append((code, log)))
     _feed_run(monitor, "/tmp/flow.py", "running...\n", code=-15)
     assert calls == []
 
@@ -114,14 +114,14 @@ def test_proxy_get_run_log_returns_monitor_data():
 def test_other_negative_return_code_triggers_error():
     # -11 (not the -15 SIGTERM carve-out) must still be reported.
     errors = []
-    monitor = ExecutionErrorMonitor(on_error=lambda code, log: errors.append((code, log)))
+    monitor = ExecutionErrorMonitor(on_error=lambda code, log, _spawn_failed=False: errors.append((code, log)))
     _feed_run(monitor, "/tmp/flowgraph.py", "", code=-11)
     assert len(errors) == 1
 
 
 def test_generate_error_triggers_error_without_exec_start():
     errors = []
-    monitor = ExecutionErrorMonitor(on_error=lambda code, log: errors.append((code, log)))
+    monitor = ExecutionErrorMonitor(on_error=lambda code, log, _spawn_failed=False: errors.append((code, log)))
     monitor.handle_message("Generate Error: invalid block parameter\n>>> Failure\n")
     assert len(errors) == 1
     assert "Generate Error" in errors[0][1]
@@ -129,7 +129,7 @@ def test_generate_error_triggers_error_without_exec_start():
 
 def test_buffer_resets_between_runs():
     errors = []
-    monitor = ExecutionErrorMonitor(on_error=lambda code, log: errors.append((code, log)))
+    monitor = ExecutionErrorMonitor(on_error=lambda code, log, _spawn_failed=False: errors.append((code, log)))
     _feed_run(monitor, "/tmp/first.py", "first run output\n", code=0)
     _feed_run(monitor, "/tmp/second.py", "second run output\n", code=1)
     assert len(errors) == 1
@@ -139,7 +139,7 @@ def test_buffer_resets_between_runs():
 
 def test_buffer_preserves_full_output_no_arbitrary_truncation():
     errors = []
-    monitor = ExecutionErrorMonitor(on_error=lambda code, log: errors.append((code, log)))
+    monitor = ExecutionErrorMonitor(on_error=lambda code, log, _spawn_failed=False: errors.append((code, log)))
     monitor.handle_message("\nExecuting: /tmp/flowgraph.py\n")
     monitor.handle_message("START_MARKER\n")
     for _ in range(20000):
@@ -255,7 +255,7 @@ def test_runtime_error_triggers_callback_even_with_zero_code():
     """GNU Radio runtime errors (buffer overflows, rate mismatches) print
     ':error:' to stderr but exit with code 0. The monitor must detect them."""
     errors = []
-    monitor = ExecutionErrorMonitor(on_error=lambda code, log: errors.append((code, log)))
+    monitor = ExecutionErrorMonitor(on_error=lambda code, log, _spawn_failed=False: errors.append((code, log)))
 
     monitor.handle_message("\nExecuting: /tmp/flow.py\n")
     for ch in "ofdm_cp_0 :error: Buffer too small\n":
@@ -287,7 +287,7 @@ def test_runtime_error_shows_in_get_last_run_log():
 def test_runtime_error_with_nonzero_code_still_reports():
     """Both a non-zero return code AND a runtime error — reported once."""
     errors = []
-    monitor = ExecutionErrorMonitor(on_error=lambda code, log: errors.append((code, log)))
+    monitor = ExecutionErrorMonitor(on_error=lambda code, log, _spawn_failed=False: errors.append((code, log)))
 
     monitor.handle_message("\nExecuting: /tmp/flow.py\n")
     for ch in "RuntimeError: No RTL-SDR devices found!\n":
@@ -302,7 +302,7 @@ def test_runtime_error_not_triggered_by_info_level():
     """':info:' messages (like set_min_output_buffer) must NOT trigger a
     runtime error — only ':error:' matters."""
     errors = []
-    monitor = ExecutionErrorMonitor(on_error=lambda code, log: errors.append((code, log)))
+    monitor = ExecutionErrorMonitor(on_error=lambda code, log, _spawn_failed=False: errors.append((code, log)))
 
     monitor.handle_message("\nExecuting: /tmp/flow.py\n")
     for ch in "throttle :info: set_min_output_buffer on block 2 to 20480\n":
@@ -315,7 +315,7 @@ def test_runtime_error_not_triggered_by_info_level():
 def test_runtime_error_resets_between_runs():
     """The _has_runtime_error flag must be cleared on each new Executing: marker."""
     errors = []
-    monitor = ExecutionErrorMonitor(on_error=lambda code, log: errors.append((code, log)))
+    monitor = ExecutionErrorMonitor(on_error=lambda code, log, _spawn_failed=False: errors.append((code, log)))
 
     # First run: has runtime error
     monitor.handle_message("\nExecuting: /tmp/first.py\n")
@@ -463,7 +463,7 @@ def test_generate_error_completes_wait_and_records_code_1():
 
     async def main():
         calls = []
-        monitor = ExecutionErrorMonitor(on_error=lambda code, _log: calls.append(code))
+        monitor = ExecutionErrorMonitor(on_error=lambda code, _log, _spawn_failed=False: calls.append(code))
         monitor.handle_message("Generate Error: bad graph\n>>> Failure\n")
         return await monitor.wait_for_run_end(5.0), monitor.last_run_code, list(calls)
 
@@ -477,7 +477,7 @@ def test_agent_initiated_failure_suppresses_callback():
     """The run_flowgraph tool reports failures in-turn; the follow-up
     notify_run_failure turn must not also fire for agent-started runs."""
     calls = []
-    monitor = ExecutionErrorMonitor(on_error=lambda code, _log: calls.append(code))
+    monitor = ExecutionErrorMonitor(on_error=lambda code, _log, _spawn_failed=False: calls.append(code))
 
     monitor.mark_run_agent_initiated()
     _feed_run(monitor, "/tmp/flow.py", "RuntimeError: boom\n", code=1)
@@ -490,7 +490,7 @@ def test_agent_initiated_failure_suppresses_callback():
 
 def test_agent_initiated_success_run_leaves_flag_consumed():
     calls = []
-    monitor = ExecutionErrorMonitor(on_error=lambda code, _log: calls.append(code))
+    monitor = ExecutionErrorMonitor(on_error=lambda code, _log, _spawn_failed=False: calls.append(code))
     monitor.mark_run_agent_initiated()
     _feed_run(monitor, "/tmp/flow.py", "ok\n", code=0)
     # Flag consumed at the terminal marker: the next (user) failure notifies.
@@ -575,7 +575,7 @@ def test_run_epoch_counts_starts():
 
 def test_mark_cancelled_drops_suppression_before_user_run():
     calls = []
-    monitor = ExecutionErrorMonitor(on_error=lambda code, _log: calls.append(code))
+    monitor = ExecutionErrorMonitor(on_error=lambda code, _log, _spawn_failed=False: calls.append(code))
     monitor.mark_run_agent_initiated()
     monitor.mark_run_agent_initiated_cancelled()  # no-op Execute
     _feed_run(monitor, "/tmp/flow.py", "RuntimeError: boom\n", code=1)
@@ -609,7 +609,7 @@ def test_spawn_failure_unchanged_identity_reports_failure():
     provider.process = None
     calls = []
     monitor = ExecutionErrorMonitor(
-        on_error=lambda code, log: calls.append((code, log)), process_provider=provider
+        on_error=lambda code, log, _spawn_failed=False: calls.append((code, log)), process_provider=provider
     )
     monitor.handle_message("\nExecuting: /tmp/flow.py\n")  # snapshot: (page1, None)
     for ch in "[Errno 2] No such file or directory: 'xterm'\n":
@@ -636,7 +636,7 @@ def test_real_run_changed_identity_is_success():
     provider.process = None
     calls = []
     monitor = ExecutionErrorMonitor(
-        on_error=lambda code, log: calls.append((code, log)), process_provider=provider
+        on_error=lambda code, log, _spawn_failed=False: calls.append((code, log)), process_provider=provider
     )
     monitor.handle_message("\nExecuting: /tmp/flow.py\n")
     provider.process = _FakeRunProcess()  # Popen assigned between markers
@@ -659,7 +659,7 @@ def test_spawn_failure_absent_identity_reports_failure():
     provider.process = _FakeRunProcess()  # stale snapshot value
     calls = []
     monitor = ExecutionErrorMonitor(
-        on_error=lambda code, log: calls.append((code, log)), process_provider=provider
+        on_error=lambda code, log, _spawn_failed=False: calls.append((code, log)), process_provider=provider
     )
     monitor.handle_message("\nExecuting: /tmp/flow.py\n")
     provider.process = None  # no process at Done time
@@ -680,7 +680,7 @@ def test_nonzero_code_done_uses_return_code_path():
     provider.process = None
     calls = []
     monitor = ExecutionErrorMonitor(
-        on_error=lambda code, log: calls.append((code, log)), process_provider=provider
+        on_error=lambda code, log, _spawn_failed=False: calls.append((code, log)), process_provider=provider
     )
     _feed_run(monitor, "/tmp/flow.py", "RuntimeError: boom\n", code=1)
 
@@ -725,7 +725,7 @@ def test_tab_switch_mid_run_keeps_legacy_classification():
     provider.process = None
     calls = []
     monitor = ExecutionErrorMonitor(
-        on_error=lambda code, log: calls.append((code, log)), process_provider=provider
+        on_error=lambda code, log, _spawn_failed=False: calls.append((code, log)), process_provider=provider
     )
     monitor.handle_message("\nExecuting: /tmp/flow.py\n")  # snapshot: page1
     provider.page_key = "page2"  # user switched pages mid-run
@@ -812,3 +812,70 @@ def test_bounded_run_finish_reports_spawn_failure():
     assert res["status"] == "completed"
     assert res["ran_successfully"] is False
     assert res["spawn_failed"] is True
+
+
+calls: list[tuple[int, bool]] = []
+calls2: list[tuple[int, bool]] = []
+
+
+def _noop2(code, _log, spawn_failed=False):
+    calls2.append((code, spawn_failed))
+
+
+def test_spawn_crash_passes_spawn_flag_to_callback():
+    """A spawn-failed run fires the callback with the spawn verdict threaded
+    through — the notification prompt can name the spawn failure instead of
+    a misleading return code 0."""
+    provider = _ProcessProvider()
+    provider.page_key = 1  # wired provider: the spawn rule is live
+    monitor = ExecutionErrorMonitor(
+        on_error=lambda code, _log, spawn_failed: calls.append((code, spawn_failed))
+    )
+    monitor.set_process_provider(provider)
+    monitor.handle_message("\nExecuting: /tmp/flowgraph.py\n")
+    monitor.handle_message("some verbose exception text\n")
+    monitor.handle_message("\n>>> Done\n")  # code-less Done, unchanged identity
+
+    assert calls == [(0, True)]
+
+
+def test_return_code_failure_passes_false_spawn_flag():
+    monitor = ExecutionErrorMonitor(on_error=_noop2)
+    monitor.handle_message("\nExecuting: /tmp/flowgraph.py\n")
+    monitor.handle_message("\n>>> Done (return code 1)\n")
+
+    assert calls2 == [(1, False)]
+
+
+def test_notify_run_failure_names_spawn_failure():
+    """notify_run_failure prompts the agent about the spawn failure when the
+    monitor threads the verdict through, and keeps the return-code phrasing
+    for genuine non-zero exits."""
+    import asyncio
+
+    from grc_agent.chat.turn_driver import TurnDriverMixin
+
+    captured: dict[str, str] = {}
+
+    class _FakeSidebar:
+        current_page = None
+        _fix_task = None
+
+        def _track_background_task(self, task):  # noqa: ARG002
+            return task
+
+        async def _send_fix_when_free(self, text, origin_page):  # noqa: ARG002
+            captured["prompt"] = text
+
+    fake = _FakeSidebar()
+
+    async def _drive(code, spawn_failed):
+        # notify_run_failure schedules the fix turn; yield so the task runs.
+        TurnDriverMixin.notify_run_failure(fake, code, "", spawn_failed=spawn_failed)
+        await asyncio.sleep(0)
+
+    asyncio.run(_drive(0, True))
+    assert "spawn" in captured["prompt"].lower()
+
+    asyncio.run(_drive(1, False))
+    assert "return code 1" in captured["prompt"]
