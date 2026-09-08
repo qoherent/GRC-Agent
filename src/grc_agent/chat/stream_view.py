@@ -205,15 +205,11 @@ class StreamViewMixin:
                             self._set_tool_body(exp, res_str)
                             exp.set_label(_tool_label(name, retry=True, result=res_str))
                         else:
-                            res_str = str(event.part.content)
                             # Read the settled outcome, same as the history
-                            # render path (_render_last_message_rich). Before
-                            # this fix _set_tool_result always defaulted to
-                            # ok=True, so a failed tool call rendered as
-                            # succeeded while streaming and as failed only
-                            # after a full re-render.
+                            # render path, so streaming and re-render agree.
                             ok = getattr(event.part, "outcome", "success") != "failed"
-                            self._set_tool_result(exp, res_str, ok=ok, payload=event.part.content)
+                            self._set_tool_result(exp, event.part.content, ok=ok)
+                            res_str = str(event.part.content)
                         self._record_tool_result_transcript(ctx, tcid, res_str)
                         self._update_copy_text(ctx.box, ctx.full_raw_text)
 
@@ -283,7 +279,7 @@ class StreamViewMixin:
             exp = ctx.tools.get(tcid)
             if exp is not None:
                 res_str = str(part.content)
-                self._set_tool_result(exp, res_str, ok=part.outcome != "failed", payload=part.content)
+                self._set_tool_result(exp, part.content, ok=part.outcome != "failed")
                 self._record_tool_result_transcript(ctx, tcid, res_str)
                 self._update_copy_text(ctx.box, ctx.full_raw_text)
         elif isinstance(part, ThinkingPart):
@@ -354,7 +350,7 @@ class StreamViewMixin:
         """One frame tick: drain dirty accumulators, keep the source armed."""
         if ctx.flush_tick_id is None:
             return GLib.SOURCE_REMOVE
-        self._flush_streaming(ctx)
+        self._drain_streaming(ctx)
         return GLib.SOURCE_CONTINUE
 
     def _disarm_stream_flush(self, ctx: _StreamCtx) -> None:
@@ -368,27 +364,33 @@ class StreamViewMixin:
             _log.debug("stream flush tick source already gone", exc_info=True)
 
     def _flush_streaming(self, ctx: _StreamCtx, *, force: bool = False) -> None:
-        """Drain append-only stream chunks into GTK text buffers.
+        """Bounded drain entry for streamed chunks.
 
-        Frequency is bounded by the frame cadence, not by this method: the
-        per-turn tick source (``_arm_stream_flush``) drains once per
-        rendered frame, so event handlers only mark accumulators dirty.
-        A forced close flush preserves every byte. Collapsed reasoning
-        stays out of GTK layout until part close; the lossless buffer is
-        still flushed once when the part closes.
+        Unforced callers only ensure the per-turn frame-cadence tick
+        (``_arm_stream_flush``) is armed — the tick drains once per rendered
+        frame, so paints coalesce to at most one per frame and an idle loop
+        pays nothing. A forced close flush drains immediately and preserves
+        every byte.
         """
         if not force:
             self._arm_stream_flush(ctx)
-            # Reasoning is secondary and collapsed by default. Do not spend
-            # the GTK thread laying out hidden streamed text; the full
-            # lossless buffer is flushed when the part closes.
-            thinking_only = ctx.think_dirty and not ctx.text_dirty
-            if (
-                thinking_only
-                and ctx.think_expander is not None
-                and not ctx.think_expander.get_expanded()
-            ):
-                return
+            return
+        self._drain_streaming(ctx, force=True)
+
+    def _drain_streaming(self, ctx: _StreamCtx, *, force: bool = False) -> None:
+        """Drain append-only stream chunks into GTK text buffers.
+
+        Collapsed reasoning stays out of GTK layout until part close; the
+        lossless buffer is still flushed when the part closes (forced).
+        """
+        thinking_only = ctx.think_dirty and not ctx.text_dirty
+        if (
+            not force
+            and thinking_only
+            and ctx.think_expander is not None
+            and not ctx.think_expander.get_expanded()
+        ):
+            return
 
         flushed = False
         flush_start = time.monotonic()

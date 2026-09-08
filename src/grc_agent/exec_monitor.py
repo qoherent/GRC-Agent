@@ -111,7 +111,9 @@ class ExecutionErrorMonitor:
         self._last_run_spawn_failed = False
         self._graph_modified_since_last_run = False
 
-    def set_process_provider(self, process_provider: Callable[[], tuple[object, object]]) -> None:
+    def set_process_provider(
+        self, process_provider: Callable[[], tuple[object, object]] | None
+    ) -> None:
         """Wire the (page_key, process) provider after construction.
 
         desktop_app constructs the monitor before the canvas manager exists,
@@ -286,7 +288,7 @@ class ExecutionErrorMonitor:
             self._tracking = False
             match = _RETURN_CODE_RE.search(text)
             code = int(match.group(1)) if match else 0
-            # Spawn-failure rule (KTD5): a code-less Done marker is ambiguous
+            # Spawn-failure rule: a code-less Done marker is ambiguous
             # between a real clean exit and GRC's spawn-crash path (both emit
             # send_end_exec() with the default code 0). Only a wired provider
             # can break the tie — by identity, never by message prose. GRC's

@@ -95,6 +95,23 @@ def _lock_path_for(path: Path) -> Path:
     return path.parent / ".grc_agent" / (path.name + ".lock")
 
 
+def _spawn_failed(monitor) -> bool:
+    """The monitor's spawn-crash verdict; False on monitors without it."""
+    return bool(getattr(monitor, "last_run_spawn_failed", False))
+
+
+def _apply_spawn_state(res: dict, monitor) -> None:
+    """Flag a spawn-crashed run and replace the note with the spawn guidance."""
+    if _spawn_failed(monitor):
+        res["spawn_failed"] = True
+        res["ran_successfully"] = False
+        res["note"] = (
+            "The flowgraph process failed to spawn — nothing was executed. Read the "
+            "full console output with the get_run_log tool (its spawn_note and the "
+            "retained exception text name the cause), fix the environment, and run again."
+        )
+
+
 class NativeFlowgraphProxy:
     """Transparent proxy for the active flowgraph (agent deps). Resolves
     to ``window.current_page.flow_graph`` on every access — automatically
@@ -267,15 +284,15 @@ class NativeFlowgraphProxy:
 
         if outcome == "completed":
             code = monitor.last_run_code
-            # U5: a code-less Done marker with an unchanged process identity is
+            # A code-less Done marker with an unchanged process identity is
             # a spawn crash — GRC's own Executor emits send_end_exec() with the
             # default code 0 when subprocess.Popen raises. The monitor's flag
             # carries the verdict; surface it without fabricating a code.
-            spawn_failed = bool(getattr(monitor, "last_run_spawn_failed", False))
             res = {
                 "status": "completed",
                 "return_code": code,
-                "ran_successfully": code == 0 and not spawn_failed,
+                "ran_successfully": code == 0
+                and not _spawn_failed(monitor),
                 "note": (
                     "Read the full console output with the get_run_log tool. An empty log "
                     "with an immediate completion can mean the graph ran in an external "
@@ -289,13 +306,7 @@ class NativeFlowgraphProxy:
                     "This flowgraph was generated with generate_options='no_gui'. GNU Radio runs "
                     "no_gui flowgraphs in an external terminal wrapper; read get_run_log for output details."
                 )
-            if spawn_failed:
-                res["spawn_failed"] = True
-                res["note"] = (
-                    "The flowgraph process failed to spawn — nothing was executed. Read the "
-                    "full console output with the get_run_log tool (its spawn_note and the "
-                    "retained exception text name the cause), fix the environment, and run again."
-                )
+            _apply_spawn_state(res, monitor)
             return res
         if outcome == "still_running":
             if stop_after_seconds is not None:
@@ -348,23 +359,16 @@ class NativeFlowgraphProxy:
         stop_res = await self.stop_flowgraph()
         if stop_res.get("status") == "not_running":
             code = monitor.last_run_code
-            spawn_failed = bool(getattr(monitor, "last_run_spawn_failed", False))
             res = {
                 "status": "completed",
                 "return_code": code,
-                "ran_successfully": code == 0 and not spawn_failed,
+                "ran_successfully": code == 0 and not _spawn_failed(monitor),
                 "note": (
                     f"The run finished on its own right at the {stop_after_seconds}s "
                     "auto-stop deadline. Read the full output with get_run_log."
                 ),
             }
-            if spawn_failed:
-                res["spawn_failed"] = True
-                res["note"] = (
-                    "The flowgraph process failed to spawn — nothing was executed. Read the "
-                    "full console output with the get_run_log tool (its spawn_note and the "
-                    "retained exception text name the cause), fix the environment, and run again."
-                )
+            _apply_spawn_state(res, monitor)
             return res
         return {
             "status": "stopped_after_timeout",

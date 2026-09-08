@@ -313,7 +313,6 @@ class TranscriptViewMixin:
                     label_payload = ret_part.content
                 else:
                     ret_content, ok, retry = "", True, False
-                    label_payload = ""
 
                 if ret_content:
                     self._set_tool_body(exp, ret_content)
@@ -436,15 +435,13 @@ class TranscriptViewMixin:
         name = getattr(exp, "_grc_tool_name", "?")
         exp.set_label(_tool_label_running(name))
 
-    def _set_tool_result(
-        self, exp: Gtk.Expander, result: str, *, ok: bool = True, payload: Any = None
-    ) -> None:
-        self._set_tool_body(exp, result)
+    def _set_tool_result(self, exp: Gtk.Expander, result: Any, *, ok: bool = True) -> None:
+        display = result if isinstance(result, str) else str(result)
+        self._set_tool_body(exp, display)
         name = getattr(exp, "_grc_tool_name", "?")
-        # `payload` is the raw tool return when the caller holds it; the
-        # label rule reads the structured field from it, while `result`
-        # stays the display string (repr, byte-stable copy text).
-        exp.set_label(_tool_label(name, ok=ok, result=result if payload is None else payload))
+        # The label rule reads the structured field when the payload is a
+        # mapping; the display string stays repr-stable for copy text.
+        exp.set_label(_tool_label(name, ok=ok, result=result))
 
     def _append_error(self, message: str, style: str = "error") -> None:
         """Append an inline status label to the chat log.

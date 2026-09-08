@@ -786,12 +786,13 @@ def test_settings_dialog_save_warns_on_unserved_model(tmp_path, monkeypatch):
     assert "not served" in (sidebar._status_label.get_text() or "")
 
 
-def test_streaming_text_flush_immediate_and_delta_only():
-    """Unforced flushes drain immediately — the flush RATE is bounded by the
-    frame-cadence tick source, not by a time gate inside _flush_streaming —
-    and buffers are append-only: each drain paints only the delta since the
+def test_streaming_text_flush_coalesces_to_frame_tick():
+    """Unforced flushes only arm the per-turn frame-cadence tick — the drain
+    happens when the tick fires, so paints coalesce to at most one per frame
+    and buffers stay append-only: each drain paints only the delta since the
     last one (repainting the whole buffer per frame would re-run Pango
-    layout over the growing message and freeze the UI)."""
+    layout over the growing message and freeze the UI). force=True is the
+    lossless close path (part start/close/stream end) and drains inline."""
     from gi.repository import Gtk
 
     from grc_agent.chat.stream_view import _ChunkAccumulator, _StreamCtx
@@ -802,44 +803,36 @@ def test_streaming_text_flush_immediate_and_delta_only():
     sidebar._ensure_text(ctx)
     assert ctx.text_lbl is not None
 
+    def _buffer_text():
+        buf = ctx.text_lbl.get_buffer()
+        return buf.get_text(buf.get_start_iter(), buf.get_end_iter(), True)
+
     ctx.text_acc = _ChunkAccumulator("chunk1")
     ctx.text_dirty = True
     sidebar._flush_streaming(ctx)
-    assert (
-        ctx.text_lbl.get_buffer().get_text(
-            ctx.text_lbl.get_buffer().get_start_iter(),
-            ctx.text_lbl.get_buffer().get_end_iter(),
-            True,
-        )
-        == "chunk1"
-    )
+    assert ctx.flush_tick_id is not None, "unforced flush must arm the tick"
+    assert _buffer_text() == "", "no paint before the frame tick fires"
+
+    sidebar._on_stream_flush_tick(ctx)
+    assert _buffer_text() == "chunk1"
     assert ctx.text_dirty is False
 
-    # A second chunk in the same text part is append-only and drains as a delta.
+    # Deltas arriving before the next frame coalesce: still one paint per tick,
+    # append-only (never a full-buffer repaint).
     ctx.text_acc += "chunk2"
     ctx.text_dirty = True
     sidebar._flush_streaming(ctx)
-    assert (
-        ctx.text_lbl.get_buffer().get_text(
-            ctx.text_lbl.get_buffer().get_start_iter(),
-            ctx.text_lbl.get_buffer().get_end_iter(),
-            True,
-        )
-        == "chunk1chunk2"
-    )
+    assert _buffer_text() == "chunk1", "mid-frame deltas must not paint"
+    sidebar._on_stream_flush_tick(ctx)
+    assert _buffer_text() == "chunk1chunk2"
 
-    # force=True is the lossless close path (used on part start/close/stream end).
+    # force=True is the lossless close path and drains inline.
     ctx.text_acc += "chunk3"
     ctx.text_dirty = True
     sidebar._flush_streaming(ctx, force=True)
-    assert (
-        ctx.text_lbl.get_buffer().get_text(
-            ctx.text_lbl.get_buffer().get_start_iter(),
-            ctx.text_lbl.get_buffer().get_end_iter(),
-            True,
-        )
-        == "chunk1chunk2chunk3"
-    )
+    assert _buffer_text() == "chunk1chunk2chunk3"
+
+    sidebar._disarm_stream_flush(ctx)
 
 
 def test_chunk_accumulator_replace_chunk():
@@ -871,12 +864,11 @@ def test_chunk_accumulator_replace_chunk():
 
 
 def test_streaming_thinking_flush_and_collapsed_skip():
-    """Expanded thinking drains immediately (the frame-cadence tick bounds
-    the rate); collapsed thinking stays out of GTK layout entirely until
-    part close, and force=True flushes losslessly either way. Buffers
-    accumulate (delta-append, never full replace) — replacing the whole
-    buffer per flush would reset the thinking scroller's scroll position
-    mid-stream."""
+    """Expanded thinking drains on the frame tick (one paint per frame);
+    collapsed thinking stays out of GTK layout entirely until part close,
+    and force=True flushes losslessly either way. Buffers accumulate
+    (delta-append, never full replace) — replacing the whole buffer per
+    flush would reset the thinking scroller's scroll position mid-stream."""
     from gi.repository import Gtk
 
     from grc_agent.chat.stream_view import _ChunkAccumulator, _StreamCtx
@@ -888,50 +880,34 @@ def test_streaming_thinking_flush_and_collapsed_skip():
     assert ctx.think_body is not None
     ctx.think_expander.set_expanded(True)
 
+    def _buffer_text():
+        buf = ctx.think_body.get_buffer()
+        return buf.get_text(buf.get_start_iter(), buf.get_end_iter(), True)
+
     ctx.think_acc = _ChunkAccumulator("thought1")
     ctx.think_dirty = True
     sidebar._flush_streaming(ctx)
-    assert (
-        ctx.think_body.get_buffer().get_text(
-            ctx.think_body.get_buffer().get_start_iter(),
-            ctx.think_body.get_buffer().get_end_iter(),
-            True,
-        )
-        == "thought1"
-    )
+    assert _buffer_text() == "", "no paint before the frame tick fires"
+    sidebar._on_stream_flush_tick(ctx)
+    assert _buffer_text() == "thought1"
 
     ctx.think_acc += "thought2"  # real streaming appends deltas, never replaces
     ctx.think_dirty = True
     sidebar._flush_streaming(ctx, force=True)
-    assert (
-        ctx.think_body.get_buffer().get_text(
-            ctx.think_body.get_buffer().get_start_iter(),
-            ctx.think_body.get_buffer().get_end_iter(),
-            True,
-        )
-        == "thought1thought2"
-    )
+    assert _buffer_text() == "thought1thought2"
 
-    # Collapsed reasoning is skipped by unforced flushes: no hidden-text
+    # Collapsed reasoning is skipped by unforced drains: no hidden-text
     # layout work per frame. force=True still drains it losslessly.
     ctx.think_acc += "thought3"
     ctx.think_dirty = True
     ctx.think_expander.set_expanded(False)
     sidebar._flush_streaming(ctx)
-    assert "thought3" not in ctx.think_body.get_buffer().get_text(
-        ctx.think_body.get_buffer().get_start_iter(),
-        ctx.think_body.get_buffer().get_end_iter(),
-        True,
-    )
+    sidebar._on_stream_flush_tick(ctx)
+    assert "thought3" not in _buffer_text()
     sidebar._flush_streaming(ctx, force=True)
-    assert (
-        ctx.think_body.get_buffer().get_text(
-            ctx.think_body.get_buffer().get_start_iter(),
-            ctx.think_body.get_buffer().get_end_iter(),
-            True,
-        )
-        == "thought1thought2thought3"
-    )
+    assert _buffer_text() == "thought1thought2thought3"
+
+    sidebar._disarm_stream_flush(ctx)
 
 
 def test_stream_flush_tick_arms_drains_and_disarms():

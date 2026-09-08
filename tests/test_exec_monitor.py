@@ -617,7 +617,7 @@ def test_spawn_failure_unchanged_identity_reports_failure():
     monitor.handle_message("\n>>> Done\n")  # provider still (page1, None)
 
     assert len(calls) == 1
-    assert calls[0][0] == 0  # truthful code — never fabricated (KTD6)
+    assert calls[0][0] == 0  # truthful code — never fabricated
     assert "xterm" in calls[0][1]
     res = monitor.get_last_run_log()
     assert res is not None
@@ -738,17 +738,14 @@ def test_tab_switch_mid_run_keeps_legacy_classification():
     assert "spawn_failed" not in res
 
 
-def test_run_result_reports_spawn_failure():
-    """The agent-visible run_flowgraph result must reflect the spawn flag:
-    not-successful with a spawn note, return code still truthful (0)."""
-    import asyncio
-    from types import SimpleNamespace
+def _result_monitor(spawn_failed: bool):
+    """Minimal monitor stub for run-result tests, parameterized by spawn flag."""
 
-    class _SpawnFailedMonitor:
+    class _StubMonitor:
         last_run_code = 0
         run_epoch = 1
         is_tracking = False
-        last_run_spawn_failed = True
+        last_run_spawn_failed = spawn_failed
 
         def mark_run_agent_initiated(self):
             pass
@@ -759,7 +756,16 @@ def test_run_result_reports_spawn_failure():
         async def wait_for_run_end(self, timeout, *, epoch=None):  # noqa: ARG002
             return "completed"
 
-    monitor = _SpawnFailedMonitor()
+    return _StubMonitor()
+
+
+def test_run_result_reports_spawn_failure():
+    """The agent-visible run_flowgraph result must reflect the spawn flag:
+    not-successful with a spawn note, return code still truthful (0)."""
+    import asyncio
+    from types import SimpleNamespace
+
+    monitor = _result_monitor(spawn_failed=True)
     cm = NativeCanvasManager.__new__(NativeCanvasManager)
     cm.window = SimpleNamespace(current_page=None)
     proxy = NativeFlowgraphProxy(cm, exec_monitor=monitor)
@@ -776,22 +782,7 @@ def test_run_result_success_has_no_spawn_flag():
     import asyncio
     from types import SimpleNamespace
 
-    class _OkMonitor:
-        last_run_code = 0
-        run_epoch = 1
-        is_tracking = False
-        last_run_spawn_failed = False
-
-        def mark_run_agent_initiated(self):
-            pass
-
-        def mark_run_agent_initiated_cancelled(self):
-            pass
-
-        async def wait_for_run_end(self, timeout, *, epoch=None):  # noqa: ARG002
-            return "completed"
-
-    monitor = _OkMonitor()
+    monitor = _result_monitor(spawn_failed=False)
     cm = NativeCanvasManager.__new__(NativeCanvasManager)
     cm.window = SimpleNamespace(current_page=None)
     proxy = NativeFlowgraphProxy(cm, exec_monitor=monitor)
@@ -805,22 +796,7 @@ def test_bounded_run_finish_reports_spawn_failure():
     import asyncio
     from types import SimpleNamespace
 
-    class _SpawnFailedMonitor:
-        last_run_code = 0
-        run_epoch = 1
-        is_tracking = False
-        last_run_spawn_failed = True
-
-        def mark_run_agent_initiated(self):
-            pass
-
-        def mark_run_agent_initiated_cancelled(self):
-            pass
-
-        async def wait_for_run_end(self, timeout, *, epoch=None):  # noqa: ARG002
-            return "completed"
-
-    monitor = _SpawnFailedMonitor()
+    monitor = _result_monitor(spawn_failed=True)
     cm = NativeCanvasManager.__new__(NativeCanvasManager)
     cm.window = SimpleNamespace(current_page=None)
     proxy = NativeFlowgraphProxy(cm, exec_monitor=monitor)

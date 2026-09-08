@@ -171,6 +171,13 @@ assert set(PROVIDER_BASE_URL_SETTING) == {
 }, "PROVIDER_BASE_URL_SETTING must cover exactly the user-editable providers"
 
 
+# Shared preflight hint for plain API-key providers (openrouter/openai).
+_API_KEY_PREFLIGHT_HINT = (
+    "• Verify your API key for {provider}.\n"
+    "• Check reachability of {base_url}."
+)
+
+
 # Default chat behavior, merged under every entry of PROVIDER_BEHAVIORS.
 # The preflight hint here is the generic OpenAI-compatible fallback that
 # unknown providers (and catalog entries without a specific one) get.
@@ -212,16 +219,10 @@ PROVIDER_BEHAVIORS = {
         ),
     },
     "openrouter": {
-        "preflight_hint": (
-            "• Verify your API key for {provider}.\n"
-            "• Check reachability of {base_url}."
-        ),
+        "preflight_hint": _API_KEY_PREFLIGHT_HINT,
     },
     "openai": {
-        "preflight_hint": (
-            "• Verify your API key for {provider}.\n"
-            "• Check reachability of {base_url}."
-        ),
+        "preflight_hint": _API_KEY_PREFLIGHT_HINT,
     },
 }
 
