@@ -19,7 +19,7 @@ import gi
 
 gi.require_version("Gtk", "3.0")
 
-from gi.repository import Gtk
+from gi.repository import GLib, Gtk
 from pydantic_ai import (
     FunctionToolCallEvent,
     FunctionToolResultEvent,
@@ -37,6 +37,7 @@ from pydantic_ai.messages import (
     ToolCallPart,
 )
 
+from ..ui.providers import provider_behavior
 from .constants import _is_near_bottom
 from .format import (
     _parse_final_summary,
@@ -50,11 +51,6 @@ from .format import (
 )
 
 _log = logging.getLogger(__name__)
-
-# Minimum interval between visible-text UI flushes. Stream chunks accumulate
-# append-only and drain into Gtk.TextBuffer in batches; the final markdown
-# render still replaces only this turn's temporary stream row.
-_STREAM_FLUSH_INTERVAL = 0.033
 
 
 class _ChunkAccumulator:
@@ -157,7 +153,9 @@ class _StreamCtx:
     # Without this, mid-stream copy text carried thinking bare and diverged
     # from the post-render copy (U3/F-02).
     thinking_transcript_open: bool = False
-    last_flush: float = 0.0
+    # Source id of the per-turn frame-cadence flush tick (None until the
+    # first unforced flush arms it, cleared when the stream ends).
+    flush_tick_id: int | None = None
     last_event_ts: float = 0.0
     pending_chars: int = 0
     pending_chunks: int = 0
@@ -173,14 +171,19 @@ class StreamViewMixin:
     """
 
     async def _stream_request(self, ctx: _StreamCtx, node, run) -> None:
-        async with node.stream(run.ctx) as stream:
-            async for event in stream:
-                if isinstance(event, PartStartEvent):
-                    self._on_part_start(ctx, event)
-                elif isinstance(event, PartDeltaEvent):
-                    self._on_part_delta(ctx, event)
-        # Force a final flush so the last throttled chunk is painted before the
-        # node hands control back (and before any markdown re-render).
+        try:
+            async with node.stream(run.ctx) as stream:
+                async for event in stream:
+                    if isinstance(event, PartStartEvent):
+                        self._on_part_start(ctx, event)
+                    elif isinstance(event, PartDeltaEvent):
+                        self._on_part_delta(ctx, event)
+        finally:
+            # The frame-cadence source dies with the stream even when the
+            # node stream unwinds early (turn cancelled mid-flight).
+            self._disarm_stream_flush(ctx)
+        # Force a final flush so the last tick-drained chunk is painted
+        # before the node hands control back (and before any re-render).
         self._flush_streaming(ctx, force=True)
         self._close_thinking(ctx)
 
@@ -210,7 +213,7 @@ class StreamViewMixin:
                             # succeeded while streaming and as failed only
                             # after a full re-render.
                             ok = getattr(event.part, "outcome", "success") != "failed"
-                            self._set_tool_result(exp, res_str, ok=ok)
+                            self._set_tool_result(exp, res_str, ok=ok, payload=event.part.content)
                         self._record_tool_result_transcript(ctx, tcid, res_str)
                         self._update_copy_text(ctx.box, ctx.full_raw_text)
 
@@ -280,7 +283,7 @@ class StreamViewMixin:
             exp = ctx.tools.get(tcid)
             if exp is not None:
                 res_str = str(part.content)
-                self._set_tool_result(exp, res_str, ok=part.outcome != "failed")
+                self._set_tool_result(exp, res_str, ok=part.outcome != "failed", payload=part.content)
                 self._record_tool_result_transcript(ctx, tcid, res_str)
                 self._update_copy_text(ctx.box, ctx.full_raw_text)
         elif isinstance(part, ThinkingPart):
@@ -333,18 +336,52 @@ class StreamViewMixin:
             ctx.think_dirty = True
             self._flush_streaming(ctx)
 
-    def _flush_streaming(self, ctx: _StreamCtx, *, force: bool = False) -> None:  # noqa: C901
-        """Drain append-only stream chunks into GTK text buffers at a bounded rate.
+    def _arm_stream_flush(self, ctx: _StreamCtx) -> None:
+        """Arm the per-turn frame-cadence flush source once.
 
-        Collapsed reasoning stays out of GTK layout until part close; expanded
-        reasoning updates at 4 Hz. A forced close flush preserves every byte.
+        One uniform cadence for the whole turn: the frame clock ticks only
+        while frames are produced, so an idle loop pays nothing, and the
+        source is owned by the turn's message row — GTK removes the
+        callback automatically if the row is destroyed mid-turn.
         """
-        now = time.monotonic()
+        if ctx.flush_tick_id is not None:
+            return
+        ctx.flush_tick_id = ctx.box.add_tick_callback(
+            lambda _widget, _frame_clock: self._on_stream_flush_tick(ctx)
+        )
+
+    def _on_stream_flush_tick(self, ctx: _StreamCtx) -> int:
+        """One frame tick: drain dirty accumulators, keep the source armed."""
+        if ctx.flush_tick_id is None:
+            return GLib.SOURCE_REMOVE
+        self._flush_streaming(ctx)
+        return GLib.SOURCE_CONTINUE
+
+    def _disarm_stream_flush(self, ctx: _StreamCtx) -> None:
+        """Stop the per-turn flush cadence (stream end or cancellation)."""
+        if ctx.flush_tick_id is None:
+            return
+        tick_id, ctx.flush_tick_id = ctx.flush_tick_id, None
+        try:
+            ctx.box.remove_tick_callback(tick_id)
+        except Exception:  # a destroyed row already removed it
+            _log.debug("stream flush tick source already gone", exc_info=True)
+
+    def _flush_streaming(self, ctx: _StreamCtx, *, force: bool = False) -> None:
+        """Drain append-only stream chunks into GTK text buffers.
+
+        Frequency is bounded by the frame cadence, not by this method: the
+        per-turn tick source (``_arm_stream_flush``) drains once per
+        rendered frame, so event handlers only mark accumulators dirty.
+        A forced close flush preserves every byte. Collapsed reasoning
+        stays out of GTK layout until part close; the lossless buffer is
+        still flushed once when the part closes.
+        """
         if not force:
+            self._arm_stream_flush(ctx)
             # Reasoning is secondary and collapsed by default. Do not spend
-            # the GTK thread laying out hidden streamed text; if the user
-            # expands it, update at 4 Hz. The full lossless buffer is flushed
-            # once when the part closes.
+            # the GTK thread laying out hidden streamed text; the full
+            # lossless buffer is flushed when the part closes.
             thinking_only = ctx.think_dirty and not ctx.text_dirty
             if (
                 thinking_only
@@ -352,20 +389,9 @@ class StreamViewMixin:
                 and not ctx.think_expander.get_expanded()
             ):
                 return
-            text_len = len(ctx.text_acc) + len(ctx.think_acc)
-            if thinking_only:
-                interval = 0.25
-            elif text_len > 5000:
-                interval = 0.066
-            elif text_len > 2000:
-                interval = 0.050
-            else:
-                interval = _STREAM_FLUSH_INTERVAL
-            if (now - ctx.last_flush) < interval:
-                return
 
-        flush_start = time.monotonic()
         flushed = False
+        flush_start = time.monotonic()
         if ctx.text_dirty and ctx.text_lbl is not None:
             self._flush_text(ctx)
             ctx.text_dirty = False
@@ -387,7 +413,6 @@ class StreamViewMixin:
                 )
                 ctx.pending_chunks = 0
                 ctx.pending_chars = 0
-            ctx.last_flush = now
             if force:
                 self._update_copy_text(ctx.box, ctx.full_raw_text)
             if flushed:
@@ -431,9 +456,12 @@ class StreamViewMixin:
         ctx.text_dirty = False
 
     def _thinking_label(self, *, streaming: bool = False) -> str:
-        if getattr(self, "_active_provider", "") == "openai_codex":
-            return "Thinking (summary)..." if streaming else "Thought summary (Codex)"
-        return "Thinking..." if streaming else "Thought"
+        behavior = provider_behavior(getattr(self, "_active_provider", "") or "")
+        return (
+            behavior["thinking_label_streaming"]
+            if streaming
+            else behavior["thinking_label"]
+        )
 
     def _close_thinking(self, ctx: _StreamCtx) -> None:
         if ctx.think_body is None:

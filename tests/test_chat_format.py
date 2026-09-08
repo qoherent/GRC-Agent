@@ -57,6 +57,52 @@ def test_query_knowledge_label_shows_search_mode():
     assert _tool_label("inspect_graph", result='{"ok": true}') == "⚙ inspect_graph ✓"
 
 
+def test_query_knowledge_label_reads_any_valid_json_spacing():
+    """The suffix comes from the parsed payload, not from substring
+    spellings: any valid JSON serialization of the same payload yields the
+    same label, whatever whitespace the serializer chose."""
+    from grc_agent.chat.format import _tool_label
+
+    assert (
+        _tool_label("query_knowledge", result='{"search_mode" : "hybrid"}')
+        == "⚙ query_knowledge (hybrid) ✓"
+    )
+
+
+def test_query_knowledge_label_reads_structured_dict_payload():
+    """Tool results arrive at the render path as the raw structured payload
+    (ToolReturnPart.content is a dict, not a string). The label rule must
+    read the field from that payload directly — the callers pass what they
+    hold, per fix-at-the-source."""
+    from grc_agent.chat.format import _tool_label
+
+    assert (
+        _tool_label("query_knowledge", result={"search_mode": "vector"})
+        == "⚙ query_knowledge (vector) ✓"
+    )
+    assert (
+        _tool_label("query_knowledge", result={"search_mode": "lexical", "hits": []})
+        == "⚙ query_knowledge (lexical) ✓"
+    )
+
+
+def test_query_knowledge_label_plain_for_non_json_and_missing_field():
+    """Non-JSON results (model retry prose) and JSON payloads without the
+    search_mode field render the plain label — no suffix is invented."""
+    from grc_agent.chat.format import _tool_label
+
+    assert _tool_label("query_knowledge", result="1 validation error for ...") == (
+        "⚙ query_knowledge ✓"
+    )
+    assert _tool_label("query_knowledge", result='{"ok": true, "hits": []}') == (
+        "⚙ query_knowledge ✓"
+    )
+    # A JSON array is not the result mapping — no suffix.
+    assert _tool_label("query_knowledge", result='["search_mode"]') == (
+        "⚙ query_knowledge ✓"
+    )
+
+
 def test_tool_label_running_and_default():
     from grc_agent.chat.format import _tool_label, _tool_label_running
 

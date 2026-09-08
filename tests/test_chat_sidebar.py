@@ -786,11 +786,12 @@ def test_settings_dialog_save_warns_on_unserved_model(tmp_path, monkeypatch):
     assert "not served" in (sidebar._status_label.get_text() or "")
 
 
-def test_streaming_text_flush_is_throttled(monkeypatch):
-    """Streaming must NOT call Gtk.Label.set_text on every token (that re-runs
-    Pango line-wrap layout over the whole growing message = O(n^2) and freezes
-    the UI). _flush_streaming throttles to _STREAM_FLUSH_INTERVAL; force=True
-    bypasses it. Time is mocked for determinism."""
+def test_streaming_text_flush_immediate_and_delta_only():
+    """Unforced flushes drain immediately — the flush RATE is bounded by the
+    frame-cadence tick source, not by a time gate inside _flush_streaming —
+    and buffers are append-only: each drain paints only the delta since the
+    last one (repainting the whole buffer per frame would re-run Pango
+    layout over the growing message and freeze the UI)."""
     from gi.repository import Gtk
 
     from grc_agent.chat.stream_view import _ChunkAccumulator, _StreamCtx
@@ -801,24 +802,8 @@ def test_streaming_text_flush_is_throttled(monkeypatch):
     sidebar._ensure_text(ctx)
     assert ctx.text_lbl is not None
 
-    t = [0.0]
-    monkeypatch.setattr("grc_agent.chat.stream_view.time.monotonic", lambda: t[0])
-
-    # First flush at t=0 with last_flush=0.0 -> (0 - 0.0) < interval -> skip.
     ctx.text_acc = _ChunkAccumulator("chunk1")
     ctx.text_dirty = True
-    sidebar._flush_streaming(ctx)
-    assert (
-        ctx.text_lbl.get_buffer().get_text(
-            ctx.text_lbl.get_buffer().get_start_iter(),
-            ctx.text_lbl.get_buffer().get_end_iter(),
-            True,
-        )
-        == ""
-    )  # throttled, not painted
-
-    # Advance past the interval -> flush fires.
-    t[0] = 0.05
     sidebar._flush_streaming(ctx)
     assert (
         ctx.text_lbl.get_buffer().get_text(
@@ -830,21 +815,10 @@ def test_streaming_text_flush_is_throttled(monkeypatch):
     )
     assert ctx.text_dirty is False
 
-    # A second chunk in the same text part is append-only and throttled again.
+    # A second chunk in the same text part is append-only and drains as a delta.
     ctx.text_acc += "chunk2"
     ctx.text_dirty = True
-    sidebar._flush_streaming(ctx)  # t=0.05, last_flush=0.05 -> skip
-    assert (
-        ctx.text_lbl.get_buffer().get_text(
-            ctx.text_lbl.get_buffer().get_start_iter(),
-            ctx.text_lbl.get_buffer().get_end_iter(),
-            True,
-        )
-        == "chunk1"
-    )
-
-    # force=True bypasses the interval (used on part start/close/stream end).
-    sidebar._flush_streaming(ctx, force=True)
+    sidebar._flush_streaming(ctx)
     assert (
         ctx.text_lbl.get_buffer().get_text(
             ctx.text_lbl.get_buffer().get_start_iter(),
@@ -852,6 +826,19 @@ def test_streaming_text_flush_is_throttled(monkeypatch):
             True,
         )
         == "chunk1chunk2"
+    )
+
+    # force=True is the lossless close path (used on part start/close/stream end).
+    ctx.text_acc += "chunk3"
+    ctx.text_dirty = True
+    sidebar._flush_streaming(ctx, force=True)
+    assert (
+        ctx.text_lbl.get_buffer().get_text(
+            ctx.text_lbl.get_buffer().get_start_iter(),
+            ctx.text_lbl.get_buffer().get_end_iter(),
+            True,
+        )
+        == "chunk1chunk2chunk3"
     )
 
 
@@ -883,9 +870,13 @@ def test_chunk_accumulator_replace_chunk():
     assert str(acc3) == "something else"
 
 
-def test_streaming_thinking_flush_throttled(monkeypatch):
-    """Mirror of the text-flush test for the ThinkingPart branch: thinking
-    tokens are throttled the same way and force=True flushes them."""
+def test_streaming_thinking_flush_and_collapsed_skip():
+    """Expanded thinking drains immediately (the frame-cadence tick bounds
+    the rate); collapsed thinking stays out of GTK layout entirely until
+    part close, and force=True flushes losslessly either way. Buffers
+    accumulate (delta-append, never full replace) — replacing the whole
+    buffer per flush would reset the thinking scroller's scroll position
+    mid-stream."""
     from gi.repository import Gtk
 
     from grc_agent.chat.stream_view import _ChunkAccumulator, _StreamCtx
@@ -897,22 +888,8 @@ def test_streaming_thinking_flush_throttled(monkeypatch):
     assert ctx.think_body is not None
     ctx.think_expander.set_expanded(True)
 
-    t = [0.0]
-    monkeypatch.setattr("grc_agent.chat.stream_view.time.monotonic", lambda: t[0])
-
     ctx.think_acc = _ChunkAccumulator("thought1")
     ctx.think_dirty = True
-    sidebar._flush_streaming(ctx)  # t=0, last_flush=0.0 -> throttled
-    assert (
-        ctx.think_body.get_buffer().get_text(
-            ctx.think_body.get_buffer().get_start_iter(),
-            ctx.think_body.get_buffer().get_end_iter(),
-            True,
-        )
-        == ""
-    )
-
-    t[0] = 0.30
     sidebar._flush_streaming(ctx)
     assert (
         ctx.think_body.get_buffer().get_text(
@@ -925,19 +902,7 @@ def test_streaming_thinking_flush_throttled(monkeypatch):
 
     ctx.think_acc += "thought2"  # real streaming appends deltas, never replaces
     ctx.think_dirty = True
-    sidebar._flush_streaming(ctx)  # immediately after -> throttled
-    assert (
-        ctx.think_body.get_buffer().get_text(
-            ctx.think_body.get_buffer().get_start_iter(),
-            ctx.think_body.get_buffer().get_end_iter(),
-            True,
-        )
-        == "thought1"
-    )
     sidebar._flush_streaming(ctx, force=True)
-    # Buffers accumulate (delta-append, never full replace) — replacing the
-    # whole buffer per flush would reset the thinking scroller's scroll
-    # position mid-stream.
     assert (
         ctx.think_body.get_buffer().get_text(
             ctx.think_body.get_buffer().get_start_iter(),
@@ -946,6 +911,105 @@ def test_streaming_thinking_flush_throttled(monkeypatch):
         )
         == "thought1thought2"
     )
+
+    # Collapsed reasoning is skipped by unforced flushes: no hidden-text
+    # layout work per frame. force=True still drains it losslessly.
+    ctx.think_acc += "thought3"
+    ctx.think_dirty = True
+    ctx.think_expander.set_expanded(False)
+    sidebar._flush_streaming(ctx)
+    assert "thought3" not in ctx.think_body.get_buffer().get_text(
+        ctx.think_body.get_buffer().get_start_iter(),
+        ctx.think_body.get_buffer().get_end_iter(),
+        True,
+    )
+    sidebar._flush_streaming(ctx, force=True)
+    assert (
+        ctx.think_body.get_buffer().get_text(
+            ctx.think_body.get_buffer().get_start_iter(),
+            ctx.think_body.get_buffer().get_end_iter(),
+            True,
+        )
+        == "thought1thought2thought3"
+    )
+
+
+def test_stream_flush_tick_arms_drains_and_disarms():
+    """The frame-cadence source is the one flush clock: an unforced flush
+    arms it once per turn, each tick drains dirty accumulators, and
+    disarming (stream end / cancellation) stops the cadence and makes any
+    stray tick a remove."""
+    from gi.repository import GLib, Gtk
+
+    from grc_agent.chat.stream_view import _ChunkAccumulator, _StreamCtx
+    from grc_agent.chat_sidebar import ChatSidebar
+
+    sidebar = ChatSidebar()
+    ctx = _StreamCtx(Gtk.Box())
+    sidebar._ensure_text(ctx)
+    assert ctx.flush_tick_id is None
+
+    # An unforced flush arms the cadence.
+    ctx.text_acc = _ChunkAccumulator("")
+    sidebar._flush_streaming(ctx)
+    assert ctx.flush_tick_id is not None
+
+    # One tick drains dirty state (the callback itself is the clock body).
+    ctx.text_acc += "painted-by-tick"
+    ctx.text_dirty = True
+    assert sidebar._on_stream_flush_tick(ctx) == GLib.SOURCE_CONTINUE
+    assert (
+        ctx.text_lbl.get_buffer().get_text(
+            ctx.text_lbl.get_buffer().get_start_iter(),
+            ctx.text_lbl.get_buffer().get_end_iter(),
+            True,
+        )
+        == "painted-by-tick"
+    )
+
+    # Disarm stops the cadence; a stray tick removes instead of flushing.
+    sidebar._disarm_stream_flush(ctx)
+    assert ctx.flush_tick_id is None
+    sidebar._disarm_stream_flush(ctx)  # idempotent
+    ctx.text_acc += "never-armed"
+    ctx.text_dirty = True
+    assert sidebar._on_stream_flush_tick(ctx) == GLib.SOURCE_REMOVE
+    assert "never-armed" not in ctx.text_lbl.get_buffer().get_text(
+        ctx.text_lbl.get_buffer().get_start_iter(),
+        ctx.text_lbl.get_buffer().get_end_iter(),
+        True,
+    )
+
+
+def test_stream_flush_tick_dies_with_the_sidebar():
+    """The tick source is owned by the turn's message row: destroying the
+    sidebar (or clearing the transcript) removes it with the widget, so a
+    mid-destroy stream cannot keep firing flushes after teardown."""
+    from gi.repository import Gtk
+
+    from grc_agent.chat.stream_view import _StreamCtx
+    from grc_agent.chat_sidebar import ChatSidebar
+
+    sidebar = ChatSidebar()
+    ctx = _StreamCtx(Gtk.Box())
+    sidebar._ensure_text(ctx)
+
+    calls: list[int] = []
+    original_flush = sidebar._flush_streaming
+
+    def counting_flush(stream_ctx, *, force=False):
+        calls.append(1)
+        return original_flush(stream_ctx, force=force)
+
+    sidebar._flush_streaming = counting_flush
+    sidebar._arm_stream_flush(ctx)
+    assert ctx.flush_tick_id is not None
+
+    sidebar.destroy()
+    for _ in range(20):
+        while Gtk.events_pending():
+            Gtk.main_iteration()
+    assert calls == []
 
 
 def test_thinking_expander_label_changes_on_close():

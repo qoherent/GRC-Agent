@@ -171,6 +171,73 @@ assert set(PROVIDER_BASE_URL_SETTING) == {
 }, "PROVIDER_BASE_URL_SETTING must cover exactly the user-editable providers"
 
 
+# Default chat behavior, merged under every entry of PROVIDER_BEHAVIORS.
+# The preflight hint here is the generic OpenAI-compatible fallback that
+# unknown providers (and catalog entries without a specific one) get.
+_DEFAULT_PROVIDER_BEHAVIOR = {
+    "thinking_label_streaming": "Thinking...",
+    "thinking_label": "Thought",
+    "requires_sign_in": False,
+    "preflight_hint": (
+        "• Ensure your OpenAI-compatible server is running.\n"
+        "• Verify endpoint is reachable at {base_url}."
+    ),
+}
+
+# Per-provider chat behavior overrides: the thinking-expander labels (the
+# Codex backend streams a reasoning summary rather than raw thinking),
+# whether starting a turn requires a signed-in session, and the
+# preflight-failure hint ({base_url}/{provider} format placeholders).
+# Providers absent here inherit _DEFAULT_PROVIDER_BEHAVIOR wholesale.
+PROVIDER_BEHAVIORS = {
+    "openai_codex": {
+        "thinking_label_streaming": "Thinking (summary)...",
+        "thinking_label": "Thought summary (Codex)",
+        "requires_sign_in": True,
+        "preflight_hint": (
+            "• Click 'Sign in with ChatGPT' in Preferences.\n"
+            "• Codex requires an active ChatGPT Plus or Pro subscription."
+        ),
+    },
+    "ollama_local": {
+        "preflight_hint": (
+            "• Ensure local Ollama daemon is running ('ollama serve').\n"
+            "• Verify host is reachable at {base_url}."
+        ),
+    },
+    "ollama_cloud": {
+        "preflight_hint": (
+            "• Verify your Ollama Cloud API key.\n"
+            "• Check reachability of {base_url}."
+        ),
+    },
+    "openrouter": {
+        "preflight_hint": (
+            "• Verify your API key for {provider}.\n"
+            "• Check reachability of {base_url}."
+        ),
+    },
+    "openai": {
+        "preflight_hint": (
+            "• Verify your API key for {provider}.\n"
+            "• Check reachability of {base_url}."
+        ),
+    },
+}
+
+
+def provider_behavior(provider: str) -> dict:
+    """Chat behavior for ``provider``, merged over the default entry.
+
+    Returns a fresh dict so callers cannot mutate the shared tables.
+    Unknown providers get the default behavior wholesale — the generic
+    OpenAI-compatible posture — never a guessed entry.
+    """
+    behavior = dict(_DEFAULT_PROVIDER_BEHAVIOR)
+    behavior.update(PROVIDER_BEHAVIORS.get(provider, {}))
+    return behavior
+
+
 # Host fragment -> provider id, for mapping a running model's base_url back
 # to its canonical cfg key (the toolbar badge). One uniform table — no
 # per-provider branches. Local Ollama is keyed on the port because its host

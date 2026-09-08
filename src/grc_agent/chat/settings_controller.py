@@ -24,6 +24,7 @@ from ..settings import load_settings, save_settings, upsert_env_key
 from ..ui.css import apply_theme
 from ..ui.providers import PROVIDER_BASE_URL_SETTING as _PROVIDER_BASE_URL_SETTING
 from ..ui.providers import PROVIDER_LABELS as _PROVIDER_LABELS
+from ..ui.providers import provider_behavior as _provider_behavior
 from ..ui.settings_dialog import SettingsDialog
 
 _log = logging.getLogger(__name__)
@@ -187,16 +188,9 @@ class SettingsControllerMixin:
     ) -> None:
         """Non-blocking Yes/No confirm when the preflight ping fails."""
         provider_label = _PROVIDER_LABELS.get(provider, provider)
-        if provider == "openai_codex":
-            hint = "• Click 'Sign in with ChatGPT' in Preferences.\n• Codex requires an active ChatGPT Plus or Pro subscription."
-        elif provider == "ollama_local":
-            hint = f"• Ensure local Ollama daemon is running ('ollama serve').\n• Verify host is reachable at {base_url}."
-        elif provider == "ollama_cloud":
-            hint = f"• Verify your Ollama Cloud API key.\n• Check reachability of {base_url}."
-        elif provider in ("openrouter", "openai"):
-            hint = f"• Verify your API key for {provider}.\n• Check reachability of {base_url}."
-        else:
-            hint = f"• Ensure your OpenAI-compatible server is running.\n• Verify endpoint is reachable at {base_url}."
+        hint = _provider_behavior(provider)["preflight_hint"].format(
+            base_url=base_url, provider=provider
+        )
         self._confirm_yes_no(
             toplevel,
             title=f"Cannot reach {provider_label}",

@@ -52,6 +52,7 @@ from ..settings import load_settings, resolve_key
 from ..ui.providers import PROVIDER_API_KEY as _PROVIDER_API_KEY
 from ..ui.providers import PROVIDER_KEY_OPTIONAL as _PROVIDER_KEY_OPTIONAL
 from ..ui.providers import PROVIDER_LABELS as _PROVIDER_LABELS
+from ..ui.providers import provider_behavior as _provider_behavior
 from .errors import _format_turn_error
 from .history import (
     _clean_message_history_for_new_turn,
@@ -203,7 +204,7 @@ class TurnDriverMixin:
                     )
                     return
 
-            if configured_provider == "openai_codex":
+            if _provider_behavior(configured_provider)["requires_sign_in"]:
                 from ..providers.openai_codex import is_signed_in as codex_is_signed_in
 
                 if not codex_is_signed_in():

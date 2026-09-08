@@ -44,6 +44,33 @@ _CROSS = "\u2717"
 _WARN = "\u26a0"
 
 
+_SEARCH_MODES = ("lexical", "hybrid", "vector")
+
+
+def _result_search_mode(result: Any) -> str | None:
+    """The ``search_mode`` field of a query_knowledge result payload.
+
+    The payload arrives as the tool returned it — a dict at the render
+    path, or serialized JSON once it has been stringified for display.
+    One rule reads the field either way; anything else (retry prose,
+    JSON arrays, field absent) yields None and the plain label. The
+    vocabulary is the adapter's unified return shape.
+    """
+    if isinstance(result, dict):
+        data = result
+    elif isinstance(result, str):
+        try:
+            data = json.loads(result)
+        except ValueError:
+            return None
+    else:
+        return None
+    if not isinstance(data, dict):
+        return None
+    mode = data.get("search_mode")
+    return mode if mode in _SEARCH_MODES else None
+
+
 def _tool_label(
     name: str,
     *,
@@ -54,25 +81,9 @@ def _tool_label(
     """The expander title for a settled tool call."""
     label_name = name
     if name == "query_knowledge" and result is not None:
-        res_str = str(result)
-        if (
-            '"search_mode": "lexical"' in res_str
-            or "'search_mode': 'lexical'" in res_str
-            or '"search_mode":"lexical"' in res_str
-        ):
-            label_name = f"{name} (lexical)"
-        elif (
-            '"search_mode": "hybrid"' in res_str
-            or "'search_mode': 'hybrid'" in res_str
-            or '"search_mode":"hybrid"' in res_str
-        ):
-            label_name = f"{name} (hybrid)"
-        elif (
-            '"search_mode": "vector"' in res_str
-            or "'search_mode': 'vector'" in res_str
-            or '"search_mode":"vector"' in res_str
-        ):
-            label_name = f"{name} (vector)"
+        mode = _result_search_mode(result)
+        if mode is not None:
+            label_name = f"{name} ({mode})"
     if retry:
         return f"{_WARN} {label_name} retry"
     return f"{_GEAR} {label_name} {_CHECK if ok else _CROSS}"

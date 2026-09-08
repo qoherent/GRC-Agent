@@ -304,15 +304,20 @@ class TranscriptViewMixin:
 
                 if isinstance(ret_part, RetryPromptPart):
                     ret_content, ok, retry = ret_part.model_response(), True, True
+                    label_payload: Any = ret_content
                 elif ret_part is not None:
                     ret_content = str(ret_part.content)
                     ok, retry = ret_part.outcome != "failed", False
+                    # The label rule reads the structured payload the tool
+                    # returned; the repr string stays display/copy-only.
+                    label_payload = ret_part.content
                 else:
                     ret_content, ok, retry = "", True, False
+                    label_payload = ""
 
                 if ret_content:
                     self._set_tool_body(exp, ret_content)
-                    exp.set_label(_tool_label(tool_name, ok=ok, retry=retry, result=ret_content))
+                    exp.set_label(_tool_label(tool_name, ok=ok, retry=retry, result=label_payload))
                     full_text += _transcript_tool_call(tool_name, args_str, ret_content)
                 else:
                     exp.set_label(_tool_label(tool_name))
@@ -431,10 +436,15 @@ class TranscriptViewMixin:
         name = getattr(exp, "_grc_tool_name", "?")
         exp.set_label(_tool_label_running(name))
 
-    def _set_tool_result(self, exp: Gtk.Expander, result: str, *, ok: bool = True) -> None:
+    def _set_tool_result(
+        self, exp: Gtk.Expander, result: str, *, ok: bool = True, payload: Any = None
+    ) -> None:
         self._set_tool_body(exp, result)
         name = getattr(exp, "_grc_tool_name", "?")
-        exp.set_label(_tool_label(name, ok=ok, result=result))
+        # `payload` is the raw tool return when the caller holds it; the
+        # label rule reads the structured field from it, while `result`
+        # stays the display string (repr, byte-stable copy text).
+        exp.set_label(_tool_label(name, ok=ok, result=result if payload is None else payload))
 
     def _append_error(self, message: str, style: str = "error") -> None:
         """Append an inline status label to the chat log.
