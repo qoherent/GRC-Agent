@@ -3,16 +3,19 @@
 Deliberately creates each dataset-poisoning class against the real app +
 real persistence, then requires the auditor and exporter to catch them:
 
-  F1  autofix synthetic turn        -> manifest provenance=autofix, excluded from SFT
+  F1  autofix synthetic turn        -> manifest provenance=autofix, excluded
+                                       from the exported transcript
   F2  simulator abort mid-task      -> verdict simulator_aborted, quarantined
   F3  compaction placeholder        -> auditor passes only with the archive;
                                        exporter quarantines the session
-  F4  still-running flowgraph       -> teardown stops it and awaits not-tracking
-                                       (exercised-or-noted honestly)
-  F5  containment                   -> real DB + playground untouched (every task)
+  F4  still-running flowgraph       -> teardown stops it and awaits
+                                       not-tracking; NOT exercising the path
+                                       FAILS the dry run (review: silent-pass)
+  F5  containment                   -> real DB + playground untouched
 
-The primary SFT file must contain ONLY clean completed tasks — any leak fails
-the dry run loudly. No LLM spend (TestModel agent + scripted simulator).
+The primary SFT file must contain ONLY clean completed tasks and must NOT
+contain post-acceptance synthetic turns — any leak fails the dry run loudly.
+No LLM spend (TestModel agent + scripted simulator).
 
     xvfb-run -a uv run python -m experiments.dataset_collection.dryrun \\
         --campaign-dir /tmp/grc_dryrun
@@ -22,7 +25,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import contextlib
 import json
 import sys
 import tempfile
@@ -40,110 +42,88 @@ class _Args:
         self.__dict__.update(kw)
 
 
-async def dryrun(campaign_dir: Path) -> int:  # noqa: C901 - fault-injection scenarios
+async def dryrun(campaign_dir: Path) -> int:  # noqa: C901 - fault scenarios
     campaign_dir.mkdir(parents=True, exist_ok=True)
     results: dict[str, str] = {}
 
-    original_run_task = collect_mod.run_task
-    f4_exercised: dict[str, bool] = {"tracking": False}
-
-    def injected_run_task(**kwargs):
-        task = kwargs["task"]
-
+    def pre_teardown_for(task):
         if task.id == "t04_broken_sink_repair":
 
             def inject_autofix(sidebar) -> None:
-                # F1: notify_run_failure spawns the synthetic auto-fix turn.
+                # F1: notify_run_failure spawns the synthetic auto-fix turn
+                # after the acceptance gate — the exported transcript must
+                # strip it (review F7).
                 sidebar.notify_run_failure(1, "log text")
 
-            kwargs["pre_teardown"] = inject_autofix
+            return inject_autofix
 
         if task.id == "t09_knowledge_concepts":
 
-            def inject_still_running(sidebar) -> None:
-                # F4: a flowgraph left tracking at stop; teardown must stop
-                # it and await not-tracking.
-                async def _spawn() -> None:
-                    with contextlib.suppress(Exception):
-                        await sidebar._flowgraph_proxy.run_flowgraph(
-                            action="start", wait=False, stop_after_seconds=5
-                        )
+            async def inject_still_running(sidebar) -> None:
+                # F4: leave a flowgraph actually tracking at stop; teardown
+                # must stop it and await not-tracking. The hook awaits the
+                # spawn and the tracking observation directly (no leaked
+                # watcher racing the teardown).
+                try:
+                    await sidebar._flowgraph_proxy.run_flowgraph(action="start", wait=False)
+                except Exception as e:  # noqa: BLE001 - spawn failure is surfaced by the F4 verdict
+                    results["F4_spawn_error"] = f"{type(e).__name__}: {e}"
+                    return
+                for _ in range(20):
+                    if sidebar._flowgraph_proxy._exec_monitor.is_tracking:
+                        f4_exercised["task"] = task.id
+                        return
+                    await asyncio.sleep(0.2)
 
-                async def _watch() -> None:
-                    await _spawn()
-                    for _ in range(15):
-                        if sidebar._flowgraph_proxy._exec_monitor.is_tracking:
-                            f4_exercised["tracking"] = True
-                            return
-                        await asyncio.sleep(0.2)
+            return inject_still_running
 
-                asyncio.get_running_loop().create_task(_watch())
+        return None
 
-            kwargs["pre_teardown"] = inject_still_running
+    f4_exercised = {"task": None}
 
-        return original_run_task(**kwargs)
-
-    original_run_task = collect_mod.run_task
-
-    def factory(task, persona):  # noqa: ARG001 - uniform factory shape
+    def simulator_factory(task, persona):  # noqa: ARG001 - uniform shape
         canned = {
             "t04_broken_sink_repair": [
                 SimulatorTurn("fix my graph please", False, "opening"),
                 SimulatorTurn("did that fix it?", False, "checking"),
                 SimulatorTurn("great, done then", True, "satisfied"),
             ],
-            "t10_param_tuning": [
-                SimulatorTurn("tune it", False, "opening"),
-            ],
+            "t10_param_tuning": [SimulatorTurn("tune it", False, "opening")],
             "t09_knowledge_concepts": [
                 SimulatorTurn("explain it", False, "opening"),
                 SimulatorTurn("ok thanks", True, "satisfied"),
             ],
         }
-        return ScriptedSimulator(turns=list(canned.get(task.id, canned["t04_broken_sink_repair"])))
+        sim = ScriptedSimulator(turns=list(canned.get(task.id, canned["t04_broken_sink_repair"])))
+        if task.id != "t10_param_tuning":
+            return sim
+        calls = {"n": 0}
 
-    # F2 needs a mid-task LLM-style abort, not a stop decision: wrap t10's
-    # simulator so its second call raises SimulatorAborted.
-    original_factory_injector = factory
+        class _AbortSim:
+            async def next_turn(self, reply: str) -> SimulatorTurn:
+                calls["n"] += 1
+                if calls["n"] == 1:
+                    return await sim.next_turn(reply)
+                raise SimulatorAborted("injected: provider timeout after retry")
 
-    def simulator_factory(task, persona):
-        sim = original_factory_injector(task, persona)
-        if task.id == "t10_param_tuning":
-            outer = ScriptedSimulator(turns=[SimulatorTurn("tune it", False, "opening")])
-            calls = {"n": 0}
+        return _AbortSim()
 
-            class _AbortSim:
-                async def next_turn(self, reply: str) -> SimulatorTurn:
-                    calls["n"] += 1
-                    if calls["n"] == 1:
-                        return await outer.next_turn(reply)
-                    raise SimulatorAborted("injected: provider timeout after retry")
-
-            return _AbortSim()
-        return sim
-
-    collect_mod.run_task = injected_run_task
-    try:
-        rc = await collect_mod.campaign(
-            _Args(
-                campaign_dir=str(campaign_dir),
-                tasks="t04_broken_sink_repair,t10_param_tuning,t09_knowledge_concepts",
-                simulator="scripted",
-                agent="testmodel",
-            ),
-            simulator_factory=simulator_factory,
-        )
-    finally:
-        collect_mod.run_task = original_run_task
+    rc = await collect_mod.campaign(
+        _Args(
+            campaign_dir=str(campaign_dir),
+            tasks="t04_broken_sink_repair,t10_param_tuning,t09_knowledge_concepts",
+            simulator="scripted",
+            agent="testmodel",
+        ),
+        simulator_factory=simulator_factory,
+        pre_teardown_for=pre_teardown_for,
+    )
     if rc != 0:
         return rc
 
     # F3: inject a compaction placeholder + its archive into the campaign DB.
     # The auditor must PASS (archive present) and the exporter must quarantine.
-    from pydantic_ai_harness.step_persistence import (
-        ContinuableSnapshot,
-        RunRecord,
-    )
+    from pydantic_ai_harness.step_persistence import ContinuableSnapshot, RunRecord
 
     from grc_agent.db import get_step_store
 
@@ -151,7 +131,10 @@ async def dryrun(campaign_dir: Path) -> int:  # noqa: C901 - fault-injection sce
 
     store = get_step_store()
     manifest = Manifest(campaign_dir)
-    t09_sid = next((t.session_id for t in manifest.load_tasks() if t.task_id == "t09_knowledge_concepts"), None)
+    t09_sid = next(
+        (t.session_id for t in manifest.load_tasks() if t.task_id == "t09_knowledge_concepts"),
+        None,
+    )
     assert t09_sid, "t09 session id missing from manifest"
     conv = f"session-{t09_sid}"
     run_id = f"grc_executor-pre_compaction_transcript-{time.strftime('%H%M%S')}"
@@ -175,7 +158,12 @@ async def dryrun(campaign_dir: Path) -> int:  # noqa: C901 - fault-injection sce
         ]
     )
     await store.register_run(
-        RunRecord(run_id=run_id, conversation_id=conv, agent_name="grc_executor", metadata={"kind": "pre_compaction_transcript"})
+        RunRecord(
+            run_id=run_id,
+            conversation_id=conv,
+            agent_name="grc_executor",
+            metadata={"kind": "pre_compaction_transcript"},
+        )
     )
     await store.save_snapshot(
         ContinuableSnapshot(
@@ -196,14 +184,14 @@ async def dryrun(campaign_dir: Path) -> int:  # noqa: C901 - fault-injection sce
     )
     conn.commit()
     conn.close()
-    audit_rc = audit_campaign(campaign_dir)
-    results["F3_compaction_audited"] = "caught (archive present, session flagged)" if audit_rc == 0 else "MISSED"
 
-    # Export: compacted + aborted tasks must be quarantined; primary clean.
+    audit_rc = audit_campaign(campaign_dir)
+    results["F3_compaction_audited"] = "caught" if audit_rc == 0 else "MISSED"
+
+    # Export: compacted + aborted tasks quarantined; primary clean + frozen.
     from .export import export_campaign
 
-    export_rc = export_campaign(campaign_dir, audit_first=False)
-    if export_rc != 0:
+    if export_campaign(campaign_dir) != 0:
         print("F3 export failed outright")
         return 1
     primary = (campaign_dir / "export" / "sft_with_thinking.jsonl").read_text(encoding="utf-8")
@@ -211,17 +199,25 @@ async def dryrun(campaign_dir: Path) -> int:  # noqa: C901 - fault-injection sce
     results["primary_only_clean"] = (
         "caught" if all(r.get("task_id") == "t04_broken_sink_repair" for r in rows) else "MISSED"
     )
+    # F1 export assertion: the synthetic post-acceptance exchange is stripped.
+    t04_row = next((r for r in rows if r.get("task_id") == "t04_broken_sink_repair"), None)
+    user_msgs = [m["content"] for m in (t04_row or {}).get("messages", []) if m.get("role") == "user"]
+    results["F1_autofix_stripped"] = (
+        "caught" if t04_row is not None and all("failed" not in c.lower() for c in user_msgs) else "MISSED"
+    )
     quar = (campaign_dir / "export" / "quarantine.jsonl").read_text(encoding="utf-8")
     q_tasks = [json.loads(line)["task_id"] for line in quar.splitlines() if line.strip()]
     results["F2_abort_quarantined"] = "caught" if "t10_param_tuning" in q_tasks else "MISSED"
     results["F3_compaction_quarantined"] = "caught" if "t09_knowledge_concepts" in q_tasks else "MISSED"
 
     # F1: manifest carries the autofix provenance record.
-    manifest = Manifest(campaign_dir)
     autofix = [t for t in manifest.load_turns() if t.provenance == "autofix"]
     results["F1_autofix_recorded"] = "caught" if autofix else "MISSED"
+
     results["F4_still_running"] = (
-        "exercised (teardown stopped it)" if f4_exercised["tracking"] else "not-exercised (spawn failed)"
+        "exercised (teardown stopped it)"
+        if f4_exercised["task"]
+        else f"not-exercised ({results.get('F4_spawn_error', 'no spawn')})"
     )
 
     print("\n=== dry-run fault-injection report ===")
@@ -230,6 +226,10 @@ async def dryrun(campaign_dir: Path) -> int:  # noqa: C901 - fault-injection sce
         print(f"  {name:<28} {outcome}")
         if outcome == "MISSED":
             failures.append(name)
+    if results["F4_still_running"].startswith("not-exercised"):
+        # Silent-pass guard: the dry run must NOT pass without exercising F4
+        # (review F1/adversarial).
+        failures.append("F4_not_exercised")
     if failures:
         print(f"DRY RUN FAILED: {failures}")
         return 1
@@ -237,12 +237,7 @@ async def dryrun(campaign_dir: Path) -> int:  # noqa: C901 - fault-injection sce
     return 0
 
 
-async def _dryrun_entry(campaign_dir: Path) -> int:
-    return await dryrun(campaign_dir)
-
-
 def main(argv: list[str] | None = None) -> int:
-
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--campaign-dir", default=None)
     args = parser.parse_args(argv)

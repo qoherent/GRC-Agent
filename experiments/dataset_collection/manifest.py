@@ -79,6 +79,7 @@ class TaskRecord:
     acceptance_kind: str = ""
     acceptance_passed: bool | None = None
     acceptance_detail: str = ""
+    acceptance_frozen_len: int | None = None  # history length at acceptance time
     containment_ok: bool | None = None
     started_at: float = field(default_factory=time.time)
     ended_at: float | None = None

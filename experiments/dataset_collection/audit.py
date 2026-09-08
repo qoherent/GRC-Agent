@@ -73,12 +73,14 @@ def load_conversations(db_path: Path) -> dict[str, dict]:
                 run = dict(r)
                 run_to_conv[run["run_id"]] = run["conversation_id"]
                 _ensure(run["conversation_id"])["runs"].append(run)
+        orphans = {"snapshots": [], "events": [], "tool_effects": []}
         if "snapshots" in tables:
             for r in conn.execute("SELECT run_id, step_index, state, messages FROM snapshots"):
                 snap = dict(r)
                 conv = run_to_conv.get(snap["run_id"])
                 if conv is None:
-                    continue  # interrupted snapshots of unknown runs stay out
+                    orphans["snapshots"].append(snap["run_id"])
+                    continue
                 _ensure(conv)["snapshots"].append(snap)
         if "events" in tables:
             for r in conn.execute("SELECT * FROM events"):
@@ -91,6 +93,10 @@ def load_conversations(db_path: Path) -> dict[str, dict]:
         # Sessions with no step-store rows are still audited.
         for conv_id in sessions:
             _ensure(conv_id)
+        # Orphaned step-store rows are evidence of a tear: fail closed.
+        for kind, ids in orphans.items():
+            if ids:
+                _ensure(f"orphaned-{kind}")["orphans"] = sorted(set(ids))
         return conversations
     finally:
         conn.close()
@@ -120,13 +126,11 @@ def audit_conversation(
         except Exception:  # noqa: BLE001 - a corrupt snapshot is itself a finding
             violations.append(f"{conv_id}: snapshot at step {snap.get('step_index')} does not deserialize")
     for v in check_tool_call_matching(messages, archive_messages):
-        # Crash-attributed loss: when the conversation holds a turn_failure
-        # archive or a crashed run, pre-fix sessions lost returns at the
-        # approval-crash boundary (documented session-165 defect) — tolerated
-        # as a known shape; an unexplained loss is a violation.
-        if _crash_attributed(data) or loss_as_warning:
-            reason = "crash-attributed" if _crash_attributed(data) else "pre-fix session (R9 known shape)"
-            warnings.append(f"{conv_id}: {v} ({reason})")
+        call_id = v.split("tool call ", 1)[-1].split(" ", 1)[0]
+        if loss_as_warning:
+            warnings.append(f"{conv_id}: {v} (pre-fix session (R9 known shape))")
+        elif _call_in_turn_failure(data, call_id):
+            warnings.append(f"{conv_id}: {v} (crash-attributed: call present in the turn_failure archive)")
         else:
             violations.append(f"{conv_id}: {v}")
     for check in (
@@ -140,6 +144,9 @@ def audit_conversation(
         archives = [r for r in data["runs"] if "pre_compaction_transcript" in r["run_id"]]
         if not archives:
             violations.append(f"{conv_id}: {placeholders[0]} with no compaction archive")
+    orphaned = data.get("orphans")
+    if orphaned:
+        violations.append(f"{conv_id}: {len(orphaned)} orphaned step-store rows reference no run (possible torn write)")
     for v in runs_shape(data["runs"], data["events"]):
         # A crashed run (no terminal event / unfinished request) is a real
         # shape the verdicts already gate (agent_error -> quarantine, plan I2);
@@ -152,18 +159,14 @@ def audit_conversation(
     return violations + [f"WARNING {w}" for w in warnings]
 
 
-def _crash_attributed(data: dict) -> bool:
-    """True when this conversation carries a turn_failure archive or any run
-    that died without a terminal event — the documented pre-fix loss shape."""
-    for run in data.get("runs", []):
-        if "turn_failure" in run["run_id"]:
-            return True
-    event_kinds: dict[str, set[str]] = {}
-    for e in data.get("events", []):
-        event_kinds.setdefault(e["run_id"], set()).add(e["kind"])
-    for run in data.get("runs", []):
-        kinds = event_kinds.get(run["run_id"], set())
-        if "run_started" in kinds and not (kinds & {"run_completed", "run_failed"}):
+def _call_in_turn_failure(data: dict, call_id: str) -> bool:
+    """True when the exact lost call appears in a turn_failure archive
+    snapshot — the documented approval-crash loss shape, attributed per call
+    instead of per conversation."""
+    for snap in data.get("snapshots", []):
+        if "turn_failure" not in snap["run_id"]:
+            continue
+        if call_id in (snap["messages"] or ""):
             return True
     return False
 

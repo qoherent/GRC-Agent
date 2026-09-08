@@ -42,6 +42,13 @@ def _json_default(obj: Any) -> str:
     return str(obj)
 
 
+def _try_parse(text: str) -> Any:
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return text
+
+
 def map_messages(messages: list, *, include_thinking: bool) -> list[dict]:
     """ModelMessages -> OpenAI messages (native tool_calls, thinking parallel)."""
     out: list[dict] = []
@@ -71,7 +78,9 @@ def map_messages(messages: list, *, include_thinking: bool) -> list[dict]:
             if text:
                 row["content"] = text
             elif not calls:
-                continue
+                if not (include_thinking and thinking):
+                    continue
+                row["content"] = ""  # thinking-only turn: keep the step
             if include_thinking and thinking:
                 row["thinking"] = thinking
             out.append(row)
@@ -133,8 +142,8 @@ def _quarantine_reason(rec: TaskRecord, compaction_flagged: bool) -> str:
     return "; ".join(reasons)
 
 
-def export_campaign(campaign_dir: Path, *, audit_first: bool = True) -> int:
-    if audit_first and audit_campaign(campaign_dir) != 0:
+def export_campaign(campaign_dir: Path) -> int:  # noqa: C901 - one linear gate per rule
+    if audit_campaign(campaign_dir) != 0:
         print("export refused: campaign audit did not pass (U5 gate)")
         return 1
     manifest = Manifest(campaign_dir)
@@ -180,8 +189,11 @@ def export_campaign(campaign_dir: Path, *, audit_first: bool = True) -> int:
             "tools": frozen,
         }
 
-        # Secret-pattern scan before anything is written (review S2): one
-        # uniform rule per text part; counts are disclosed, matches redacted.
+        # Secret-pattern scan before anything is written (review S2/S6): one
+        # uniform rule over EVERY text-bearing part — assistant text/thinking,
+        # tool-return content (str or structured), user prompts, and the
+        # system instructions. Counts are disclosed; a redacted row is
+        # quarantined, matching the dataset-card guarantee.
         redactions = 0
         scrubbed_messages: list = []
         for m in messages:
@@ -197,15 +209,45 @@ def export_campaign(campaign_dir: Path, *, audit_first: bool = True) -> int:
                 scrubbed_messages.append(
                     ModelResponse(parts=parts, usage=m.usage, model_name=m.model_name)
                 )
+            elif isinstance(m, ModelRequest):
+                parts = []
+                for p in m.parts:
+                    if isinstance(p, ToolReturnPart):
+                        content = p.content
+                        if isinstance(content, str):
+                            filtered, n = filter_secrets(content)
+                            redactions += n
+                            content = filtered
+                        else:
+                            dumped, n = filter_secrets(json.dumps(content, default=_json_default))
+                            redactions += n
+                            content = _try_parse(dumped)
+                        if n:
+                            p = ToolReturnPart(tool_name=p.tool_name, content=content, tool_call_id=p.tool_call_id)
+                        parts.append(p)
+                    elif p.__class__.__name__ == "UserPromptPart" and isinstance(getattr(p, "content", None), str):
+                        filtered, n = filter_secrets(p.content)
+                        redactions += n
+                        if n:
+                            p = type(p)(content=filtered)
+                        parts.append(p)
+                    else:
+                        parts.append(p)
+                scrubbed_messages.append(ModelRequest(parts=parts, instructions=m.instructions))
             else:
                 scrubbed_messages.append(m)
         redaction_total += redactions
 
+        frozen_len = rec.acceptance_frozen_len
+        export_messages = (
+            scrubbed_messages[:frozen_len] if frozen_len else scrubbed_messages
+        )
         row = dict(base)
-        row["messages"] = map_messages(scrubbed_messages, include_thinking=True)
+        row["messages"] = map_messages(export_messages, include_thinking=True)
         row["usage"] = sum_usage(messages)
 
-        if _primary_eligible(rec, compaction_flagged):
+        primary = _primary_eligible(rec, compaction_flagged) and redactions == 0
+        if primary:
             row_no = dict(base)
             row_no["messages"] = map_messages(scrubbed_messages, include_thinking=False)
             primary_rows.append(json.dumps(row, default=_json_default))
@@ -226,6 +268,14 @@ def export_campaign(campaign_dir: Path, *, audit_first: bool = True) -> int:
 
     out_dir = campaign_dir / "export"
     out_dir.mkdir(exist_ok=True)
+    # Round-trip gate BEFORE any file lands: validate the row text in memory.
+    if not _roundtrip_check_lines(primary_rows) or not _roundtrip_check_lines(quarantine_rows):
+        print("export refused: round-trip validation failed; no files written")
+        (out_dir / "export_report.json").write_text(
+            json.dumps({"per_task": report, "roundtrip_ok": False}, indent=2, default=_json_default),
+            encoding="utf-8",
+        )
+        return 1
     (out_dir / "sft_with_thinking.jsonl").write_text("\n".join(primary_rows) + "\n" if primary_rows else "", encoding="utf-8")
     (out_dir / "sft_no_thinking.jsonl").write_text("\n".join(primary_no_think_rows) + "\n" if primary_no_think_rows else "", encoding="utf-8")
     (out_dir / "quarantine.jsonl").write_text("\n".join(quarantine_rows) + "\n" if quarantine_rows else "", encoding="utf-8")
@@ -237,12 +287,11 @@ def export_campaign(campaign_dir: Path, *, audit_first: bool = True) -> int:
     card = _dataset_card(meta, tasks, totals, redaction_total)
     (out_dir / "dataset_card.md").write_text(card, encoding="utf-8")
 
-    roundtrip_ok = _roundtrip_check_all(out_dir)
     (out_dir / "export_report.json").write_text(
-        json.dumps({"per_task": report, "totals": totals, "roundtrip_ok": roundtrip_ok}, indent=2, default=_json_default),
+        json.dumps({"per_task": report, "totals": totals, "roundtrip_ok": True}, indent=2, default=_json_default),
         encoding="utf-8",
     )
-    print(f"exported -> {out_dir} (roundtrip_ok={roundtrip_ok})")
+    print(f"exported -> {out_dir} (roundtrip_ok=True)")
     print(f"token totals (model-reported usage): {totals or '(none)'}")
     print(f"secret-pattern redactions: {redaction_total}")
     return 0
@@ -257,16 +306,14 @@ def _load_frozen_tools(campaign_dir: Path) -> list[dict]:
     return []
 
 
-def _roundtrip_check(filename: str, out_dir: Path) -> bool:
-    """Every line re-parses as one object; every tool_calls block is closed
-    by tool returns; every row carries system/tools/messages."""
-    path = out_dir / filename
-    if not path.exists():
-        return True
-    for line in path.read_text(encoding="utf-8").splitlines():
+def _roundtrip_check_lines(lines: list[str]) -> bool:
+    for line in lines:
         if not line.strip():
             continue
-        row = json.loads(line)
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            return False
         if not row.get("messages") or "system" not in row:
             return False
         open_calls = 0
@@ -280,11 +327,8 @@ def _roundtrip_check(filename: str, out_dir: Path) -> bool:
     return True
 
 
-def _roundtrip_check_all(out_dir: Path) -> bool:
-    return all(
-        _roundtrip_check(name, out_dir)
-        for name in ("sft_with_thinking.jsonl", "sft_no_thinking.jsonl", "quarantine.jsonl")
-    )
+def _roundtrip_check_all(lines_by_file: dict[str, list[str]]) -> bool:
+    return all(_roundtrip_check_lines(lines) for lines in lines_by_file)
 
 
 def _dataset_card(meta, tasks: list[TaskRecord], totals: dict[str, int], redaction_total: int) -> str:
@@ -328,9 +372,8 @@ def _dataset_card(meta, tasks: list[TaskRecord], totals: dict[str, int], redacti
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--campaign", required=True)
-    parser.add_argument("--skip-audit", action="store_true", help="audit already ran in this process")
     args = parser.parse_args(argv)
-    return export_campaign(Path(args.campaign), audit_first=not args.skip_audit)
+    return export_campaign(Path(args.campaign))
 
 
 if __name__ == "__main__":

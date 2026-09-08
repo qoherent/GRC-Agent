@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import fnmatch
 import hashlib
 import json
@@ -37,6 +38,7 @@ from .runner_contract import (
     await_turn,
     drain,
     last_assistant_text,
+    run_tracking,
     send_or_fail,
     teardown_task,
     tree_hash,
@@ -92,7 +94,19 @@ async def freeze_tools(agent) -> tuple[list[dict], bool]:
         return [], False
 
 
-def _evaluate_acceptance(task: TaskSpec, canvas, proxy, start_hash: str) -> tuple[bool | None, str]:
+def _log_fingerprint(log: dict) -> str:
+    """Stale-log guard: identity of the last run log (review F8)."""
+    return hashlib.sha256(
+        json.dumps(
+            {"text": str(log.get("log_text") or ""), "rc": log.get("return_code")},
+            sort_keys=True,
+        ).encode()
+    ).hexdigest()[:16]
+
+
+def _evaluate_acceptance(
+    task: TaskSpec, canvas, proxy, start_hash: str, run_log_fingerprint: str
+) -> tuple[bool | None, str]:
     """Machine-checkable completion predicate (KTD7). None = not evaluable."""
     acc = task.acceptance
     try:
@@ -112,6 +126,8 @@ def _evaluate_acceptance(task: TaskSpec, canvas, proxy, start_hash: str) -> tupl
             return True, "graph valid"
         if acc.kind in ("run_succeeded", "log_contains"):
             log = proxy.get_run_log() or {}
+            if _log_fingerprint(log) == run_log_fingerprint:
+                return False, "no NEW flowgraph run occurred in this task (stale log guard)"
             if acc.kind == "run_succeeded":
                 return bool(log.get("ran_successfully")), f"rc={log.get('return_code')}"
             pattern = acc.pattern or ""
@@ -181,6 +197,9 @@ async def run_task(  # noqa: C901 - one task, one linear contract
     expected_path = str(starter.resolve())
 
     # --- setup: open the task's fixture as a saved page, never untitled ---
+    stale_process = getattr(canvas.current_page, "process", None)
+    if stale_process is not None and stale_process.poll() is None:
+        raise RunnerContractError("previous task's flowgraph process still alive at setup")
     window.new_page(str(starter), show=True)
     await asyncio.sleep(0.5)  # let the notebook switch fire _sync_sidebar
     page = canvas.current_page
@@ -191,11 +210,15 @@ async def run_task(  # noqa: C901 - one task, one linear contract
         )
     sidebar.set_project_directory(fixture)
     monitor = proxy._exec_monitor
-    await drain(sidebar, monitor)
+    tracking = lambda: run_tracking(proxy, canvas)  # noqa: E731 - reconciled flag
+    # Setup drain: join satellites but not the console-marker tracking flag —
+    # the stale-process assert above owns the cross-task boundary.
+    await drain(sidebar, monitor, wait_run_end=False, tracking=tracking)
 
     from grc_agent.adapter.graph import flow_graph_content_hash
 
     start_hash = flow_graph_content_hash(canvas.current_flow_graph)
+    run_log_fingerprint = _log_fingerprint(proxy.get_run_log() or {})  # stale-log guard (review F8)
 
     simulator = simulator_factory(task, personas[task.persona_id])
     from .simulator import RepetitionDetector, ScriptExhausted, SimulatorAborted
@@ -214,7 +237,7 @@ async def run_task(  # noqa: C901 - one task, one linear contract
             sim_turn = await simulator.next_turn(reply)
             repetition_flagged = repetition.observe(sim_turn.message)
 
-            await drain(sidebar, monitor)
+            await drain(sidebar, monitor, tracking=tracking)
             await send_or_fail(sidebar, sim_turn.message)
             sent_any = True
             rec = TurnRecord(
@@ -227,7 +250,7 @@ async def run_task(  # noqa: C901 - one task, one linear contract
                 repetition_flagged=repetition_flagged,
             )
             await await_turn(sidebar)
-            await drain(sidebar, monitor)
+            await drain(sidebar, monitor, tracking=tracking)
             reply = last_assistant_text(sidebar._message_history)
             rec.reply = reply
             rec.is_tracking_at_end = monitor.is_tracking
@@ -281,9 +304,10 @@ async def run_task(  # noqa: C901 - one task, one linear contract
 
     # --- acceptance predicate gates `completed` (KTD7) ---
     if verdict == "stopped_by_simulator":
-        passed, detail = _evaluate_acceptance(task, canvas, proxy, start_hash)
+        passed, detail = _evaluate_acceptance(task, canvas, proxy, start_hash, run_log_fingerprint)
         record.acceptance_passed = passed
         record.acceptance_detail = detail
+        record.acceptance_frozen_len = len(sidebar._message_history)
         verdict = "completed" if passed else "failed_acceptance"
     record.verdict = verdict
     record.stop_reason = stop_reason
@@ -291,8 +315,12 @@ async def run_task(  # noqa: C901 - one task, one linear contract
     # --- dry-run fault injection hook (U6) + post-hook autofix rescan ---
     if pre_teardown is not None:
         try:
-            pre_teardown(sidebar)
-            await drain(sidebar, monitor)
+            hook_result = pre_teardown(sidebar)
+            if asyncio.iscoroutine(hook_result):
+                await hook_result
+            # Post-hook: join satellites but NOT the tracking run — stopping
+            # it is teardown's first step (F4 exercises that path).
+            await drain(sidebar, monitor, wait_run_end=False, tracking=tracking)
             autofix_now = _count_autofix_prompts(sidebar._message_history)
             for _ in range(autofix_seen, autofix_now):
                 manifest.record_turn(
@@ -313,13 +341,47 @@ async def run_task(  # noqa: C901 - one task, one linear contract
 
     # --- teardown: fixed order, containment checks after settle (U3 step 4) ---
     async def _stop_run() -> None:
+        """Stop any flowgraph run and enforce the task-boundary guarantee at
+        the PROCESS level: after teardown, no flowgraph process survives
+        (poll() is not None). GRC's console-marker monitor can stick after a
+        killed process under the campaign process group (no terminal marker
+        arrives); the liveness contract is what the boundary actually needs."""
         monitor = proxy._exec_monitor
-        if monitor.is_tracking:
+        # The spawn may still be registering: wait briefly for tracking to
+        # engage before deciding there is nothing to stop.
+        process = getattr(canvas.current_page, "process", None)
+        for _ in range(50):
+            process = getattr(canvas.current_page, "process", None)
+            if (process is not None and process.poll() is None) or monitor.is_tracking:
+                break
+            await asyncio.sleep(0.2)
+        process = getattr(canvas.current_page, "process", None)
+        if (process is not None and process.poll() is None) or monitor.is_tracking:
             await proxy.stop_flowgraph()
             for _ in range(50):
-                if not monitor.is_tracking:
+                process = getattr(canvas.current_page, "process", None)
+                if process is not None and process.poll() is not None:
                     break
                 await asyncio.sleep(0.2)
+            process = getattr(canvas.current_page, "process", None)
+            if process is not None and process.poll() is None:
+                # Escalate: a top_block may miss SIGTERM's graceful path —
+                # kill the process itself; GRC's Executor reaps it.
+                with contextlib.suppress(Exception):
+                    process.kill()
+                for _ in range(100):
+                    process = getattr(canvas.current_page, "process", None)
+                    if process is None or process.poll() is not None:
+                        break
+                    await asyncio.sleep(0.2)
+        process = getattr(canvas.current_page, "process", None)
+        if process is not None and process.poll() is None:
+            raise RunnerContractError("flowgraph process survived teardown (SIGTERM+SIGKILL)")
+        if process is not None and monitor.is_tracking:
+            # Harness-owned reconciliation: the killed process was reaped but
+            # the console marker never arrived under the campaign process
+            # group; clear the orphaned flag so later drains don't hang.
+            monitor._tracking = False
 
     def _checks() -> None:
         if sidebar._active_session_id is not None:
@@ -336,7 +398,14 @@ async def run_task(  # noqa: C901 - one task, one linear contract
     containment_ok = True
     containment_notes: list[str] = []
     try:
-        await teardown_task(sidebar, proxy, stop_run=_stop_run, checks=[_checks])
+        await teardown_task(
+            sidebar,
+            proxy,
+            stop_run=_stop_run,
+            checks=[_checks],
+            wait_run_end=False,
+            tracking_fn=tracking,
+        )
         if tree_hash(PLAYGROUND) != playground_baseline:
             containment_ok = False
             containment_notes.append("playground tree changed")
@@ -360,7 +429,7 @@ async def run_task(  # noqa: C901 - one task, one linear contract
 
 
 
-async def campaign(args: argparse.Namespace, simulator_factory=None) -> int:  # noqa: C901 - linear contract
+async def campaign(args: argparse.Namespace, simulator_factory=None, pre_teardown_for=None) -> int:  # noqa: C901 - linear contract
     campaign_dir = Path(args.campaign_dir).resolve()
     campaign_dir.mkdir(parents=True, exist_ok=True)
     env_file = campaign_dir / ".env"
@@ -381,14 +450,23 @@ async def campaign(args: argparse.Namespace, simulator_factory=None) -> int:  # 
     from grc_agent.settings import load_settings
 
     db_path = campaign_dir / ".grc_agent" / "chat_sessions.db"
-    if _session_count(db_path) != 0:
-        print(f"REFUSING: campaign DB {db_path} is not empty (KTD3). Use a fresh --campaign-dir.")
+    manifest = Manifest(campaign_dir)
+    existing = manifest.load_tasks() if manifest.tasks_path.exists() else []
+    if existing:
+        if _session_count(db_path) == 0:
+            print("REFUSING: manifest exists but the campaign DB is empty (inconsistent state).")
+            return 2
+        print(f"RESUME: {len(existing)} task records exist; skipping their task ids")
+    elif _session_count(db_path) != 0:
+        print(f"REFUSING: campaign DB {db_path} is not empty and no manifest exists (KTD3).")
         return 2
 
     tasks = load_tasks()
     if args.tasks:
         wanted = set(args.tasks.split(","))
         tasks = [t for t in tasks if t.id in wanted]
+    done_ids = {r.task_id for r in existing if r.verdict}
+    tasks = [t for t in tasks if t.id not in done_ids]
     personas = load_personas()
     missing = [t.id for t in tasks if t.persona_id not in personas]
     if missing:
@@ -397,7 +475,7 @@ async def campaign(args: argparse.Namespace, simulator_factory=None) -> int:  # 
 
     window, canvas, sidebar, proxy = build_app()
     monitor = proxy._exec_monitor
-    await drain(sidebar, monitor)
+    await drain(sidebar, monitor, tracking=lambda: run_tracking(proxy, canvas))
 
     cfg = load_settings()
     if args.agent == "testmodel":
@@ -427,7 +505,6 @@ async def campaign(args: argparse.Namespace, simulator_factory=None) -> int:  # 
         return 2
     frozen_tools, freeze_ok = await freeze_tools(agent)
 
-    manifest = Manifest(campaign_dir)
     if simulator_factory is None:
         from .simulator import OllamaUserSimulator, ScriptedSimulator, SimulatorTurn
 
@@ -486,8 +563,12 @@ async def campaign(args: argparse.Namespace, simulator_factory=None) -> int:  # 
                 playground_baseline=playground_baseline,
                 real_db_baseline=real_db_baseline,
                 tasks_completed=completed,
+                pre_teardown=pre_teardown_for(task) if pre_teardown_for else None,
             )
-        except RunnerContractError as e:
+        except Exception as e:  # noqa: BLE001 - one fault aborts one task, not the campaign
+            import logging
+
+            logging.getLogger(__name__).warning("task %s infrastructure fault: %s", task.id, e)
             rec = TaskRecord(
                 task_id=task.id,
                 persona_id=task.persona_id,
@@ -497,7 +578,7 @@ async def campaign(args: argparse.Namespace, simulator_factory=None) -> int:  # 
                 seed_grc=task.seed_grc,
                 acceptance_kind=task.acceptance.kind,
                 verdict="infrastructure_abort",
-                stop_reason=str(e),
+                stop_reason=f"{type(e).__name__}: {e}",
             )
             manifest.record_task(rec)
         results.append(rec)
