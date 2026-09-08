@@ -241,6 +241,20 @@ def build_app() -> tuple[Gtk.Window, NativeCanvasManager, ChatSidebar, NativeFlo
 
     canvas = NativeCanvasManager(window, platform)
     canvas.app = grc_app
+
+    def _current_page_process():
+        """(page_key, process) of the displayed GRC page for exec_monitor's
+        spawn-failure detection. GRC's Executor assigns ``page.process`` only
+        on a successful spawn and clears it in done() after the Done marker —
+        the identity comparison is Executor's own contract, not message
+        parsing. Returns (None, None) with no page, which makes the monitor
+        fall back to legacy behavior instead of guessing."""
+        page = canvas.current_page
+        if page is None:
+            return None, None
+        return id(page), getattr(page, "process", None)
+
+    exec_monitor.set_process_provider(_current_page_process)
     sidebar.set_blocks_expanded(canvas._blocks_visible)
     canvas.on_graphs_changed = lambda: _sync_sidebar(canvas, sidebar)
     canvas.on_sync_failed = lambda msg: sidebar.set_status(msg, error=True)

@@ -47,8 +47,23 @@ class ExecutionErrorMonitor:
     markers, single characters during verbose execution output).
     """
 
-    def __init__(self, on_error: Callable[[int, str], None]) -> None:
+    def __init__(
+        self,
+        on_error: Callable[[int, str], None],
+        process_provider: Callable[[], tuple[object, object]] | None = None,
+    ) -> None:
         self._on_error = on_error
+        # Optional (page_key, process) provider over the currently displayed
+        # GRC page, wired by desktop_app once the canvas manager exists (see
+        # set_process_provider). Executor assigns ``page.process`` only on a
+        # successful spawn and clears it in done() strictly AFTER
+        # send_end_exec — so at a code-less Done marker a live new process
+        # proves a real run, while an absent or unchanged identity proves a
+        # spawn crash. None disables spawn-failure detection entirely.
+        self._process_provider = process_provider
+        # (page_key, process) captured at the start marker, compared at the
+        # Done marker. Reset to None outside an active run.
+        self._spawn_snapshot: tuple[object, object] | None = None
         self._chunks: deque[str] = deque()
         self._chunk_bytes = 0
         # Whether the cap below actually dropped output from the run being
@@ -90,7 +105,19 @@ class ExecutionErrorMonitor:
         # _reset() which clears _has_runtime_error, but get_last_run_log
         # must still reflect whether errors occurred.
         self._last_run_had_runtime_error = False
+        # Retained spawn-failure verdict of the last completed run — set at
+        # every Done evaluation (the live snapshot is cleared there), so
+        # _reset() must not clear it (same pattern as _last_run_had_runtime_error).
+        self._last_run_spawn_failed = False
         self._graph_modified_since_last_run = False
+
+    def set_process_provider(self, process_provider: Callable[[], tuple[object, object]]) -> None:
+        """Wire the (page_key, process) provider after construction.
+
+        desktop_app constructs the monitor before the canvas manager exists,
+        so the provider is attached as soon as the canvas is available.
+        Passing None disables spawn-failure detection (legacy behavior)."""
+        self._process_provider = process_provider
 
     def notify_graph_modified(self) -> None:
         """Called when change_graph modifies the flowgraph state."""
@@ -102,9 +129,11 @@ class ExecutionErrorMonitor:
 
         Shape: ``{"return_code": int, "log_text": str, "ran_successfully": bool}``,
         plus ``log_truncated: True`` when the ``_MAX_LOG_BYTES`` cap dropped the
-        run's oldest output, and ``note`` when the graph changed since the run.
+        run's oldest output, ``spawn_failed``/``spawn_note`` when the run died at
+        subprocess spawn, and ``note`` when the graph changed since the run.
         ``ran_successfully`` is False when either the return code is non-zero
-        OR a ``:error:`` runtime error was detected in the output.
+        OR a ``:error:`` runtime error was detected in the output OR the run
+        failed to spawn.
 
         ``log_truncated`` exists because the reduction has to be visible to the
         model: the cap silently drops the *front* of the log, and a diagnostic
@@ -116,7 +145,11 @@ class ExecutionErrorMonitor:
         res = {
             "return_code": self._last_run_code,
             "log_text": self._last_run_log,
-            "ran_successfully": self._last_run_code == 0 and not self._last_run_had_runtime_error,
+            "ran_successfully": (
+                self._last_run_code == 0
+                and not self._last_run_had_runtime_error
+                and not self._last_run_spawn_failed
+            ),
             # Always present, never a silent transformation: while a run is
             # in flight this log belongs to the PREVIOUS run — the model must
             # be able to tell the two states apart.
@@ -139,6 +172,14 @@ class ExecutionErrorMonitor:
                 "The flowgraph has been modified in memory since this run completed, so this "
                 "log describes the state before those changes. Ask the user to run the "
                 "flowgraph again to test the current state."
+            )
+        if self._last_run_spawn_failed:
+            res["spawn_failed"] = True
+            res["spawn_note"] = (
+                "The run's subprocess failed to spawn — nothing was executed. The exception "
+                "text is retained at the end of the log. Common causes: the python interpreter "
+                "or terminal wrapper is missing, or the generated script is not runnable. "
+                "Fix the environment and run again."
             )
         return res
 
@@ -210,6 +251,14 @@ class ExecutionErrorMonitor:
         """Return code of the last completed run, or None before any run."""
         return self._last_run_code
 
+    @property
+    def last_run_spawn_failed(self) -> bool:
+        """True when the last completed run died at subprocess spawn: a
+        code-less Done marker whose wired process provider reported an absent
+        or unchanged identity (Executor assigns page.process only on a
+        successful spawn). Always False without a wired provider."""
+        return self._last_run_spawn_failed
+
     def handle_message(self, text: str) -> None:
         if _START_MARKER in text:
             if self._tracking:
@@ -220,6 +269,12 @@ class ExecutionErrorMonitor:
             self._reset()
             self._run_end.clear()
             self._run_epoch += 1
+            # Executor assigns page.process only after _popen's start marker
+            # fires, so this snapshot holds the pre-run identity (usually
+            # None, or a stale object from an un-cleaned prior run).
+            self._spawn_snapshot = (
+                self._process_provider() if self._process_provider is not None else None
+            )
             _log.info("exec_monitor: started tracking run: %r", text[:120])
 
         self._append(text)
@@ -231,10 +286,36 @@ class ExecutionErrorMonitor:
             self._tracking = False
             match = _RETURN_CODE_RE.search(text)
             code = int(match.group(1)) if match else 0
+            # Spawn-failure rule (KTD5): a code-less Done marker is ambiguous
+            # between a real clean exit and GRC's spawn-crash path (both emit
+            # send_end_exec() with the default code 0). Only a wired provider
+            # can break the tie — by identity, never by message prose. GRC's
+            # done() clears page.process strictly after send_end_exec, so a
+            # live new process at marker time proves a real run; an absent or
+            # unchanged identity proves nothing was ever spawned. A snapshot
+            # from a page that is no longer current (mid-run tab switch) or a
+            # missing provider falls back to the legacy clean-success
+            # behavior rather than guessing.
+            spawn_failed = False
+            if (
+                match is None
+                and self._process_provider is not None
+                and self._spawn_snapshot is not None
+            ):
+                page_key, proc = self._process_provider()
+                snap_key, snap_proc = self._spawn_snapshot
+                if (
+                    page_key is not None
+                    and page_key == snap_key
+                    and (proc is None or proc is snap_proc)
+                ):
+                    spawn_failed = True
+            self._spawn_snapshot = None
             _log.info(
-                "exec_monitor: run finished with code=%d, chunks=%d bytes",
+                "exec_monitor: run finished with code=%d, chunks=%d bytes, spawn_failed=%s",
                 code,
                 self._chunk_bytes,
+                spawn_failed,
             )
             # Retain the log for get_run_log BEFORE resetting the buffer.
             self._last_run_log = "".join(self._chunks)
@@ -246,7 +327,8 @@ class ExecutionErrorMonitor:
             if _RUNTIME_ERROR_MARKER in self._last_run_log:
                 self._has_runtime_error = True
             self._last_run_had_runtime_error = self._has_runtime_error
-            if code != _SIGTERM_RETURN_CODE and (code != 0 or self._has_runtime_error):
+            self._last_run_spawn_failed = spawn_failed
+            if spawn_failed or code != _SIGTERM_RETURN_CODE and (code != 0 or self._has_runtime_error):
                 self._fail(code)
             else:
                 self._reset()
@@ -262,6 +344,8 @@ class ExecutionErrorMonitor:
             self._last_run_log = "".join(self._chunks)
             self._last_run_code = 1
             self._last_run_evicted = self._evicted
+            self._last_run_spawn_failed = False  # a generate error is not a spawn crash
+            self._spawn_snapshot = None
             self._fail(1)
             self._agent_initiated = False
             self._run_end.set()

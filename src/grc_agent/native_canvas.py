@@ -267,10 +267,15 @@ class NativeFlowgraphProxy:
 
         if outcome == "completed":
             code = monitor.last_run_code
+            # U5: a code-less Done marker with an unchanged process identity is
+            # a spawn crash — GRC's own Executor emits send_end_exec() with the
+            # default code 0 when subprocess.Popen raises. The monitor's flag
+            # carries the verdict; surface it without fabricating a code.
+            spawn_failed = bool(getattr(monitor, "last_run_spawn_failed", False))
             res = {
                 "status": "completed",
                 "return_code": code,
-                "ran_successfully": code == 0,
+                "ran_successfully": code == 0 and not spawn_failed,
                 "note": (
                     "Read the full console output with the get_run_log tool. An empty log "
                     "with an immediate completion can mean the graph ran in an external "
@@ -283,6 +288,13 @@ class NativeFlowgraphProxy:
                 res["note"] = (
                     "This flowgraph was generated with generate_options='no_gui'. GNU Radio runs "
                     "no_gui flowgraphs in an external terminal wrapper; read get_run_log for output details."
+                )
+            if spawn_failed:
+                res["spawn_failed"] = True
+                res["note"] = (
+                    "The flowgraph process failed to spawn — nothing was executed. Read the "
+                    "full console output with the get_run_log tool (its spawn_note and the "
+                    "retained exception text name the cause), fix the environment, and run again."
                 )
             return res
         if outcome == "still_running":
@@ -336,15 +348,24 @@ class NativeFlowgraphProxy:
         stop_res = await self.stop_flowgraph()
         if stop_res.get("status") == "not_running":
             code = monitor.last_run_code
-            return {
+            spawn_failed = bool(getattr(monitor, "last_run_spawn_failed", False))
+            res = {
                 "status": "completed",
                 "return_code": code,
-                "ran_successfully": code == 0,
+                "ran_successfully": code == 0 and not spawn_failed,
                 "note": (
                     f"The run finished on its own right at the {stop_after_seconds}s "
                     "auto-stop deadline. Read the full output with get_run_log."
                 ),
             }
+            if spawn_failed:
+                res["spawn_failed"] = True
+                res["note"] = (
+                    "The flowgraph process failed to spawn — nothing was executed. Read the "
+                    "full console output with the get_run_log tool (its spawn_note and the "
+                    "retained exception text name the cause), fix the environment, and run again."
+                )
+            return res
         return {
             "status": "stopped_after_timeout",
             "return_code": monitor.last_run_code,

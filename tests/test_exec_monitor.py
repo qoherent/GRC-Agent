@@ -6,7 +6,7 @@ them."""
 import json
 
 from grc_agent.exec_monitor import ExecutionErrorMonitor
-from grc_agent.native_canvas import NativeFlowgraphProxy
+from grc_agent.native_canvas import NativeCanvasManager, NativeFlowgraphProxy
 
 
 def _noop(_code, _log):
@@ -580,3 +580,259 @@ def test_mark_cancelled_drops_suppression_before_user_run():
     monitor.mark_run_agent_initiated_cancelled()  # no-op Execute
     _feed_run(monitor, "/tmp/flow.py", "RuntimeError: boom\n", code=1)
     assert calls == [1]  # user-initiated failure still notifies
+
+
+# --- Spawn-failure detection (process-identity snapshot, U5) ---
+
+
+class _FakeRunProcess:
+    """Sentinel standing in for the Popen GRC's Executor assigns to page.process."""
+
+
+class _ProcessProvider:
+    """Fake (page_key, process) provider over the current GRC page."""
+
+    def __init__(self):
+        self.page_key = None
+        self.process = None
+
+    def __call__(self):
+        return self.page_key, self.process
+
+
+def test_spawn_failure_unchanged_identity_reports_failure():
+    """Start, verbose exception text, code-less Done with the provider still
+    reporting the same (absent) process: the run died at spawn and must be
+    reported as a failure with spawn_failed on the retained log."""
+    provider = _ProcessProvider()
+    provider.page_key = "page1"
+    provider.process = None
+    calls = []
+    monitor = ExecutionErrorMonitor(
+        on_error=lambda code, log: calls.append((code, log)), process_provider=provider
+    )
+    monitor.handle_message("\nExecuting: /tmp/flow.py\n")  # snapshot: (page1, None)
+    for ch in "[Errno 2] No such file or directory: 'xterm'\n":
+        monitor.handle_message(ch)
+    monitor.handle_message("\n>>> Done\n")  # provider still (page1, None)
+
+    assert len(calls) == 1
+    assert calls[0][0] == 0  # truthful code — never fabricated (KTD6)
+    assert "xterm" in calls[0][1]
+    res = monitor.get_last_run_log()
+    assert res is not None
+    assert res["spawn_failed"] is True
+    assert res["ran_successfully"] is False
+    assert res["return_code"] == 0
+    assert "spawn" in res["spawn_note"].lower()
+
+
+def test_real_run_changed_identity_is_success():
+    """Executor assigns page.process AFTER the start marker and clears it only
+    in done() — after send_end_exec. A code-less Done with a live new process
+    is a legitimate clean exit, not a spawn crash."""
+    provider = _ProcessProvider()
+    provider.page_key = "page1"
+    provider.process = None
+    calls = []
+    monitor = ExecutionErrorMonitor(
+        on_error=lambda code, log: calls.append((code, log)), process_provider=provider
+    )
+    monitor.handle_message("\nExecuting: /tmp/flow.py\n")
+    provider.process = _FakeRunProcess()  # Popen assigned between markers
+    for ch in "hello\n":
+        monitor.handle_message(ch)
+    monitor.handle_message("\n>>> Done\n")  # done() clears only after send_end_exec
+
+    assert calls == []
+    res = monitor.get_last_run_log()
+    assert res is not None
+    assert res["ran_successfully"] is True
+    assert "spawn_failed" not in res
+
+
+def test_spawn_failure_absent_identity_reports_failure():
+    """A snapshot process that is gone by the code-less Done marker (no new
+    process ever appeared) is a spawn crash."""
+    provider = _ProcessProvider()
+    provider.page_key = "page1"
+    provider.process = _FakeRunProcess()  # stale snapshot value
+    calls = []
+    monitor = ExecutionErrorMonitor(
+        on_error=lambda code, log: calls.append((code, log)), process_provider=provider
+    )
+    monitor.handle_message("\nExecuting: /tmp/flow.py\n")
+    provider.process = None  # no process at Done time
+    monitor.handle_message("\n>>> Done\n")
+
+    assert len(calls) == 1
+    res = monitor.get_last_run_log()
+    assert res is not None
+    assert res["spawn_failed"] is True
+
+
+def test_nonzero_code_done_uses_return_code_path():
+    """A Done marker carrying a return code takes the existing path — the
+    spawn rule never fires for code-carrying markers, even with an
+    unchanged identity."""
+    provider = _ProcessProvider()
+    provider.page_key = "page1"
+    provider.process = None
+    calls = []
+    monitor = ExecutionErrorMonitor(
+        on_error=lambda code, log: calls.append((code, log)), process_provider=provider
+    )
+    _feed_run(monitor, "/tmp/flow.py", "RuntimeError: boom\n", code=1)
+
+    assert len(calls) == 1
+    assert calls[0][0] == 1
+    res = monitor.get_last_run_log()
+    assert res is not None
+    assert res["ran_successfully"] is False
+    assert "spawn_failed" not in res
+
+
+def test_wait_for_run_end_completed_for_spawn_failure():
+    import asyncio
+
+    async def main():
+        provider = _ProcessProvider()
+        provider.page_key = "page1"
+        monitor = ExecutionErrorMonitor(on_error=_noop, process_provider=provider)
+        monitor.handle_message("\nExecuting: /tmp/flow.py\n")
+        monitor.handle_message("\n>>> Done\n")
+        return await monitor.wait_for_run_end(5.0)
+
+    assert asyncio.run(main()) == "completed"
+
+
+def test_no_provider_codeless_done_stays_legacy_success():
+    """Without a wired provider the monitor cannot distinguish the two — the
+    legacy clean-success behavior is preserved unchanged."""
+    monitor = ExecutionErrorMonitor(on_error=_noop)
+    _feed_run(monitor, "/tmp/flow.py", "silent success\n", code=0)
+    res = monitor.get_last_run_log()
+    assert res is not None
+    assert res["ran_successfully"] is True
+    assert "spawn_failed" not in res
+
+
+def test_tab_switch_mid_run_keeps_legacy_classification():
+    """A Done marker whose snapshot no longer resolves to the current page
+    (the user switched tabs mid-run) must not guess — legacy behavior wins."""
+    provider = _ProcessProvider()
+    provider.page_key = "page1"
+    provider.process = None
+    calls = []
+    monitor = ExecutionErrorMonitor(
+        on_error=lambda code, log: calls.append((code, log)), process_provider=provider
+    )
+    monitor.handle_message("\nExecuting: /tmp/flow.py\n")  # snapshot: page1
+    provider.page_key = "page2"  # user switched pages mid-run
+    monitor.handle_message("\n>>> Done\n")
+
+    assert calls == []
+    res = monitor.get_last_run_log()
+    assert res is not None
+    assert res["ran_successfully"] is True
+    assert "spawn_failed" not in res
+
+
+def test_run_result_reports_spawn_failure():
+    """The agent-visible run_flowgraph result must reflect the spawn flag:
+    not-successful with a spawn note, return code still truthful (0)."""
+    import asyncio
+    from types import SimpleNamespace
+
+    class _SpawnFailedMonitor:
+        last_run_code = 0
+        run_epoch = 1
+        is_tracking = False
+        last_run_spawn_failed = True
+
+        def mark_run_agent_initiated(self):
+            pass
+
+        def mark_run_agent_initiated_cancelled(self):
+            pass
+
+        async def wait_for_run_end(self, timeout, *, epoch=None):  # noqa: ARG002
+            return "completed"
+
+    monitor = _SpawnFailedMonitor()
+    cm = NativeCanvasManager.__new__(NativeCanvasManager)
+    cm.window = SimpleNamespace(current_page=None)
+    proxy = NativeFlowgraphProxy(cm, exec_monitor=monitor)
+    res = asyncio.run(proxy._build_run_result(monitor, "completed", 10.0, None))
+
+    assert res["status"] == "completed"
+    assert res["return_code"] == 0
+    assert res["ran_successfully"] is False
+    assert res["spawn_failed"] is True
+    assert "spawn" in res["note"].lower()
+
+
+def test_run_result_success_has_no_spawn_flag():
+    import asyncio
+    from types import SimpleNamespace
+
+    class _OkMonitor:
+        last_run_code = 0
+        run_epoch = 1
+        is_tracking = False
+        last_run_spawn_failed = False
+
+        def mark_run_agent_initiated(self):
+            pass
+
+        def mark_run_agent_initiated_cancelled(self):
+            pass
+
+        async def wait_for_run_end(self, timeout, *, epoch=None):  # noqa: ARG002
+            return "completed"
+
+    monitor = _OkMonitor()
+    cm = NativeCanvasManager.__new__(NativeCanvasManager)
+    cm.window = SimpleNamespace(current_page=None)
+    proxy = NativeFlowgraphProxy(cm, exec_monitor=monitor)
+    res = asyncio.run(proxy._build_run_result(monitor, "completed", 10.0, None))
+
+    assert res["ran_successfully"] is True
+    assert "spawn_failed" not in res
+
+
+def test_bounded_run_finish_reports_spawn_failure():
+    import asyncio
+    from types import SimpleNamespace
+
+    class _SpawnFailedMonitor:
+        last_run_code = 0
+        run_epoch = 1
+        is_tracking = False
+        last_run_spawn_failed = True
+
+        def mark_run_agent_initiated(self):
+            pass
+
+        def mark_run_agent_initiated_cancelled(self):
+            pass
+
+        async def wait_for_run_end(self, timeout, *, epoch=None):  # noqa: ARG002
+            return "completed"
+
+    monitor = _SpawnFailedMonitor()
+    cm = NativeCanvasManager.__new__(NativeCanvasManager)
+    cm.window = SimpleNamespace(current_page=None)
+    proxy = NativeFlowgraphProxy(cm, exec_monitor=monitor)
+
+    async def _not_running():
+        return {"status": "not_running"}
+
+    # The proxy routes attribute sets through the live flowgraph; store the
+    # stub directly, the same way __init__ stores its own fields.
+    object.__setattr__(proxy, "stop_flowgraph", _not_running)
+    res = asyncio.run(proxy._finish_bounded_run(monitor, 5))
+
+    assert res["status"] == "completed"
+    assert res["ran_successfully"] is False
+    assert res["spawn_failed"] is True
