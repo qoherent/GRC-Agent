@@ -1,0 +1,12 @@
+{
+  "id": "t03_fm_receiver_repair",
+  "category": "repair",
+  "persona_id": "ham_operator",
+  "goal": "this fm receiver graph i had lying around doesn't seem right, can you look at it and get it working so i can hear a station",
+  "seed_grc": "playground/fm_rx.grc",
+  "generate_options": "qt_gui",
+  "acceptance": { "kind": "graph_valid", "description": "Seeded FM receiver graph validates after repair with audio output intact" },
+  "max_simulator_turns": 25,
+  "give_up_after_unproductive": 6,
+  "expected_capabilities": ["inspect_graph", "change_graph", "query_knowledge"]
+}

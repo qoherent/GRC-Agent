@@ -1,0 +1,68 @@
+{
+  "personas": [
+    {
+      "id": "hobbyist_sdr",
+      "occupation": "SDR hobbyist",
+      "technical_proficiency": "intermediate",
+      "personality": "curious, hands-on, jumps between ideas",
+      "patience": "medium",
+      "style": { "max_words": 30, "formality": "casual" }
+    },
+    {
+      "id": "student_ee",
+      "occupation": "electrical engineering student",
+      "technical_proficiency": "beginner",
+      "personality": "earnest, wants to understand, asks why",
+      "patience": "high",
+      "style": { "max_words": 35, "formality": "neutral" }
+    },
+    {
+      "id": "dsp_engineer",
+      "occupation": "DSP engineer",
+      "technical_proficiency": "expert",
+      "personality": "precise, time-pressed, expects exact parameter talk",
+      "patience": "low",
+      "style": { "max_words": 25, "formality": "neutral" }
+    },
+    {
+      "id": "researcher_phy",
+      "occupation": "wireless research scientist",
+      "technical_proficiency": "expert",
+      "personality": "methodical, references theory, wants plots",
+      "patience": "medium",
+      "style": { "max_words": 40, "formality": "neutral" }
+    },
+    {
+      "id": "tinkerer_impatient",
+      "occupation": "software developer messing with radio",
+      "technical_proficiency": "beginner",
+      "personality": "impatient, blunt, just wants it to work",
+      "patience": "low",
+      "style": { "max_words": 20, "formality": "casual" }
+    },
+    {
+      "id": "ham_operator",
+      "occupation": "licensed amateur radio operator",
+      "technical_proficiency": "intermediate",
+      "personality": "friendly, story-driven, uses radio slang",
+      "patience": "high",
+      "style": { "max_words": 35, "formality": "casual" }
+    },
+    {
+      "id": "grad_student_stressed",
+      "occupation": "grad student on a deadline",
+      "technical_proficiency": "intermediate",
+      "personality": "stressed, rushed, grateful for anything that works",
+      "patience": "low",
+      "style": { "max_words": 25, "formality": "casual" }
+    },
+    {
+      "id": "educator_demo",
+      "occupation": "communications course instructor",
+      "technical_proficiency": "expert",
+      "personality": "pedagogical, thinks in demos and stage-by-stage views",
+      "patience": "medium",
+      "style": { "max_words": 40, "formality": "neutral" }
+    }
+  ]
+}

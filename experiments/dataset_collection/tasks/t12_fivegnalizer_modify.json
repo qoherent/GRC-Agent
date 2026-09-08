@@ -1,0 +1,12 @@
+{
+  "id": "t12_fivegnalizer_modify",
+  "category": "modify",
+  "persona_id": "dsp_engineer",
+  "goal": "this big 5g graph is heavy. find the sample-rate bottleneck chain and tell me what to change to lighten the fft load, then apply it",
+  "seed_grc": "playground/5gnalizer.grc",
+  "generate_options": "qt_gui",
+  "acceptance": { "kind": "graph_valid", "description": "Graph validates after the FFT-load reduction edits" },
+  "max_simulator_turns": 26,
+  "give_up_after_unproductive": 7,
+  "expected_capabilities": ["inspect_graph", "query_knowledge", "change_graph"]
+}

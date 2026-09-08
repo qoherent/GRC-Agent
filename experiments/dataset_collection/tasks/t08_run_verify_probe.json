@@ -1,0 +1,21 @@
+{
+  "id": "t08_run_verify_probe",
+  "category": "run_verify",
+  "persona_id": "dsp_engineer",
+  "goal": "build a quick noise source to file/level probe chain, run it briefly, and tell me the measured level actually matches what we'd expect",
+  "seed_grc": null,
+  "generate_options": "qt_gui",
+  "acceptance": {
+    "kind": "log_contains",
+    "pattern": "(?i)(rms|level|power|db)",
+    "description": "Probe prints a measured value to the run log"
+  },
+  "max_simulator_turns": 26,
+  "give_up_after_unproductive": 6,
+  "expected_capabilities": [
+    "change_graph",
+    "run_flowgraph",
+    "get_run_log",
+    "generate_python"
+  ]
+}

@@ -1,0 +1,12 @@
+{
+  "id": "t02_qpsk_ber_chain",
+  "category": "build",
+  "persona_id": "grad_student_stressed",
+  "goal": "make me a qpsk modulator and show me messages getting modulated, sent, decoded, and compared with the original, with the BER",
+  "seed_grc": null,
+  "generate_options": "qt_gui",
+  "acceptance": { "kind": "graph_valid", "description": "End-to-end QPSK loop validates with a BER/error-count probe wired in" },
+  "max_simulator_turns": 30,
+  "give_up_after_unproductive": 8,
+  "expected_capabilities": ["change_graph", "query_knowledge", "run_flowgraph", "get_run_log"]
+}

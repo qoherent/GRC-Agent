@@ -61,3 +61,4 @@ docs/blog.md
 
 # pi harness local state (goals pool, loops, session ledgers)
 .pi/
+experiments/dataset_collection/fixtures/
