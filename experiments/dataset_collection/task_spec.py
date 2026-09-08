@@ -190,19 +190,21 @@ def coverage_matrix(tasks: list[TaskSpec]) -> str:
 def prepare_fixtures(out_dir: Path = FIXTURES_DIR, tasks_dir: Path = TASKS_DIR) -> list[Path]:
     """Copy each seed graph into its own isolated fixture directory.
 
-    The fixture dir (``<out>/<task_id>/<seed>.grc``) is the task's project
-    directory for the campaign: fs/shell tools sandbox to it, and the live
-    ``playground/`` tree is never touched (plan KTD3). Returns the fixture
-    paths; ``file_path`` identity assertions in the runner use these.
+    The fixture dir (``<out>/<task_id>/``) is the task's project directory for
+    the campaign: fs/shell tools sandbox to it, and the live ``playground/``
+    tree is never touched (plan KTD3). Seed-less (new-graph) tasks get a copy
+    of the saved starter graph instead of an untitled page — every task opens
+    a real saved file, so the no-``untitled:`` identity rule holds uniformly.
+    Returns the fixture paths; ``file_path`` assertions in the runner use these.
     """
     made: list[Path] = []
+    starter = REPO_ROOT / "playground" / "untitled.grc"
     for t in load_tasks(tasks_dir):
-        if t.seed_grc is None:
-            continue
         task_dir = out_dir / t.id
         task_dir.mkdir(parents=True, exist_ok=True)
-        dest = task_dir / Path(t.seed_grc).name
-        shutil.copy2(REPO_ROOT / t.seed_grc, dest)
+        source = REPO_ROOT / t.seed_grc if t.seed_grc else starter
+        dest = task_dir / source.name
+        shutil.copy2(source, dest)
         made.append(dest)
     return made
 
