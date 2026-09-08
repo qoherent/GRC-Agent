@@ -89,6 +89,14 @@ Active feature requests, architectural improvements, and planned capabilities. C
   - *Status*: ✅ Completed. The `distance` field is omitted on non-vector lexical rows (`distance is None`) rather than emitting a fabricated `0.0`, eliminating confusion with perfect vector matches.
 * **6.5 ConversationSearch Snapshot Recovery for Interrupted Runs**:
   - Engage with upstream harness to allow recovery of user-interrupted tool calls (`state=interrupted`) during session history analysis.
+* **6.6 Session-165 harness grounding**:
+  - **Status**: ✅ Completed (2026-09-08). Approval-card crash on JSON-stringified args, missing live-graph identity, silently dropped `.grc` paging arguments, and unrecorded client-side turn failures — audited in [`investigation/audit-session-165-approval-crash-and-graph-identity.md`](investigation/audit-session-165-approval-crash-and-graph-identity.md), fixed per [`plans/2026-09-08-1340-fix-session-165-harness-grounding-plan.md`](plans/2026-09-08-1340-fix-session-165-harness-grounding-plan.md). Model faults from the same session (stringified arguments, a forbidden `.grc` write attempt, obsolete 3.7-era XML, a self-truncated plan) were left alone: every one hit a guard that held, and the instructions they ignored already exist.
+* **6.7 Upstream Pydantic AI Deferred-Approval Arguments**:
+  - *Observation*: `tool_manager.py:378-380` keeps `before_tool_validate`'s repaired arguments in a local while `DeferredToolRequests` is built from the original `ToolCallPart` (`_tool_execution.py:953`), so any approval UI receives un-repaired model arguments; `args_validator` cannot help (it runs post-coercion and never sees the part). Worked around locally by applying the same repair rule in the card.
+  - *Planned Resolution*: Submit an upstream issue proposing that the deferred request carry the validated arguments (or that the hook's return value be written back to the part).
+* **6.8 Upstream Pydantic AI `ModelRetry` Leaves Tool Effects Unterminated**:
+  - *Observation*: `tool_manager.py:469-470` re-raises `ModelRetry` without calling `on_tool_execute_error`, so `StepPersistence`'s effect ledger keeps those rows at `status='started'` with `ended_at=NULL` forever — indistinguishable from a crash-interrupted call (3 such rows in the current DB, 2 from session 165 alone).
+  - *Planned Resolution*: Submit an upstream issue proposing a terminal effect/event for the retry path.
 
 ### 7. Finish the chat-sidebar decomposition (≤1,000-line bar)
 * **Status**: ✅ Completed (2026-09-03). U5 landed `chat/turn_driver.py` (TurnDriverMixin, 381 lines) and U6 landed `chat/session.py` (SessionMixin, 452) and `chat/status_view.py` (StatusContextMixin, 294) — move-only, golden byte-identical at every step, all gates green forward and `--reverse`. `chat_sidebar.py`: 1,925 → 943 lines (composition root); largest `chat/` module: stream_view at 574. Unblocked item 8.
@@ -112,6 +120,17 @@ Active feature requests, architectural improvements, and planned capabilities. C
 ### 10. Scenario suite default model
 * **Status**: ✅ Closed as decided (2026-09-08) — user-directed: the suite stays on free-tier OpenRouter, default `dots-studio/dots-3-note-preview:free`, accepting the recorded `01_add_throttle` double-encoding failure (no real-token burn unless needed). Per-run override via `GRC_OPENROUTER_MODEL` remains; the tool contract stays strict.
 * **Evidence (recorded 2026-09-03)**: all three free OpenRouter models tried this session fail the schema-strict `01_add_throttle` scenario — `dots-studio/dots-3-note-preview:free` double-encoded even the flattest array (`inspect_graph`'s `targets` arrived as the string `"[\"all\"]"`) and exhausted retries at the scenario's first tool call; `poolside/laguna-s-2.1:free` saturated upstream (HTTP 429); `inclusionai/ling-3.0-flash-fin:free` (the then-default, matching `.env`) double-encoded the heavier nested `add_blocks` array — the only validation error in the call, repeated across all 3 retries. Minimal-probe verification shows BOTH models conform on the identical shapes in small contexts, so it is encoding reliability under the full tool surface, not missing capability (dots' ceiling is lower: it drops the trivial flat case where ling drops only the nested one). Decision (2026-09-03): the tool contract stays strict — no tolerated coercion of string-encoded arrays (user-directed).
+
+### 11. Reachability of chats held on unsaved flowgraph tabs
+* **Status**: 🔄 Proposed (deferred by decision, 2026-09-08)
+* **Observation**: a chat opened on an unsaved tab is stored under the sentinel `untitled:<tab title>` (`chat_sidebar.py:_get_effective_path`). `get_recent_sessions` filters on `exists()` and session loading rejects a missing file, so those transcripts can never be reopened from the welcome view — sessions 162–165 included. The fabricated absolute path is fixed (the store no longer `resolve()`s a non-path); reachability is not.
+* **Mechanics**: make a pathless session first-class — nullable `grc_file_path` (schema migration), listing and loading by tab title, welcome-view label — or bind the session to the graph on first save.
+* **Reference**: [`investigation/audit-session-165-approval-crash-and-graph-identity.md`](investigation/audit-session-165-approval-crash-and-graph-identity.md) (F2, aggravating detail).
+
+### 12. Test isolation: unredirected tests write the developer's live chat DB
+* **Status**: 🔄 Proposed
+* **Observation**: most suites point `GRC_AGENT_ENV` at a tmp dir, but some unit tests construct a `ChatSidebar` without doing so (e.g. `tests/test_chat_sidebar_golden.py:379`), and sidebar start-up initializes the store — so those tests run `init_db` (orphan sweeps included) against `.grc_agent/chat_sessions.db`. Evidence: that DB holds 125 `runs`, 250 `events` and 160 `snapshots` against 5 `sessions`, and the legacy `run_tools` table was dropped from it by a test run rather than at app launch.
+* **Mechanics**: an autouse conftest fixture that redirects `GRC_AGENT_ENV` for every test (opt-out per test rather than opt-in), so the fast gate is hermetic by construction rather than by discipline.
 
 ---
 

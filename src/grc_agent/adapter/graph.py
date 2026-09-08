@@ -802,10 +802,23 @@ def inspect_graph(  # noqa: C901
     opt_block = getattr(flow_graph, "options_block", None)
     graph_name = opt_block.name if opt_block is not None else ""
 
+    # File identity, from GRC's own field. `graph_name` is only the options
+    # block's `id` param — "default" for a fresh page, straight out of GRC's
+    # default_flow_graph.grc — and it coincides with a filename merely because
+    # saving renames the id to the file stem. Two graphs can therefore carry
+    # the same name while being different graphs, which is exactly what a
+    # never-saved page and a same-named .grc in the project directory are.
+    # `grc_file_path` is kept current by every path that matters: GRC's load
+    # and save/save-as, this adapter's loader, and the canvas save + manual-edit
+    # re-baseline. Empty means the graph has never been written to disk, which
+    # `file_path: null` states explicitly rather than leaving to inference.
+    file_path = getattr(flow_graph, "grc_file_path", "") or None
+
     return {
         "ok": True,
         "graph": {
             "graph_name": graph_name,
+            "file_path": file_path,
             "blocks": blocks,
             "connections": connections,
             "validation": {"status": "valid" if valid else "invalid", "errors": errors},

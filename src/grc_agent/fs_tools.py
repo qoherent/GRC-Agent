@@ -278,7 +278,8 @@ class GrcFileSystemToolset(FileSystemToolset[AgentDepsT]):
         same structural inspection as the inspect_graph tool (topology,
         blocks, connections, parameter values, validation status). The active
         flowgraph is inspected from the live in-memory graph; any other `.grc`
-        in the folder is loaded from disk. Use inspect_graph when you need a
+        in the folder is loaded from disk. A structural view has no lines, so
+        `offset`/`limit` do not apply to it — use inspect_graph when you need a
         per-block (targets) view of the active graph.
 
         Image files (pydantic-ai's `ImageMediaType` set, derived via
@@ -289,8 +290,8 @@ class GrcFileSystemToolset(FileSystemToolset[AgentDepsT]):
 
         Args:
             path: File path relative to the project directory.
-            offset: Zero-based line offset to start reading from.
-            limit: Maximum number of lines to return (default: 1000).
+            offset: Zero-based line offset to start reading from (text files only).
+            limit: Maximum number of lines to return (default: 1000; text files only).
 
         Returns:
             File content with line numbers, or the image as `BinaryContent`.
@@ -299,7 +300,9 @@ class GrcFileSystemToolset(FileSystemToolset[AgentDepsT]):
         if _is_grc_name(resolved.name):
             if not resolved.is_file():
                 raise FileNotFoundError(f"File not found: {path}")
-            return self._inspect_grc_file(resolved)
+            return self._inspect_grc_file(
+                resolved, paging_requested=(offset != 0 or limit is not None)
+            )
         media_type, _ = mimetypes.guess_type(resolved.name)
         if media_type in _IMAGE_MEDIA_TYPES:
             if not resolved.is_file():
@@ -307,8 +310,16 @@ class GrcFileSystemToolset(FileSystemToolset[AgentDepsT]):
             return BinaryContent(data=resolved.read_bytes(), media_type=media_type)
         return await super().read_file(path, offset=offset, limit=limit)
 
-    def _inspect_grc_file(self, resolved: Path) -> str:
-        """Structural inspection of a `.grc` path via the inspect_graph engine."""
+    def _inspect_grc_file(self, resolved: Path, *, paging_requested: bool = False) -> str:
+        """Structural inspection of a `.grc` path via the inspect_graph engine.
+
+        `offset`/`limit` cannot apply here — this branch returns a structural
+        view, not lines — and dropping them without a word made three reads at
+        limit 50, 10 and 5 return byte-identical payloads in session 165, with
+        no way for the model to learn that narrowing was impossible. So the
+        drop is disclosed in the same header that names the engine and source,
+        under the same rule as every other model-facing omission.
+        """
         active = active_grc_path()
         if active is not None and resolved == active:
             fg = _active_flow_graph_fn()
@@ -319,9 +330,10 @@ class GrcFileSystemToolset(FileSystemToolset[AgentDepsT]):
                 data, source = self._load_and_inspect(resolved), "active file on disk"
         else:
             data, source = self._load_and_inspect(resolved), "file on disk"
+        paging = " | offset/limit ignored: a structural view has no lines to page" if paging_requested else ""
         header = (
             f"[{resolved.name} | GNU Radio flowgraph | structural view via the "
-            f"inspect_graph engine — source: {source}]\n"
+            f"inspect_graph engine — source: {source}{paging}]\n"
         )
         return header + json.dumps(data)
 

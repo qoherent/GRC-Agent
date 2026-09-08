@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import logging
 
-from pydantic_ai.messages import ModelMessage, ModelResponse, ThinkingPart, ToolCallPart
+from pydantic_ai.messages import ModelMessage, ModelResponse, ThinkingPart
 
 _log = logging.getLogger(__name__)
 
@@ -34,7 +34,10 @@ def _clean_message_history_for_new_turn(
         if isinstance(last, ModelResponse) and last.tool_calls:
             _log.warning(
                 "cleaning history for a new turn: dropping a response with %d unprocessed "
-                "tool call(s) %s — the calls stay recoverable in the step-store snapshots",
+                "tool call(s) %s — recoverable from the step store only when a snapshot "
+                "exists for it (StepPersistence gates snapshots on is_provider_valid, so a "
+                "run that ended awaiting approval has none; the turn-failure archive covers "
+                "that case)",
                 len(last.tool_calls),
                 [tc.tool_name for tc in last.tool_calls],
             )
@@ -42,15 +45,6 @@ def _clean_message_history_for_new_turn(
             continue
         break
     return cleaned
-
-
-def _messages_call_tool(messages: list[ModelMessage], tool_name: str) -> bool:
-    """Whether this run emitted a call to one exact Pydantic AI function tool."""
-    return any(
-        isinstance(part, ToolCallPart) and part.tool_name == tool_name
-        for message in messages
-        for part in getattr(message, "parts", [])
-    )
 
 
 def _without_truncated_thinking_tail(

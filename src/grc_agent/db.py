@@ -20,6 +20,7 @@ from pydantic_ai_harness.step_persistence import (
     ContinuableSnapshot,
     RunRecord,
     SqliteStepStore,
+    StepEvent,
 )
 
 from .settings import env_path
@@ -141,6 +142,17 @@ def init_db() -> None:
                 "ON sessions(updated_at DESC, id DESC)"
             )
 
+            # `run_tools` is orphaned schema from a pydantic-ai-harness
+            # version this project no longer runs: nothing in `src/` or in this
+            # repo's history has ever written it, harness 0.28.0 does not
+            # create it (a fresh SqliteStepStore makes only runs, events,
+            # snapshots and tool_effects), nothing reads it, and no sweep or
+            # per-session delete reaches its rows. Dropping it is idempotent —
+            # the index goes with the table — and there is no app-level schema
+            # version to bump: `_meta.schema_version` belongs to the harness's
+            # own store and is not ours to touch.
+            conn.execute("DROP TABLE IF EXISTS run_tools")
+
             # Harness-owned tables are created lazily by their respective
             # stores. Guard each sweep so a fresh DB remains valid before the
             # first agent or planning operation.
@@ -222,6 +234,55 @@ async def archive_transcript(
             messages=messages,
             conversation_id=conversation_id,
             agent_name=agent_name,
+        )
+    )
+    return run_id
+
+
+async def record_turn_failure(
+    messages: list[ModelMessage],
+    *,
+    conversation_id: str,
+    agent_name: str,
+    error_text: str,
+) -> str:
+    """Record a turn that died in the client after its agent run had completed.
+
+    Session 165 ended with `Agent Error: 'str' object has no attribute 'get'`
+    raised out of the approval-card path — i.e. after the run's own
+    `run_completed` event — and the database recorded a completed run and no
+    failure of any kind. Worse, the salvage that follows a failed turn
+    (`_clean_message_history_for_new_turn`) drops the trailing response that
+    carries the unapproved tool call, and its claim that such calls "stay
+    recoverable in the step-store snapshots" does not hold for this shape:
+    StepPersistence gates every snapshot on `is_provider_valid`, and a history
+    ending in an unresolved tool call is not provider-valid, so no snapshot was
+    ever written. The arguments that killed the turn were therefore unrecoverable.
+
+    So both halves are recorded here: the at-failure history as a
+    `turn_failure` archive run (the same mechanism compaction, the handoff and
+    the truncated-thinking archive already use), and one `run_failed` event
+    against that archive run carrying the exact text the user saw. `kind` comes
+    from the harness's closed `EventKind` set, whose contract is append-only
+    with corrections recorded as follow-up events — the event is attached to
+    our own archive run rather than to the harness-owned agent run, so nothing
+    is fabricated on a run we do not own.
+    """
+    run_id = await archive_transcript(
+        messages,
+        conversation_id=conversation_id,
+        agent_name=agent_name,
+        kind="turn_failure",
+    )
+    store = get_step_store()
+    await store.append_event(
+        StepEvent(
+            run_id=run_id,
+            kind="run_failed",
+            step_index=0,
+            conversation_id=conversation_id,
+            agent_name=agent_name,
+            error=error_text,
         )
     )
     return run_id
@@ -489,11 +550,21 @@ def save_session(
     `first_message` is extracted from `messages` once here so the
     recent-sessions list can read it as a plain column instead of
     re-deserializing the whole messages blob per rendered row.
+
+    `grc_file_path` is stored exactly as given. This used to `Path().resolve()`
+    it, which is wrong for the one caller that legitimately has no path: a chat
+    held on an unsaved tab passes the `untitled:<tab title>` sentinel, and
+    resolving that against the process CWD fabricated an absolute path that
+    never existed (session 165 recorded
+    `.../GRC_Agent/untitled:untitled.grc`). Canonicalisation belongs to the
+    only layer that knows whether it holds a filesystem path — the sidebar's
+    `_get_effective_path` — so there is no branch on the sentinel's spelling
+    anywhere.
     """
     init_db()
     messages_str = serialize_messages(messages)
     first_msg = _first_user_prompt(messages)
-    abs_path = str(Path(grc_file_path).resolve())
+    stored_path = grc_file_path
     with _conn() as conn:
         if session_id is not None:
             row = conn.execute("SELECT 1 FROM sessions WHERE id = ?", (session_id,)).fetchone()
@@ -501,7 +572,7 @@ def save_session(
                 conn.execute(
                     "UPDATE sessions SET grc_file_path = ?, messages = ?, first_message = ?, "
                     "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-                    (abs_path, messages_str, first_msg, session_id),
+                    (stored_path, messages_str, first_msg, session_id),
                 )
                 conn.commit()
                 _prune_in(conn)
@@ -514,7 +585,7 @@ def save_session(
             return None
         cursor = conn.execute(
             "INSERT INTO sessions (grc_file_path, messages, first_message) VALUES (?, ?, ?)",
-            (abs_path, messages_str, first_msg),
+            (stored_path, messages_str, first_msg),
         )
         conn.commit()
         new_id = cursor.lastrowid

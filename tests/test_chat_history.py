@@ -96,17 +96,3 @@ def test_without_truncated_thinking_tail():
 
     assert _without_truncated_thinking_tail([]) == ([], False)
 
-
-def test_messages_call_tool():
-    from pydantic_ai.messages import ModelRequest, ModelResponse, ToolCallPart, UserPromptPart
-
-    from grc_agent.chat.history import _messages_call_tool
-
-    msgs = [
-        ModelRequest(parts=[UserPromptPart(content="x")]),
-        ModelResponse(parts=[ToolCallPart("write_plan", {})]),
-    ]
-    assert _messages_call_tool(msgs, "write_plan") is True
-    assert _messages_call_tool(msgs, "change_graph") is False
-    assert _messages_call_tool([], "write_plan") is False
-

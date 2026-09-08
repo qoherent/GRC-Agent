@@ -37,6 +37,44 @@ def test_inspect_graph_overview(temp_dial_tone):
     assert len(graph["connections"]) > 0
 
 
+def test_inspect_graph_reports_file_identity(temp_dial_tone):
+    """A graph's file identity, which `graph_name` cannot carry.
+
+    `graph_name` is only the options block's `id` — "default" for a fresh page,
+    from GRC's own default_flow_graph.grc — and it matches a filename merely
+    because saving renames the id to the file stem. In session 165 a never-saved
+    live graph and a 14 KB `newtest/untitled.grc` were indistinguishable to the
+    model, which concluded the file WAS the live graph. `file_path` is the field
+    that tells them apart.
+    """
+    from grc_agent.adapter.graph import get_platform
+
+    # Never written to disk: explicit null, not an omitted key.
+    memfg = get_platform().make_flow_graph()
+    memfg.grc_file_path = ""
+    graph = inspect_graph(memfg)["graph"]
+    assert "file_path" in graph
+    assert graph["file_path"] is None
+
+    # Loaded from a file: that file's absolute path.
+    fg = load_flow_graph(str(temp_dial_tone))
+    graph = inspect_graph(fg)["graph"]
+    assert graph["file_path"] == str(Path(temp_dial_tone).resolve())
+
+    # Saved elsewhere (GRC and the canvas both update grc_file_path): the new path.
+    fg.grc_file_path = "/tmp/elsewhere/renamed.grc"
+    assert inspect_graph(fg)["graph"]["file_path"] == "/tmp/elsewhere/renamed.grc"
+
+    # A targeted inspection carries the same identity.
+    scoped = inspect_graph(fg, targets=["samp_rate"])["graph"]
+    assert scoped["file_path"] == "/tmp/elsewhere/renamed.grc"
+
+    # Two same-named graphs are now distinguishable in one field.
+    memfg.options_block.params["id"].set_value("renamed")
+    assert inspect_graph(memfg)["graph"]["graph_name"] == "renamed"
+    assert inspect_graph(memfg)["graph"]["file_path"] is None
+
+
 def test_inspect_graph_target_formats(temp_dial_tone):
     fg = load_flow_graph(str(temp_dial_tone))
     full = inspect_graph(fg, targets=None)
@@ -1383,7 +1421,7 @@ def test_agent_executes_change_graph_with_stringified_json_args():
 
 
 def test_is_composite_schema_detection():
-    from grc_agent.agent import _is_composite_schema
+    from grc_agent.json_args import is_composite_schema as _is_composite_schema
 
     assert _is_composite_schema({"type": "array"}) is True
     assert _is_composite_schema({"type": "object"}) is True

@@ -646,8 +646,13 @@ def test_chatsidebar_failed_turn_leaves_failure_trail(tmp_path):
     conv = conversation_id_for_session(sid)
     store = get_step_store()
     runs = asyncio.run(store.list_runs(conversation_id=conv))
-    assert len(runs) == 1
-    events = asyncio.run(store.list_events(run_id=runs[0].run_id))
+    # Two runs by design: the agent run the harness recorded, and the sidebar's
+    # own turn-failure archive, which carries the text the USER saw (the
+    # harness stores `repr(error)`). They are told apart by metadata kind, not
+    # by position or count.
+    agent_runs = [r for r in runs if "kind" not in r.metadata]
+    assert len(agent_runs) == 1, [r.metadata for r in runs]
+    events = asyncio.run(store.list_events(run_id=agent_runs[0].run_id))
     kinds = [e.kind for e in events]
     # The stream-entry raise bypasses on_model_request_error, but the run-level
     # failure boundary is still recorded (run_failed is emitted by on_run_error,
@@ -656,13 +661,20 @@ def test_chatsidebar_failed_turn_leaves_failure_trail(tmp_path):
     failed = [e for e in events if e.kind == "run_failed"][0]
     assert "model exploded" in (failed.error or "")
 
+    # The sidebar's archive records the same turn in the user's own terms.
+    archives = [r for r in runs if r.metadata.get("kind") == "turn_failure"]
+    assert len(archives) == 1
+    archive_events = asyncio.run(store.list_events(run_id=archives[0].run_id))
+    assert [e.kind for e in archive_events] == ["run_failed"]
+    assert "model exploded" in (archive_events[0].error or "")
+
     # on_run_error persists the at-failure history ONLY when it contains a
     # model response (a bare prompt equals restarting the run — the library's
     # documented rule), so this turn leaves no resume point.
     from pydantic_ai_harness.step_persistence import continue_run
 
     try:
-        asyncio.run(continue_run(store, run_id=runs[0].run_id))
+        asyncio.run(continue_run(store, run_id=agent_runs[0].run_id))
     except LookupError:
         pass
     else:
@@ -714,3 +726,92 @@ def ModelResponse_with_text(text):
     from pydantic_ai.messages import ModelResponse, TextPart
 
     return ModelResponse(parts=[TextPart(content=text)])
+
+
+def test_turn_failure_after_approval_request_is_recorded(tmp_path):
+    """Session 165's exact turn shape, end to end.
+
+    The run ends legitimately with `DeferredToolRequests` (a declared final
+    output), emits `run_completed`, and the turn then dies rendering the
+    approval card. Before this fix the database showed a completed run, no
+    failure of any kind, and no copy of the response holding the offending
+    call — the salvage dropped it, and StepPersistence had written no snapshot
+    for it because a history ending in an unresolved tool call is not
+    `is_provider_valid`.
+    """
+    from unittest.mock import AsyncMock, MagicMock
+
+    from pydantic_ai import Agent
+    from pydantic_ai.messages import ModelResponse, ToolCallPart
+    from pydantic_ai.models.test import TestModel
+    from pydantic_ai.tools import DeferredToolRequests
+    from pydantic_ai_harness.step_persistence import StepPersistence
+
+    from grc_agent.chat_sidebar import ChatSidebar
+    from grc_agent.db import conversation_id_for_session, get_step_store
+
+    agent = Agent(
+        TestModel(call_tools=["change_graph_stub"]),
+        output_type=[str, DeferredToolRequests],
+        capabilities=[StepPersistence(store=get_step_store(), agent_name="grc_executor")],
+    )
+
+    @agent.tool_plain(requires_approval=True)
+    def change_graph_stub(reason: str, add_blocks: list[dict]) -> str:  # noqa: ARG001
+        return "applied"
+
+    sidebar = ChatSidebar()
+    sidebar._agent = agent
+    sidebar._agent_mode = "executor"
+    sidebar._active_provider = "test-provider"
+    sidebar._flowgraph_proxy = MagicMock()
+    sidebar._flowgraph_proxy._canvas_manager = None
+    sidebar._save_history = AsyncMock()
+    sidebar._render_history = MagicMock()
+    sidebar._scroll_to_bottom = MagicMock()
+    sidebar._update_context_label = MagicMock()
+
+    # The crash: what rendering an un-repaired `add_blocks` string used to do.
+    async def _boom(_ctx, _output):
+        raise AttributeError("'str' object has no attribute 'get'")
+
+    sidebar._request_approvals = _boom
+
+    sid, _f = _make_session(tmp_path)
+    sidebar._active_session_id = sid
+    conv = conversation_id_for_session(sid)
+
+    asyncio.run(sidebar._run_agent_turn("add a qpsk modulator"))
+
+    store = get_step_store()
+    runs = asyncio.run(store.list_runs(conversation_id=conv))
+    archives = [r for r in runs if r.metadata.get("kind") == "turn_failure"]
+    assert len(archives) == 1, f"expected one turn_failure archive, got {[r.metadata for r in runs]}"
+    archive = archives[0]
+    assert archive.agent_name == "grc_executor"
+
+    # The failure is recorded with the text the user saw.
+    events = asyncio.run(store.list_events(run_id=archive.run_id))
+    failed = [e for e in events if e.kind == "run_failed"]
+    assert len(failed) == 1
+    assert failed[0].error == "Agent Error: 'str' object has no attribute 'get'"
+
+    # The archived history keeps the response carrying the unapproved call...
+    snapshot = asyncio.run(store.latest_snapshot(run_id=archive.run_id, include_interrupted=True))
+    assert snapshot is not None
+    calls = [
+        part
+        for message in snapshot.messages
+        if isinstance(message, ModelResponse)
+        for part in message.parts
+        if isinstance(part, ToolCallPart)
+    ]
+    assert any(c.tool_name == "change_graph_stub" for c in calls)
+
+    # ...which the active history no longer has, so the archive is the only copy.
+    assert not any(
+        isinstance(part, ToolCallPart)
+        for message in sidebar._message_history
+        if isinstance(message, ModelResponse)
+        for part in message.parts
+    )

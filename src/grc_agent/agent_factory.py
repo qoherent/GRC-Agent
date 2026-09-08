@@ -1005,11 +1005,35 @@ def build_agents_from_cfg(cfg: dict) -> AgentBundle:
     planner.tool(write_plan_func, name="write_plan")
 
     def add_active_flowgraph_context(ctx: RunContext[NativeFlowgraphProxy]) -> str | None:
-        if ctx.deps is not None:
-            cm = getattr(ctx.deps, "_canvas_manager", None)
-            if cm and getattr(cm, "path", None):
-                return f"Active flowgraph file path: {cm.path}"
-        return None
+        """Name the active flowgraph every turn, including when it has no file.
+
+        Returning None for an unsaved page — what this did before — reads to the
+        model as "no information", not as "this graph has never been saved".
+        Session 165's agent, given silence here and a same-named 14 KB
+        `untitled.grc` in the project directory, concluded the file WAS the live
+        graph and tried to overwrite it.
+
+        The path comes from the declared deps surface (`FlowgraphDeps` forwards
+        attribute access to the live `FlowGraph`, whose `grc_file_path` GRC keeps
+        current on load, save and save-as), not from probing a private
+        canvas-manager attribute — the pattern `deps.py` exists to end. Nothing
+        is the truthful answer only when there is no graph at all, which is the
+        `RuntimeError` `NativeFlowgraphProxy._get_target` raises with no page
+        open; an instructions hook must not let that reach the run.
+        """
+        if ctx.deps is None:
+            return None
+        try:
+            path = str(ctx.deps.grc_file_path or "")
+        except Exception:
+            return None
+        if path:
+            return f"Active flowgraph file path: {path}"
+        return (
+            "Active flowgraph: a live in-memory graph that has never been written to disk "
+            "(no file path). A .grc file in the project directory is a different graph, "
+            "even when its name matches."
+        )
 
     executor.instructions(add_active_flowgraph_context)
     planner.instructions(add_active_flowgraph_context)

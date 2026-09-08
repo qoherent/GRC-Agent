@@ -303,6 +303,10 @@ def test_step_tables_created_on_shared_db_file():
         tables = {r[0] for r in raw.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     assert {"runs", "events", "snapshots", "tool_effects"} <= tables
     assert "turn_traces" not in tables, "the hand-rolled trace table must never exist"
+    # `run_tools` is orphaned schema from an older harness: no writer in this
+    # repo or its history, not created by harness 0.28.0, read by nothing, and
+    # reached by no sweep. init_db drops it.
+    assert "run_tools" not in tables
 
 
 def test_delete_session_cascades_step_rows():
@@ -384,3 +388,34 @@ def test_orphan_sweep_removes_unmothered_session_rows():
     assert "session-999" not in convs, "orphaned session-N rows must be swept"
     assert None in convs, "ungrouped runs must never be touched by the sweep"
 
+
+
+def test_init_db_drops_the_orphaned_run_tools_table(tmp_path, monkeypatch):
+    """A DB carrying the legacy table (and rows) comes back without it."""
+    import sqlite3
+
+    monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
+
+    from grc_agent import db
+
+    db._initialized_paths.clear()
+    db._step_stores.clear()
+    db.init_db()  # creates the file and the sessions table
+
+    path = str(db.get_db_path())
+    with sqlite3.connect(path) as conn:
+        conn.execute("CREATE TABLE run_tools (run_id TEXT, tool_name TEXT)")
+        conn.execute("CREATE INDEX idx_run_tools_run_id ON run_tools(run_id)")
+        conn.execute("INSERT INTO run_tools VALUES ('grc_executor-legacy', 'inspect_graph')")
+        conn.commit()
+
+    db._initialized_paths.clear()
+    db.init_db()
+    db.init_db()  # idempotent
+
+    with sqlite3.connect(path) as conn:
+        tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        indexes = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='index'")}
+    assert "run_tools" not in tables
+    assert "idx_run_tools_run_id" not in indexes
+    assert "sessions" in tables

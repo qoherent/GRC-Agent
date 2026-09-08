@@ -197,3 +197,82 @@ def test_multimodal_session_roundtrip(tmp_path, monkeypatch):
     assert len(imgs) == 1
     assert imgs[0].media_type == "image/png"
     assert imgs[0].data.startswith(b"\x89PNG")
+
+
+def test_unsaved_tab_sentinel_is_stored_verbatim(tmp_path, monkeypatch):
+    """A chat held on an unsaved tab has no path, and the row must not invent one.
+
+    `save_session` used to `Path().resolve()` whatever it was handed, so the
+    sidebar's `untitled:<tab title>` sentinel became an absolute path resolved
+    against the process CWD — session 165 recorded
+    `/…/GRC_Agent/untitled:untitled.grc`, a file that has never existed.
+    """
+    monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
+
+    from grc_agent.db import get_recent_sessions, load_session, save_session
+
+    sid = save_session(None, "untitled:MyUnsavedTab", [])
+    assert sid is not None
+    stored = load_session(sid)["grc_file_path"]
+    assert stored == "untitled:MyUnsavedTab"
+    assert "/" not in stored, "no directory was fabricated around the sentinel"
+
+    # Unchanged behaviour: such a session is still not offered in Recent,
+    # which lists only sessions whose file exists on disk.
+    assert get_recent_sessions() == []
+
+    # A real path is stored as the caller canonicalised it.
+    graph = tmp_path / "real.grc"
+    graph.touch()
+    sid2 = save_session(None, str(graph.resolve()), [])
+    assert load_session(sid2)["grc_file_path"] == str(graph.resolve())
+
+
+def test_record_turn_failure_archives_history_and_the_user_facing_error(tmp_path, monkeypatch):
+    """A client-side turn failure must leave both halves in the store."""
+    import asyncio
+
+    from pydantic_ai.messages import ModelRequest, UserPromptPart
+
+    monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
+
+    from grc_agent.db import (
+        conversation_id_for_session,
+        get_step_store,
+        record_turn_failure,
+        save_session,
+    )
+
+    graph = tmp_path / "g.grc"
+    graph.touch()
+    sid = save_session(None, str(graph), [])
+    conv = conversation_id_for_session(sid)
+    messages = [ModelRequest(parts=[UserPromptPart(content="add a modulator")])]
+
+    run_id = asyncio.run(
+        record_turn_failure(
+            messages,
+            conversation_id=conv,
+            agent_name="grc_executor",
+            error_text="Agent Error: 'str' object has no attribute 'get'",
+        )
+    )
+
+    store = get_step_store()
+    run = asyncio.run(store.get_run(run_id=run_id))
+    assert run is not None and run.metadata.get("kind") == "turn_failure"
+    assert run.conversation_id == conv
+
+    events = asyncio.run(store.list_events(run_id=run_id))
+    assert [e.kind for e in events] == ["run_failed"]
+    assert events[0].error == "Agent Error: 'str' object has no attribute 'get'"
+    assert events[0].agent_name == "grc_executor"
+
+    snapshot = asyncio.run(store.latest_snapshot(run_id=run_id, include_interrupted=True))
+    assert snapshot is not None and len(snapshot.messages) == 1
+
+    # It is swept with its conversation like every other step row.
+    from grc_agent.db import delete_session
+
+    delete_session(sid)
+    assert asyncio.run(store.get_run(run_id=run_id)) is None

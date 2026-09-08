@@ -869,8 +869,20 @@ def test_system_prompt_keeps_unobservable_contracts():
         "no add_blocks in that same call",
         "'auto' never resolves from another 'auto' block",
         "Never enumerate or reconstruct a block schema from memory",
+        # Session 165: the live graph and a same-named .grc on disk were
+        # indistinguishable to the model. Nothing in the tool schemas can say
+        # that they are different graphs, so both prompts must.
+        "file_path: null",
     ):
         assert fragment in prompt, f"lost an unobservable contract: {fragment!r}"
+
+    # The planner reads .grc files too — it is where session 165's confusion
+    # started — so it carries the same contract.
+    from grc_agent.prompts import build_planner_prompt
+
+    planner = build_planner_prompt()
+    assert "file_path: null" in planner
+    assert "different graph even when its name matches" in planner
 
 
 def test_runtime_permission_recipes_live_in_the_corpus_not_the_prompt():

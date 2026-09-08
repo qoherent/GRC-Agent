@@ -130,6 +130,66 @@ def test_change_summary_formatter():
     assert format_change_summary({}) == "_No changes in this batch._"
 
 
+def test_change_summary_formatter_repairs_json_stringified_args():
+    """Session 165's crash shape: every composite argument arrived as a JSON string.
+
+    The card reads the model's arguments PRE-validation — pydantic-ai keeps the
+    `before_tool_validate` repair in a local (`tool_manager.py`) and builds the
+    approval request from the original ToolCallPart — so the card applies the
+    shared `repair_json_args` rule itself. Before that, `add_blocks` as a string
+    raised `AttributeError: 'str' object has no attribute 'get'` (a str iterates
+    as characters) and the connection families rendered one bullet per character.
+    """
+    import json
+
+    from grc_agent.ui.approval_card import format_change_summary, format_tool_summary
+
+    block = {
+        "block_id": "digital_constellation_modulator_bc",
+        "instance_name": "qpsk_mod",
+        "params": {"constellation": "qpsk_const"},
+    }
+
+    text = format_change_summary({"add_blocks": json.dumps([block])})
+    assert "`qpsk_mod` (`digital_constellation_modulator_bc`)" in text
+    assert "constellation=qpsk_const" in text
+
+    text = format_change_summary(
+        {"update_params": json.dumps([{"instance_name": "samp_rate", "params": {"value": "48000"}}])}
+    )
+    assert "`samp_rate.value` = `48000`" in text
+
+    text = format_change_summary(
+        {"update_states": json.dumps([{"instance_name": "noise_0", "state": "disabled"}])}
+    )
+    assert "`noise_0`" in text and "disabled" in text
+
+    # The garble regression: one bullet for the connection, not one per character.
+    text = format_change_summary({"add_connections": json.dumps(["qpsk_mod:0->throttle:0"])})
+    assert text.splitlines() == ["**Add connections:**", "- `qpsk_mod:0 → throttle:0`"]
+
+    text = format_change_summary({"remove_connections": json.dumps(["a:0->b:0"])})
+    assert text.splitlines() == ["**Remove connections:**", "- `a:0 → b:0`"]
+
+    text = format_change_summary({"remove_blocks": json.dumps(["old_src"])})
+    assert text.splitlines() == ["**Remove blocks:**", "- `old_src`"]
+
+    # A list whose elements are themselves JSON strings.
+    text = format_change_summary({"add_blocks": [json.dumps(block)]})
+    assert "`qpsk_mod` (`digital_constellation_modulator_bc`)" in text
+
+    # An element that is still not a mapping after repair renders literally
+    # rather than being dropped — the user must see everything proposed.
+    text = format_change_summary({"add_blocks": ["src0"]})
+    assert text.splitlines() == ["**Add blocks:**", "- `src0`"]
+
+    # Whole-args-as-a-JSON-string (how OpenRouter delivered session 165's calls).
+    text = format_tool_summary(
+        "change_graph", json.dumps({"reason": "add it", "add_blocks": json.dumps([block])})
+    )
+    assert "`qpsk_mod` (`digital_constellation_modulator_bc`)" in text
+
+
 def test_approval_mode_settings_helpers(tmp_path, monkeypatch):
     """The action approval gate persists via .env and supports manual, auto, and yolo."""
     from grc_agent.settings import get_approval_mode, set_approval_mode
@@ -3547,6 +3607,59 @@ def test_approval_card_titles_and_summary_per_tool():
     for button in buttons.get_children():
         button.emit("clicked")
     assert sorted(fired) == ["always", "approve", "deny"]
+
+
+def test_approval_card_renders_json_stringified_change_graph_args():
+    """The widget itself must survive session 165's payload.
+
+    `ApprovalCard.__init__` reads `call.args_as_dict()`, whose top-level parse
+    succeeds while the per-field stringification survives; rendering that raised
+    out of `_request_approvals` and killed the turn with
+    `Agent Error: 'str' object has no attribute 'get'`.
+    """
+    import json
+
+    from pydantic_ai.messages import ToolCallPart
+
+    from grc_agent.ui.approval_card import ApprovalCard
+
+    block = {
+        "block_id": "digital_constellation_modulator_bc",
+        "instance_name": "qpsk_mod",
+        "params": {"constellation": "qpsk_const"},
+    }
+    call = ToolCallPart(
+        tool_name="change_graph",
+        args=json.dumps({"reason": "add the QPSK modulator", "add_blocks": json.dumps([block])}),
+        tool_call_id="c-stringified",
+    )
+    card = ApprovalCard(
+        None,
+        call,
+        on_approve=lambda: None,
+        on_deny=lambda: None,
+        on_always_accept=lambda: None,
+    )
+
+    import gi
+
+    gi.require_version("Gtk", "3.0")
+    from gi.repository import Gtk
+
+    seen = []
+
+    def _walk(widget):
+        if isinstance(widget, Gtk.Label):
+            seen.append(widget.get_text() or "")
+        elif hasattr(widget, "get_children"):
+            for child in widget.get_children():
+                _walk(child)
+
+    _walk(card)
+    rendered = "\n".join(seen)
+    assert "Proposed change" in rendered
+    assert "add the QPSK modulator" in rendered
+    assert "qpsk_mod" in rendered
 
 
 def test_shell_prefix_allow_is_session_scoped():

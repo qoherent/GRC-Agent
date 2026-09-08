@@ -20,6 +20,8 @@ gi.require_version("Gtk", "3.0")
 from gi.repository import Gtk, Pango
 from pydantic_ai.messages import ToolCallPart
 
+from ..json_args import repair_json_args
+
 
 def _arrow(text: str) -> str:
     # The tool's canonical 'src:port->dst:port' spelling — cosmetic
@@ -27,14 +29,33 @@ def _arrow(text: str) -> str:
     return text.replace("->", " → ")
 
 
-# The card renders `change_graph`'s arguments exactly as the tool dumps them:
-# BlockAdd/ParamUpdate/StateUpdate.model_dump(exclude_none=True). Read those
-# field names, not invented ones — a key the tool never sends renders as "?"
-# and the user approves a change they cannot read.
+def _literal(value: Any) -> str:
+    """One bullet showing exactly what the model sent.
+
+    Reached when an element is not a mapping even after JSON repair. Rendering
+    it literally is the only honest option: dropping a proposed change would
+    hide part of what the user is approving, and calling ``.get()`` on it
+    aborts the turn — this card is the last step before human consent.
+    """
+    text = str(value)
+    if len(text) > 300:
+        text = text[:300] + "…"
+    return f"- `{text}`"
+
+
+# The card renders `change_graph`'s arguments as the MODEL emitted them, before
+# pydantic-ai validates them — pydantic-ai keeps the repair its
+# `before_tool_validate` hook returns in a local and builds the approval
+# request from the original ToolCallPart. So the entry points below apply the
+# shared `repair_json_args` rule themselves, then read the tool's own field
+# names (BlockAdd/ParamUpdate/StateUpdate): a key the tool never sends renders
+# as "?" and the user approves a change they cannot read.
 def _add_blocks_lines(add_blocks: list[Any] | None) -> list[str]:
     lines = []
     for b in add_blocks or []:
-        b = b or {}
+        if not isinstance(b, dict):
+            lines.append(_literal(b))
+            continue
         name = b.get("instance_name") or "?"
         block_id = b.get("block_id") or "?"
         params = b.get("params") or {}
@@ -59,11 +80,22 @@ def _update_params_lines(update_params: list[Any] | None) -> list[str]:
     """
     lines = []
     for p in update_params or []:
-        if not p:
+        if not isinstance(p, dict):
+            lines.append(_literal(p))
             continue
         name = p.get("instance_name") or "?"
         for key, value in (p.get("params") or {}).items():
             lines.append(f"- `{name}.{key}` = `{value}`")
+    return lines
+
+
+def _update_states_lines(update_states: list[Any] | None) -> list[str]:
+    lines = []
+    for s in update_states or []:
+        if not isinstance(s, dict):
+            lines.append(_literal(s))
+            continue
+        lines.append(f"- `{s.get('instance_name', '?')}` → {s.get('state', '?')}")
     return lines
 
 
@@ -81,7 +113,14 @@ def format_change_summary(args: dict[str, Any]) -> str:
     field becomes a labeled bullet group; ``force`` is surfaced explicitly
     since it bypasses GRC's validation gate. Returns the empty-string-markdown
     ``_No changes in this batch._`` when nothing is present.
+
+    JSON-stringified arguments are repaired first (the same rule the validation
+    hook applies), so a model that sends ``add_blocks`` as a string still gets
+    a legible card instead of one bullet per character.
     """
+    args = repair_json_args(args)
+    if not isinstance(args, dict):
+        return _literal(args)
     groups: list[tuple[str, list[str]]] = []
 
     _add_group(groups, "**Add blocks:**", _add_blocks_lines(args.get("add_blocks")))
@@ -99,15 +138,7 @@ def format_change_summary(args: dict[str, Any]) -> str:
         [f"- `{_arrow(str(c))}`" for c in args.get("remove_connections") or []],
     )
     _add_group(groups, "**Update parameters:**", _update_params_lines(args.get("update_params")))
-    _add_group(
-        groups,
-        "**Update states:**",
-        [
-            f"- `{s.get('instance_name', '?')}` → {s.get('state', '?')}"
-            for s in args.get("update_states") or []
-            if s
-        ],
-    )
+    _add_group(groups, "**Update states:**", _update_states_lines(args.get("update_states")))
     _add_group(
         groups, "", ["*(force: bypasses GRC's own validation gate)*"] if args.get("force") else []
     )
@@ -130,7 +161,14 @@ def format_tool_summary(tool_name: str, args: dict[str, Any]) -> str:
     copy-pasteable rendering (the command IS the reason for those tools);
     anything else falls back to one uniform per-field bullet list. Never
     raises on unexpected shapes: an unknown tool still gets its args shown.
+
+    Arguments are the model's own, pre-validation, so the shared
+    ``repair_json_args`` rule runs first here too — every dispatch branch below
+    reads decoded values.
     """
+    args = repair_json_args(args)
+    if not isinstance(args, dict):
+        return _literal(args)
     if tool_name == "change_graph":
         return format_change_summary(args)
     if tool_name == "run_flowgraph":
@@ -187,7 +225,7 @@ class ApprovalCard(Gtk.Box):
         self.set_halign(Gtk.Align.FILL)
         self._call = call
 
-        args = call.args_as_dict() if call.args else {}
+        args = repair_json_args(call.args_as_dict()) if call.args else {}
         reason = str(args.get("reason") or "") if isinstance(args, dict) else ""
 
         title = Gtk.Label()

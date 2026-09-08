@@ -47,6 +47,11 @@ from grc_agent.deps import (
     SupportsSaveBlock,
     SupportsSaveGraph,
 )
+from grc_agent.json_args import (
+    JsonCoercedMapping,
+    JsonCoercedSequence,
+    repair_json_args,
+)
 
 _log = logging.getLogger(__name__)
 
@@ -59,45 +64,6 @@ class GrcAgentResponse(BaseModel):
     explanation: str = Field(
         ..., description="A summary explaining the final state of the flowgraph."
     )
-
-
-def coerce_json_mapping(v: Any) -> Any:
-    """Decode a JSON string if the argument was passed as a serialized JSON object."""
-    if isinstance(v, str):
-        s = v.strip()
-        if s.startswith("{") and s.endswith("}"):
-            try:
-                return json.loads(s)
-            except Exception as exc:
-                raise ModelRetry(f"Invalid JSON object string: {exc}") from exc
-        elif not s:
-            return {}
-    return v
-
-
-JsonCoercedMapping = BeforeValidator(coerce_json_mapping)
-
-
-def coerce_json_sequence(v: Any) -> Any:
-    """Decode a JSON string, wrap a single element, or coerce None/empty to list."""
-    if v is None:
-        return []
-    if isinstance(v, str):
-        s = v.strip()
-        if s.startswith("[") and s.endswith("]"):
-            try:
-                return json.loads(s)
-            except Exception as exc:
-                raise ModelRetry(f"Invalid JSON array string: {exc}") from exc
-        elif not s:
-            return []
-        return [s]
-    elif isinstance(v, dict):
-        return [v]
-    return v
-
-
-JsonCoercedSequence = BeforeValidator(coerce_json_sequence)
 
 
 class BlockAdd(BaseModel):
@@ -226,30 +192,6 @@ class StopGracefully(AbstractCapability[Any]):
         return await handler(node)
 
 
-# Provider-adaptive web capabilities. On providers with native web support
-# (OpenRouter, via its plugins) the framework runs search/fetch server-side; on
-# providers without it (Ollama has none) it falls back to `local` — here
-# upstream pydantic-ai's own ddgs-backed `duckduckgo_search` tool and the
-# bundled markdownify `web_fetch`. Both wrap the same `ddgs` engine, while
-# keeping a
-# proper tool name (`duckduckgo_search`, not the wrapped function's) and
-# honest error semantics (network failures raise into pydantic-ai's tool
-# retry instead of returning a masked "Web search failed: ..." string).
-# Eager (defer_loading=False) so the tools are always callable — no
-# load_capability round-trip. Defined once here and imported by
-def _is_composite_schema(spec: dict[str, Any]) -> bool:
-    """Check if a JSON schema specification represents a composite type (array or object)."""
-    if not isinstance(spec, dict):
-        return False
-    target_type = spec.get("type")
-    if target_type in ("array", "object") or "items" in spec or "$ref" in spec:
-        return True
-    for branch in spec.get("anyOf", []) + spec.get("oneOf", []) + spec.get("allOf", []):
-        if isinstance(branch, dict) and _is_composite_schema(branch):
-            return True
-    return False
-
-
 @dataclass
 class JsonRepairCapability(AbstractCapability[Any]):
     """Automatically decodes JSON-stringified tool arguments before validation.
@@ -259,6 +201,10 @@ class JsonRepairCapability(AbstractCapability[Any]):
 
     This capability hooks into Pydantic AI's official `before_tool_validate` lifecycle
     to unpack JSON-encoded values for any parameter whose schema expects an array or object.
+    The rule itself lives in `json_args.repair_json_args`, which the approval card applies
+    to the same arguments for rendering -- pydantic-ai keeps this hook's return value in a
+    local and hands the card the original `ToolCallPart`, so one shared rule is the only way
+    both paths agree.
     """
 
     async def before_tool_validate(
@@ -269,27 +215,22 @@ class JsonRepairCapability(AbstractCapability[Any]):
         tool_def: ToolDefinition,
         args: RawToolArgs,
     ) -> RawToolArgs:
-        if isinstance(args, str):
-            with contextlib.suppress(Exception):
-                args = json.loads(args)
-            if not isinstance(args, dict):
-                return args
-
-        if isinstance(args, dict):
-            props = tool_def.parameters_json_schema.get("properties", {})
-            for k, v in list(args.items()):
-                if isinstance(v, str):
-                    s = v.strip()
-                    param_spec = props.get(k, {})
-                    if _is_composite_schema(param_spec) and (
-                        (s.startswith("[") and s.endswith("]"))
-                        or (s.startswith("{") and s.endswith("}"))
-                    ):
-                        with contextlib.suppress(Exception):
-                            args[k] = json.loads(s)
-        return args
+        # `args` is `call.args` itself (pydantic-ai's tool_manager passes the part's
+        # own value), so the repair returns a new mapping rather than rewriting the
+        # recorded history of what the model emitted.
+        return repair_json_args(args, tool_def.parameters_json_schema.get("properties", {}))
 
 
+# Provider-adaptive web capabilities. On providers with native web support
+# (OpenRouter, via its plugins) the framework runs search/fetch server-side; on
+# providers without it (Ollama has none) it falls back to `local` — here
+# upstream pydantic-ai's own ddgs-backed `duckduckgo_search` tool and the
+# bundled markdownify `web_fetch`. Both wrap the same `ddgs` engine, while
+# keeping a proper tool name (`duckduckgo_search`, not the wrapped function's)
+# and honest error semantics (network failures raise into pydantic-ai's tool
+# retry instead of returning a masked "Web search failed: ..." string).
+# Eager (defer_loading=False) so the tools are always callable — no
+# load_capability round-trip. Defined once here and imported by `agent_factory`.
 web_search_cap = WebSearch(local=duckduckgo_search_tool(max_results=5))
 web_fetch_cap = WebFetch(local=True)
 json_repair_cap = JsonRepairCapability()

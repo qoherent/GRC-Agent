@@ -281,3 +281,104 @@ def test_agent_module_imports_without_pygobject():
     )
     assert result.returncode == 0, result.stderr[-1500:]
     assert "OK" in result.stdout
+
+
+# --- the active-flowgraph instruction hook ---------------------------------
+#
+# Session 165: the hook returned None for an unsaved page, so the model was
+# told nothing about the live graph while `read_file` handed it a same-named
+# 14 KB `untitled.grc`. It concluded the file was the live graph.
+
+
+class _FakeDeps:
+    """Duck-typed stand-in for NativeFlowgraphProxy's forwarded FlowGraph surface."""
+
+    def __init__(self, grc_file_path=""):
+        self.grc_file_path = grc_file_path
+
+
+class _NoGraphDeps:
+    """What NativeFlowgraphProxy does with no page open: RuntimeError on access."""
+
+    @property
+    def grc_file_path(self):
+        raise RuntimeError("No flowgraph is open.")
+
+
+def _instructions_for(agent, deps):
+    """The resolved instructions of one real request, via the production path."""
+    import asyncio
+
+    from pydantic_ai.messages import ModelResponse, TextPart
+    from pydantic_ai.models.function import FunctionModel
+
+    seen = []
+
+    def model(messages, info):  # noqa: ARG001
+        request = messages[0]
+        text = getattr(request, "instructions", None)
+        if text is None:
+            text = "\n".join(
+                getattr(part, "content", "") for part in getattr(request, "parts", [])
+            )
+        seen.append(text or "")
+        return ModelResponse(parts=[TextPart(content="ok")])
+
+    async def run():
+        with agent.override(model=FunctionModel(model, profile=agent.model.profile)):
+            await agent.run("state the active flowgraph", deps=deps)
+
+    asyncio.run(run())
+    return seen[0]
+
+
+def _bundle(tmp_path, monkeypatch):
+    from grc_agent import db
+    from grc_agent.agent_factory import build_agents_from_cfg
+
+    monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
+    monkeypatch.setattr(
+        "grc_agent.agent_factory.resolve_model_context_length", lambda *_a, **_k: None
+    )
+    db._initialized_paths.clear()
+    db._step_stores.clear()
+    return build_agents_from_cfg(
+        {
+            "provider": "ollama_local",
+            "model": "test-model",
+            "ollama_base_url": "http://127.0.0.1:11434",
+        }
+    )
+
+
+def test_active_flowgraph_context_names_an_unsaved_buffer(tmp_path, monkeypatch):
+    """Silence is not an answer: an unsaved graph must say so, on both agents."""
+    agents = _bundle(tmp_path, monkeypatch)
+
+    for agent in (agents.executor, agents.planner):
+        text = _instructions_for(agent, _FakeDeps(grc_file_path=""))
+        # The hook's own sentence, distinct from the static prompt contract.
+        assert "Active flowgraph: a live in-memory graph" in text
+        assert "(no file path)" in text
+        assert "Active flowgraph file path:" not in text
+
+
+def test_active_flowgraph_context_names_the_file_when_saved(tmp_path, monkeypatch):
+    agents = _bundle(tmp_path, monkeypatch)
+    graph = tmp_path / "saved.grc"
+
+    for agent in (agents.executor, agents.planner):
+        text = _instructions_for(agent, _FakeDeps(grc_file_path=str(graph)))
+        assert f"Active flowgraph file path: {graph}" in text
+        assert "Active flowgraph: a live in-memory graph" not in text
+
+
+def test_active_flowgraph_context_stays_silent_with_no_graph(tmp_path, monkeypatch):
+    """No deps, or no page open at all — nothing is the truthful answer, and the
+    RuntimeError must not escape an instructions hook into the run."""
+    agents = _bundle(tmp_path, monkeypatch)
+
+    for deps in (None, _NoGraphDeps()):
+        text = _instructions_for(agents.executor, deps)
+        assert "Active flowgraph file path:" not in text
+        assert "Active flowgraph: a live in-memory graph" not in text

@@ -179,6 +179,73 @@ def test_active_grc_without_live_object_reads_disk(toolset, _saved):
     assert "graph" in _payload(out)
 
 
+def test_grc_read_discloses_ignored_paging_arguments(toolset, _saved):
+    """Session 165 read the same `.grc` at limit 50, 10 and 5 and got three
+    byte-identical payloads with no explanation. `offset`/`limit` cannot apply
+    to a structural view; being silent about it cost the model two steps."""
+    shutil.copy(FIXTURES / "dial_tone.grc", _saved.parent / "colleague.grc")
+
+    plain = read(toolset, "colleague.grc")
+    assert "offset/limit ignored" not in plain
+
+    for kwargs in ({"limit": 5}, {"offset": 10}, {"offset": 10, "limit": 5}):
+        out = read(toolset, "colleague.grc", **kwargs)
+        assert "offset/limit ignored: a structural view has no lines to page" in out
+        # The disclosure is the ONLY difference: the payload is unchanged.
+        assert _payload(out) == _payload(plain)
+
+    # The source label survives alongside the new clause.
+    out = read(toolset, "colleague.grc", limit=5)
+    assert "structural view via the inspect_graph engine" in out
+    assert "file on disk" in out
+
+
+def test_grc_read_discloses_paging_for_the_live_graph_too(toolset, _saved):
+    """One rule for all three source labels, not a per-branch special case."""
+    fg = load_flow_graph(str(_saved))
+    import grc_agent.fs_tools as ft
+
+    orig = ft._active_flow_graph_fn
+    ft._active_flow_graph_fn = lambda: fg
+    try:
+        out = read(toolset, "proj.grc", limit=5)
+    finally:
+        ft._active_flow_graph_fn = orig
+    assert "live in-memory flowgraph" in out
+    assert "offset/limit ignored" in out
+
+    out = read(toolset, "proj.grc", limit=5)  # active path, no live object
+    assert "active file on disk" in out
+    assert "offset/limit ignored" in out
+
+
+def test_grc_read_carries_the_file_identity_of_what_it_read(toolset, _saved):
+    """The session-165 collision, in the two payloads the model actually saw.
+
+    A live graph that was never saved and a same-named `.grc` on disk are
+    different graphs; `graph_name` cannot say so (it is just the options id),
+    but `file_path` can.
+    """
+    shutil.copy(FIXTURES / "dial_tone.grc", _saved.parent / "colleague.grc")
+    disk = _payload(read(toolset, "colleague.grc"))["graph"]
+    assert disk["file_path"] == str((_saved.parent / "colleague.grc").resolve())
+
+    from grc_agent.adapter.graph import get_platform
+
+    unsaved = get_platform().make_flow_graph()
+    unsaved.grc_file_path = ""
+    import grc_agent.fs_tools as ft
+
+    orig = ft._active_flow_graph_fn
+    ft._active_flow_graph_fn = lambda: unsaved
+    try:
+        live = _payload(read(toolset, "proj.grc"))["graph"]
+    finally:
+        ft._active_flow_graph_fn = orig
+    assert live["file_path"] is None
+    assert live["file_path"] != disk["file_path"]
+
+
 def test_malformed_grc_is_model_retry(toolset, _saved):
     (_saved.parent / "broken.grc").write_text("not xml at all", encoding="utf-8")
     with pytest.raises(ModelRetry, match="flowgraph"):

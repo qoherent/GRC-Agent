@@ -687,13 +687,20 @@ class ChatSidebar(
         self.send_message(text)
 
     def _get_effective_path(self) -> str | None:
+        """The session's identity: a canonical file path, or the unsaved sentinel.
+
+        Resolving happens here, not in `save_session`, because this is the only
+        layer that knows which of the two it has. The store used to resolve
+        whatever it was handed, which turned the sentinel into a fabricated
+        absolute path.
+        """
         if self._flowgraph_proxy is None:
             return None
         cm = self._get_cm()
         if cm is None:
             return None
         if cm.path:
-            return cm.path
+            return str(Path(cm.path).resolve())
         page_title = getattr(cm, "page_title", "untitled.grc") or "untitled.grc"
         return f"untitled:{page_title}"
 

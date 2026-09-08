@@ -31,6 +31,7 @@ Host-attribute contract - assumes on the full ChatSidebar instance:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 from collections.abc import Sequence
 from typing import Any
@@ -45,6 +46,7 @@ from pydantic_graph import End
 
 from ..db import (
     conversation_id_for_session,
+    record_turn_failure,
     save_session,
     user_request,
 )
@@ -99,6 +101,40 @@ class TurnDriverMixin:
         except Exception:
             self._remember_user_message(fallback_text)
             return False
+
+    async def _record_turn_failure(
+        self,
+        messages: list[Any] | None,
+        *,
+        session_id: int | None,
+        agent_mode: str,
+        error_text: str,
+    ) -> None:
+        """Persist a turn that died in the client, with the text the user saw.
+
+        The agent run itself can have completed successfully — session 165's
+        did, ending in a legitimate `DeferredToolRequests` output — and then the
+        turn died in `_request_approvals`. Nothing recorded that: the DB showed
+        `run_completed` and no failure, while the user saw `Agent Error`.
+
+        `messages` is captured BEFORE `_recover_history_after_failure` runs,
+        because the salvage drops a trailing response holding an unapproved tool
+        call and no step-store snapshot exists for it (StepPersistence gates
+        snapshots on `is_provider_valid`).
+
+        Never raises: a bookkeeping failure must not replace the user's error.
+        """
+        if session_id is None or not messages:
+            return
+        try:
+            await record_turn_failure(
+                messages,
+                conversation_id=conversation_id_for_session(session_id),
+                agent_name=f"grc_{agent_mode}",
+                error_text=error_text,
+            )
+        except Exception:
+            _log.exception("Failed to record the client-side turn failure")
 
     def notify_run_failure(
         self, return_code: int, log_text: str, *, spawn_failed: bool = False
@@ -332,6 +368,14 @@ class TurnDriverMixin:
         except Exception as e:
             _log.exception("agent run failed")
             if self.current_page is origin_page:
+                # Snapshot the at-failure history before the salvage pops a
+                # trailing response with unprocessed tool calls — for a turn
+                # that died at the approval step, that response is the only
+                # record of the arguments that killed it.
+                failed_messages: list[Any] | None = None
+                if active_run is not None:
+                    with contextlib.suppress(Exception):
+                        failed_messages = list(active_run.all_messages())
                 truncated_thinking_archived = await self._recover_history_after_failure(
                     active_run,
                     session_id=origin_session_id,
@@ -340,13 +384,20 @@ class TurnDriverMixin:
                 )
                 await self._save_history()
                 if truncated_thinking_archived:
-                    self._append_error(
+                    message = (
                         "Model reasoning repeated until the provider output limit. "
                         "The full failed trace was archived, and the unusable repetition was removed "
                         "from active context. Send Continue to resume from the completed tool steps."
                     )
                 else:
-                    self._append_error(_format_turn_error(e))
+                    message = _format_turn_error(e)
+                await self._record_turn_failure(
+                    failed_messages,
+                    session_id=origin_session_id,
+                    agent_mode=origin_agent_mode,
+                    error_text=message,
+                )
+                self._append_error(message)
                 rich_rendered = True
         finally:
             self._active_run = None
