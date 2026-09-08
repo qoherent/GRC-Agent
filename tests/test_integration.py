@@ -123,8 +123,10 @@ if not _AVAILABLE_BACKENDS:
 
 # Default chat model for OpenRouter scenarios. The agent.py harness keeps its
 # own fixed MODEL constant for Ollama; OpenRouter uses whatever the caller
-# points at.
-_OPENROUTER_DEFAULT_MODEL = os.getenv("GRC_OPENROUTER_MODEL", "inclusionai/ling-3.0-flash-fin:free")
+# points at. Free tier accepted knowingly (docs/backlog.md item 10): this
+# model double-encodes arrays and fails the 01_add_throttle scenario; override
+# with GRC_OPENROUTER_MODEL when a stronger default is wanted.
+_OPENROUTER_DEFAULT_MODEL = os.getenv("GRC_OPENROUTER_MODEL", "dots-studio/dots-3-note-preview:free")
 
 
 def _build_model_for_backend(backend: str):
