@@ -14,6 +14,7 @@ from here.
 from __future__ import annotations
 
 import json
+import os
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
@@ -99,13 +100,19 @@ class Manifest:
     def write_meta(self, meta: CampaignMeta) -> None:
         self.meta_path.write_text(json.dumps(asdict(meta), indent=2), encoding="utf-8")
 
+    def _append(self, path: Path, line: str) -> None:
+        # Append + flush + fsync: a torn line from a mid-write crash must not
+        # silently vanish a dataset record (review: manifest atomicity).
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(line)
+            fh.flush()
+            os.fsync(fh.fileno())
+
     def record_task(self, rec: TaskRecord) -> None:
-        with self.tasks_path.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(asdict(rec)) + "\n")
+        self._append(self.tasks_path, json.dumps(asdict(rec)) + "\n")
 
     def record_turn(self, rec: TurnRecord) -> None:
-        with self.turns_path.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(asdict(rec)) + "\n")
+        self._append(self.turns_path, json.dumps(asdict(rec)) + "\n")
 
     def load_meta(self) -> CampaignMeta:
         return CampaignMeta(**json.loads(self.meta_path.read_text(encoding="utf-8")))
@@ -113,17 +120,25 @@ class Manifest:
     def load_tasks(self) -> list[TaskRecord]:
         if not self.tasks_path.exists():
             return []
-        return [
-            TaskRecord(**json.loads(line))
-            for line in self.tasks_path.read_text(encoding="utf-8").splitlines()
-            if line.strip()
-        ]
+        out = []
+        for line in self.tasks_path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            try:
+                out.append(TaskRecord(**json.loads(line)))
+            except (json.JSONDecodeError, TypeError) as e:
+                out.append(TaskRecord(task_id=f"<torn line: {e}>", persona_id="", category="", goal="", generate_options="", seed_grc=None, verdict="corrupt"))
+        return out
 
     def load_turns(self) -> list[TurnRecord]:
         if not self.turns_path.exists():
             return []
-        return [
-            TurnRecord(**json.loads(line))
-            for line in self.turns_path.read_text(encoding="utf-8").splitlines()
-            if line.strip()
-        ]
+        out = []
+        for line in self.turns_path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            try:
+                out.append(TurnRecord(**json.loads(line)))
+            except (json.JSONDecodeError, TypeError):
+                out.append(TurnRecord(task_id="<torn>", turn_index=-1, provenance="system", message="<torn line>"))
+        return out
