@@ -183,12 +183,14 @@ U1, U2, U3, U4, U5, U6 are mutually independent; each lands as its own commit. U
 - **Files:**
   - `src/grc_agent/exec_monitor.py`
   - `src/grc_agent/desktop_app.py`
+  - `src/grc_agent/native_canvas.py`
   - `tests/test_exec_monitor.py`
 - **Approach:**
   1. Constructor gains an optional process-identity provider; `desktop_app` wires it to the canvas manager's current page process.
   2. Snapshot the identity at the start marker.
-  3. On a Done marker with no return-code text: unchanged or absent identity records a spawn failure — retain the verbose exception in the log, set the additive `spawn_failed` flag on the retained run record, and route through the existing failure path.
-  4. Done markers carrying a return code, and identity changes, behave exactly as today.
+  3. On a Done marker with no return-code text, and only when a provider is wired: an identity the provider reports as absent (no process on the page it inspects) or unchanged since the snapshot records a spawn failure — retain the verbose exception in the log, set the additive `spawn_failed` flag on the retained run record, and route through the existing failure path. Without a provider, code-less Done markers keep the legacy clean-success behavior.
+  4. Done markers carrying a return code, and identity changes, behave exactly as today. A Done marker whose snapshot no longer resolves to the current page (mid-run tab switch) also falls back to legacy behavior rather than guessing.
+  5. Propagate the distinction to the agent-visible result: the run result builder and bounded-run finisher in the canvas proxy consult the spawn flag, reporting a spawn failure as not-successful with a spawn note, and the failure notification text names the spawn failure instead of interpolating return code 0.
 - **Patterns to follow:** the epoch-snapshot pattern `wait_for_run_end` already uses for silent no-op detection; the monitor's marker-driven state machine.
 - **Test scenarios:**
   - Start marker → verbose text → code-less Done with unchanged identity: failure callback fires, `get_run_log` carries `spawn_failed` and the exception text.
@@ -196,6 +198,8 @@ U1, U2, U3, U4, U5, U6 are mutually independent; each lands as its own commit. U
   - A code-carrying Done (non-zero) with unchanged identity still fails via the existing return-code path.
   - `wait_for_run_end` resolves `completed` for the spawn-failure sequence (the terminal marker fired).
   - Monitor constructed without a provider (existing tests) keeps current behavior for code-less Done markers.
+  - The run result the agent reads reports a spawn failure as not-successful, with the spawn note; the failure notification names the spawn failure rather than return code 0.
+  - A Done marker arriving after the tracked page changed mid-run keeps the legacy classification (no false spawn-failure).
 - **Verification:** `uv run pytest tests/test_exec_monitor.py tests/test_run_stop_tools.py` passes; GTK gate green.
 
 ### U6. Scenario default model flip
