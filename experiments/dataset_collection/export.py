@@ -349,7 +349,7 @@ def _dataset_card(meta, tasks: list[TaskRecord], totals: dict[str, int], redacti
             "# Dataset Card",
             "",
             f"Campaign: {meta.campaign_id} ({meta.started_at})",
-            f"Teacher: {json.dumps(meta.teacher)}",
+            f"Teacher: {json.dumps(meta.teacher)} (pinned: every LLM call in the campaign runs on this provider/model)",
             f"Approval mode: {meta.approval_mode} (unattended; provenance in the harness manifest)",
             f"Tasks: {len(tasks)} ({primary} primary SFT, {len(tasks) - primary} quarantined)",
             "",

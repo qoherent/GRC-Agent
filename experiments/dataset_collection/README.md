@@ -12,11 +12,13 @@ This is experiments-only tooling: not packaged, not run in CI.
 ## Prerequisites
 
 - `xvfb-run` available (`sudo apt install xvfb`).
-- Teacher model configured in the app (Settings, or the real `.env`) — the
-  campaign records whatever provider/model the settings resolve at boot.
-- **API keys via the process environment only. Never copy the real `.env`
-  into the campaign dir.** The campaign env file is created empty on purpose:
-  `export OLLAMA_API_KEY=...` (or `OLLAMA_CLOUD_API_KEY`) before running.
+- **Every LLM call runs on Ollama Cloud GLM 5.3 Flash, using the API key from
+  the repo's real `.env`** (`OLLAMA_API_KEY` / `OLLAMA_CLOUD_API_KEY`). The
+  runner reads that key at boot (read-only) and pins the campaign provider and
+  model — the teacher agent, the user simulator, and the compaction
+  summarizer all resolve to `ollama_cloud` / `glm-5.3-flash:cloud`; the
+  campaign refuses to boot otherwise. The campaign's own env file stays
+  empty; the real `.env` is never copied into the campaign directory.
 - `GRC_SHELL_DENIED_COMMANDS` must not be set empty (refuses to start).
 - **Operator safety check before unattended runs:** the shell denylist matches
   executable names only and is not a security boundary; flowgraph execution on
@@ -43,15 +45,17 @@ uv run python -m experiments.dataset_collection.audit --campaign /tmp/campaign_s
 uv run python -m experiments.dataset_collection.export --campaign /tmp/campaign_smoke
 ```
 
-## Full campaign (gated on the API key + configured teacher)
+## Full campaign (gated on the .env key; everything on GLM 5.3 Flash)
 
 ```bash
-export OLLAMA_API_KEY=...
 xvfb-run -a uv run python -m experiments.dataset_collection.collect \
   --campaign-dir /tmp/campaign_real            # fresh dir; refuses non-empty DB
 uv run python -m experiments.dataset_collection.audit --campaign /tmp/campaign_real
 uv run python -m experiments.dataset_collection.export --campaign /tmp/campaign_real
 ```
+
+The key is read automatically from the repo `.env`; no manual export needed.
+Mid-campaign resume: rerun the same command — recorded task ids are skipped.
 
 - Resume after a crash: rerun the same command with a task list minus the
   completed ones (`--tasks t05_qam_debug,...`); the audit cross-checks what

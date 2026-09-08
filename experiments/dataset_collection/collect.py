@@ -48,6 +48,29 @@ from .task_spec import TaskSpec, load_personas, load_tasks
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
+
+# Campaign LLM configuration (operator directive, 2026-09-08): every LLM call
+# in a campaign — teacher, user simulator, compaction summarizer — runs on
+# Ollama Cloud GLM 5.3 Flash, with the API key read from the repo's real
+# `.env` (never copied into the campaign dir; only the key value is carried
+# into the campaign process environment).
+CAMPAIGN_PROVIDER = "ollama_cloud"
+CAMPAIGN_MODEL = "glm-5.3-flash:cloud"
+
+
+def _load_real_env_key() -> str:
+    """Read the Ollama Cloud key from the repo's real .env (read-only)."""
+    from dotenv import dotenv_values
+
+    env = dotenv_values(REPO_ROOT / ".env")
+    key = env.get("OLLAMA_API_KEY") or env.get("OLLAMA_CLOUD_API_KEY")
+    if not key:
+        raise RuntimeError(
+            f"OLLAMA_API_KEY / OLLAMA_CLOUD_API_KEY not found in {REPO_ROOT / '.env'} — "
+            "the campaign runs every LLM call on Ollama Cloud GLM 5.3 Flash "
+            "and needs that key."
+        )
+    return str(key)
 REAL_DB = REPO_ROOT / ".grc_agent" / "chat_sessions.db"
 PLAYGROUND = REPO_ROOT / "playground"
 
@@ -436,8 +459,21 @@ async def campaign(args: argparse.Namespace, simulator_factory=None, pre_teardow
     env_file = campaign_dir / ".env"
     env_file.touch()
 
-    # Isolation guards BEFORE any app import reads settings (KTD3, S4, S1).
+    # Campaign LLM configuration BEFORE any app import reads settings: the
+    # API key comes from the repo's real .env (user directive); provider and
+    # model are pinned so the teacher, the simulator and the compaction
+    # summarizer all resolve to Ollama Cloud GLM 5.3 Flash.
     os.environ["GRC_AGENT_ENV"] = str(env_file)
+    campaign_key = _load_real_env_key()
+    os.environ["OLLAMA_API_KEY"] = campaign_key
+    os.environ["OLLAMA_CLOUD_API_KEY"] = campaign_key
+    # Provider/model are non-secret settings: the app reads them from the
+    # .env file (source of truth), so pin them in the campaign env file.
+    env_file.write_text(
+        f"GRC_PROVIDER={CAMPAIGN_PROVIDER}\n"
+        f"OLLAMA_CLOUD_MODEL={CAMPAIGN_MODEL}\n",
+        encoding="utf-8",
+    )
     os.environ["GRC_AGENT_APPROVE_CHANGES"] = "yolo"
     deny = os.environ.get("GRC_SHELL_DENIED_COMMANDS", "")
     if deny.strip() == "" and "GRC_SHELL_DENIED_COMMANDS" in os.environ:
@@ -479,6 +515,13 @@ async def campaign(args: argparse.Namespace, simulator_factory=None, pre_teardow
     await drain(sidebar, monitor, tracking=lambda: run_tracking(proxy, canvas))
 
     cfg = load_settings()
+    if cfg.get("provider") != CAMPAIGN_PROVIDER or cfg.get("model") != CAMPAIGN_MODEL:
+        print(
+            f"REFUSING: campaign requires provider={CAMPAIGN_PROVIDER} "
+            f"model={CAMPAIGN_MODEL}; settings resolved "
+            f"provider={cfg.get('provider')} model={cfg.get('model')}"
+        )
+        return 2
     if args.agent == "testmodel":
         # Hermetic dry-run agent (plan U2 Execution note / U6): the same
         # TestModel + production-StepPersistence pattern the sidebar tests
