@@ -74,15 +74,17 @@ async def freeze_tools(agent) -> tuple[list[dict], bool]:
 
     try:
         ctx = RunContext(deps=None, model=agent.model, usage=RunUsage())
-        tools = await agent.toolset.get_tools(ctx)
-        frozen = [
-            {
-                "name": name,
-                "description": str(getattr(tool, "description", "") or ""),
-                "parameters": getattr(getattr(tool, "function_schema", None), "json_schema", None),
-            }
-            for name, tool in sorted(tools.items())
-        ]
+        tools = await agent._get_toolset().get_tools(ctx)
+        frozen = []
+        for name, tool in sorted(tools.items()):
+            tool_def = getattr(tool, "tool_def", None)
+            frozen.append(
+                {
+                    "name": str(getattr(tool_def, "name", name) or name),
+                    "description": str(getattr(tool_def, "description", "") or ""),
+                    "parameters": getattr(tool_def, "parameters_json_schema", None),
+                }
+            )
         return frozen, True
     except Exception:  # noqa: BLE001 - recorded, not swallowed
         return [], False
