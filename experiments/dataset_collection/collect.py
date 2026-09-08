@@ -22,6 +22,7 @@ import argparse
 import asyncio
 import fnmatch
 import hashlib
+import json
 import os
 import re
 import sqlite3
@@ -430,6 +431,7 @@ async def campaign(args: argparse.Namespace) -> int:
         task_ids=[t.id for t in tasks],
     )
     manifest.write_meta(meta)
+    (campaign_dir / "frozen_tools.json").write_text(json.dumps(frozen_tools, indent=1), encoding="utf-8")
     print(f"campaign {manifest.campaign_id}: {len(tasks)} tasks, teacher={meta.teacher}, agent={args.agent}")
 
     completed = 0
