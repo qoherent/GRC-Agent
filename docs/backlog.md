@@ -62,34 +62,32 @@ Active feature requests, architectural improvements, and planned capabilities. C
 ---
 
 ### 5. Knowledge Base & Corpus Expansion
-* **Status**: 🔄 Partial (Hybrid RRF and SWIG docstrings shipped; expansion and cleanup active)
+* **Status**: 🔄 Partial (hygiene completed 2026-09-08; wiki expansion active)
 * **5.1 Wiki Corpus Expansion**:
   - Expand local knowledge corpus beyond the initial 94 wiki pages to close domain gaps identified in forensic audits:
     - *QT GUI Sinks*: Detailed parameter guides, internal FFT behaviors, trigger modes, and vector lengths for `qtgui_sink_x`, `qtgui_freq_sink_x`, `qtgui_time_sink_x`, `qtgui_waterfall_sink_x`.
     - *SDR Hardware Recipes*: Hardware setup guides, antenna selections, gain staging, and buffer tuning for UHD/USRP, RTL-SDR, HackRF, bladeRF, and ADALM-PLUTO.
     - *Digital Synchronization & Modulation*: Practical recipes for Costas loops, Polyphase Clock Sync, Mueller & Müller clock recovery, symbol timing, and framing/deframing.
 * **5.2 Corpus De-duplication & Hygiene**:
-  - De-duplicate overlapping wiki articles (e.g. `Binary_Files_for_DSP.md` duplicates 43 of 63 long lines in `Reading_and_Writing_Binary_Files.md`).
-  - Eliminate synthetic stub pages containing `Provenance:` and `Aliases:` meta-text that dilute ranking mass in lexical and vector indexes.
-* **4.3 Truncation Density Monitoring**:
+  - **Status**: ✅ Completed (2026-09-08). Audit found no duplicate page pairs: the recorded `Binary_Files_for_DSP` duplicate was already removed, and the near-duplicate candidates (UHD USRP sink/source, CRC append/check, Band-pass Filter Taps vs Band Pass Filter, the short block pages) are verified distinct pages — upstream check plus local content inspection. The real hygiene debt was different: 70 of 101 crawl files carried trailing MediaWiki navigation chrome diluting lexical/vector ranking mass — stripped with one structure-based rule (cut at the first `## Navigation menu` heading). `Coding_guide_impl.md` was live-verified upstream as a 116-byte "replaced by GREP1" pointer stub and now carries the real GREP-0001 coding guidelines. The RAG index auto-rebuilds on corpus fingerprint change.
+* **5.3 Truncation Density Monitoring**:
   - Monitor `output_truncated` flag behavior across both `catalog` and `docs` domains to evaluate result density and k-parameter tuning.
 
 ---
 
 ### 6. Platform Hardening & Upstream Fixes
 * **Status**: 🔄 Active & Planned
-* **5.1 ExecFlowGraphThread Early Spawn Crash Tracking**:
-  - *Observation*: If spawning the run subprocess raises inside GRC (`gnuradio/grc/gui/Executor.py:44`), GRC's exception handler emits `send_end_exec()` with a default return code of 0.
-  - *Planned Resolution*: Track process PID allocation directly in `exec_monitor` to distinguish immediate subprocess spawn failures from legitimate zero-exit runs.
-* **5.2 Upstream Pydantic AI Harness `Shell` Stdin Hang**:
+* **6.1 ExecFlowGraphThread Early Spawn Crash Tracking**:
+  - **Status**: ✅ Completed (2026-09-08). `exec_monitor` snapshots the page-process identity at the start marker; a code-less Done marker with absent-or-unchanged identity (wired provider only) records a spawn failure with an additive `spawn_failed` flag — the return code stays truthful, run results and `get_run_log` report the failure with a spawn note, and no-provider / code-carrying / mid-run-tab-switch paths keep legacy behavior. No PID arithmetic and no message-prose parsing needed.
+* **6.2 Upstream Pydantic AI Harness `Shell` Stdin Hang**:
   - *Observation*: `anyio.open_process` without an explicit `stdin=` defaults to `PIPE`, leaving an unwritten, unclosed stdin pipe that causes commands reading stdin (e.g. `grep` on empty file lists) to hang until timeout (up to 120s/600s).
   - *Planned Resolution*: Submit upstream issue and pull request to `pydantic-ai-harness` proposing `stdin=subprocess.DEVNULL`.
-* **5.3 Upstream StackOne Defender Regex Refinement**:
+* **6.3 Upstream StackOne Defender Regex Refinement**:
   - *Observation*: Regex `\$\([^)]+\)` escalates on benign jQuery boilerplate (`$(document)` ×2) in official GNU Radio Doxygen web pages, triggering false-positive injection withholding.
   - *Planned Resolution*: Submit upstream issue to `stackone-defender` proposing exclusions for benign JS identifiers or configurable sensitivity thresholds.
-* **5.4 Catalog Distance Semantics**:
+* **6.4 Catalog Distance Semantics**:
   - *Status*: ✅ Completed. The `distance` field is omitted on non-vector lexical rows (`distance is None`) rather than emitting a fabricated `0.0`, eliminating confusion with perfect vector matches.
-* **5.5 ConversationSearch Snapshot Recovery for Interrupted Runs**:
+* **6.5 ConversationSearch Snapshot Recovery for Interrupted Runs**:
   - Engage with upstream harness to allow recovery of user-interrupted tool calls (`state=interrupted`) during session history analysis.
 
 ### 7. Finish the chat-sidebar decomposition (≤1,000-line bar)
@@ -100,8 +98,10 @@ Active feature requests, architectural improvements, and planned capabilities. C
 * **Reference**: `docs/plans/2026-09-03-0829-refactor-sidebar-decomposition-review-plan.md` (units U5/U6, KTD3 line budgets); origin plan U15.
 
 ### 8. Sidebar heuristics replacement & blocking work off the loop (origin plan U16)
-* **Status**: 🔄 Planned — the origin plan's next sidebar unit, deliberately fenced out of the decomposition review.
-* **Mechanics**: the `search_mode` suffix decided by substring-matching nine literal spellings in the tool-label helper → read the adapter's structured field; codex provider magic strings in render/preflight branches → the provider tables; the four-interval flush throttle → one GLib frame-bounded timer; the two competing font scalers → one (startup scale vs reset mismatch included); synchronous SQLite reads and the blocking HTTP probe off the unified loop; the two never-removed `__init__` timers removed on destroy.
+* **Status**: 🔄 Partial — deterministic-source replacements landed 2026-09-08; off-loop async work remains, deferred to a dedicated pass (real regression surface on the unified loop).
+* **Landed (2026-09-08)**: the `search_mode` suffix now reads the parsed result payload (one `json.loads` rule) instead of substring-matching nine literal spellings; codex render/preflight branches read a `PROVIDER_BEHAVIORS` table in the shared provider catalog; the four-interval flush throttle is one frame-cadence `add_tick_callback` source.
+* **Verified already complete (backlog drift)**: the two `__init__` timers are disarmed by `destroy()`/`shutting_down()` (landed with the decomposition); only one font scaler exists since `ZoomProjectionMixin`.
+* **Remaining**: synchronous SQLite reads and the blocking HTTP context probe moved off the unified loop.
 * **Reference**: `docs/plans/2026-09-02-0830-refactor-harness-lean-and-tool-contracts-plan.md` (U16).
 
 ### 9. Test-tree split & private-surface rewrite (origin plan U18)
@@ -109,10 +109,9 @@ Active feature requests, architectural improvements, and planned capabilities. C
 * **Mechanics**: `tests/test_chat_sidebar.py` (4,600+ lines) constructs `ChatSidebar` ad hoc ~99 times and reaches ~470 private attributes; migrate onto the conftest `sidebar` fixture and the public/widget surface — the golden and the copy-coverage matrix are already first consumers of the fixture pattern. Four `# noqa: C901` complexity suppressions remain on sidebar render/turn code; refactor or justify each. Every test file under the 1,500-line cap.
 * **Reference**: `docs/plans/2026-09-02-0830-refactor-harness-lean-and-tool-contracts-plan.md` (U18).
 
-### 10. Scenario suite needs a stronger default model than the free tiers
-* **Status**: 🧪 Open finding (recorded 2026-09-03)
-* **Evidence**: all three free OpenRouter models tried this session fail the schema-strict `01_add_throttle` scenario — `dots-studio/dots-3-note-preview:free` double-encoded even the flattest array (`inspect_graph`'s `targets` arrived as the string `"[\"all\"]"`) and exhausted retries at the scenario's first tool call; `poolside/laguna-s-2.1:free` saturated upstream (HTTP 429); `inclusionai/ling-3.0-flash-fin:free` (the current default, matching `.env`) double-encoded the heavier nested `add_blocks` array — the only validation error in the call, repeated across all 3 retries. Minimal-probe verification shows BOTH models conform on the identical shapes in small contexts, so it is encoding reliability under the full tool surface, not missing capability (dots' ceiling is lower: it drops the trivial flat case where ling drops only the nested one). Decision (2026-09-03): the tool contract stays strict — no tolerated coercion of string-encoded arrays (user-directed).
-* **Options**: default scenarios to a stronger OpenRouter model (per-run `GRC_OPENROUTER_MODEL` override until chosen), or run scenarios on `GRC_TEST_BACKEND=ollama_cloud` (the origin plan's baseline shows the selected scenarios passing there).
+### 10. Scenario suite default model
+* **Status**: ✅ Closed as decided (2026-09-08) — user-directed: the suite stays on free-tier OpenRouter, default `dots-studio/dots-3-note-preview:free`, accepting the recorded `01_add_throttle` double-encoding failure (no real-token burn unless needed). Per-run override via `GRC_OPENROUTER_MODEL` remains; the tool contract stays strict.
+* **Evidence (recorded 2026-09-03)**: all three free OpenRouter models tried this session fail the schema-strict `01_add_throttle` scenario — `dots-studio/dots-3-note-preview:free` double-encoded even the flattest array (`inspect_graph`'s `targets` arrived as the string `"[\"all\"]"`) and exhausted retries at the scenario's first tool call; `poolside/laguna-s-2.1:free` saturated upstream (HTTP 429); `inclusionai/ling-3.0-flash-fin:free` (the then-default, matching `.env`) double-encoded the heavier nested `add_blocks` array — the only validation error in the call, repeated across all 3 retries. Minimal-probe verification shows BOTH models conform on the identical shapes in small contexts, so it is encoding reliability under the full tool surface, not missing capability (dots' ceiling is lower: it drops the trivial flat case where ling drops only the nested one). Decision (2026-09-03): the tool contract stays strict — no tolerated coercion of string-encoded arrays (user-directed).
 
 ---
 

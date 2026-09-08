@@ -9,474 +9,406 @@ web-dashboard codebase and are not part of this history.
 
 ## [Unreleased]
 
-Harness lean-out and model-facing tool contract rework, planned in
-[`docs/plans/2026-09-02-0830-refactor-harness-lean-and-tool-contracts-plan.md`](docs/plans/2026-09-02-0830-refactor-harness-lean-and-tool-contracts-plan.md).
-Phases 1-3 of that plan are landed, plus U20 (shared test fixtures) and all of
-U15 except one of its own verification bars (below); U16-U18 and the
-infrastructure/layout unit (U14) are not.
+Harness lean-out and model-facing tool contract rework, planned in [`docs/plans/2026-09-02-0830-refactor-harness-lean-and-tool-contracts-plan.md`](docs/plans/2026-09-02-0830-refactor-harness-lean-and-tool-contracts-plan.md) and [`docs/plans/2026-09-03-0829-refactor-sidebar-decomposition-review-plan.md`](docs/plans/2026-09-03-0829-refactor-sidebar-decomposition-review-plan.md). Easy-wins backlog cleanup pass, planned in [`docs/plans/2026-09-08-1101-refactor-easy-wins-backlog-cleanup-plan.md`](docs/plans/2026-09-08-1101-refactor-easy-wins-backlog-cleanup-plan.md).
 
-**Measured effect on the model-facing surface.** Tool descriptions 4,058 -> 2,179
-characters, tool schemas 5,932 -> 5,743, system prompt 5,012 -> 4,056. The static
-per-request floor the model pays before any conversation drops **15,002 -> 11,978
-characters**. `inspect_graph` payloads are 18-20% smaller on the repo's fixtures
-and catalog results 20% smaller. Verified end to end: the five bounded Ollama
-Cloud scenarios (`01_add_throttle`, `06_query_knowledge_multiply`,
-`09_docs_stream_tags_concept`, `11_scoped_inspect_and_update`,
-`24_generate_python_preview`) pass against the reworked surface.
+**Measured effect on model-facing surface**: Tool descriptions reduced from 4,058 to 2,179 characters, schemas from 5,932 to 5,743, and system prompt from 5,012 to 4,056 characters. Static per-request context floor dropped from **15,002 to 11,978 characters**. `inspect_graph` payloads are 18–20% smaller and catalog results 20% smaller. Verified end-to-end against all bounded Ollama Cloud benchmark scenarios.
 
-- **A committed behavioral golden now guards the chat sidebar.** The decomposition's original oracle was a hand-written script in a scratchpad — never committed, so its byte-identical claims were unverifiable after the fact. `tests/test_chat_sidebar_golden.py` renders a fixed pydantic-ai session (text, thinking, tool call, failed tool, tool return) through the real widget tree and pins the transcript structure, tool-status markers, and copy text — mid-stream and post-render captures included — against committed literals. Run unmodified against the pre-split tree at `1fb1d19` it matched byte-for-byte, independently confirming every extraction commit's equivalence claim. First consumer of the conftest `sidebar` fixture, reverse-order safe, and listed in AGENTS.md section 6's xvfb gate.
+- **Committed behavioral golden for chat sidebar**: Added `tests/test_chat_sidebar_golden.py` to render a fixed Pydantic AI session (text, thinking, tool calls, failures, results) through the real widget tree, pinning transcript structure, tool status markers, and clipboard copy text against committed literals. Verified byte-identical against the pre-split codebase (`1fb1d19`).
 
 ### Fixed
 
-- **A leaked GLib timer pair made the GTK test suite order-dependent, and could hang it outright.** `ChatSidebar.__init__` armed a 60s and a 500ms repeating source and never removed either, so every sidebar any test constructed kept polling the shared default `GMainContext` for the rest of the process; with enough armed, an unbounded `while Gtk.events_pending(): Gtk.main_iteration()` drain (15 call sites) never ran dry, and running the suite in reverse declaration order hung outright. `ChatSidebar` now has a real `destroy()` that removes both sources, and the 15 unbounded drains use the file's own existing bounded helper.
-- **Two `test_desktop_app.py` tests permanently mutated process-wide GTK screen state, silently breaking sidebar zoom in every test that ran after them.** Both call the real `build_app()` to test its fatal-error paths, and `build_app()` calls `_apply_global_css()` unconditionally first — installing a module-global `Gtk.CssProvider` on the default screen at `STYLE_PROVIDER_PRIORITY_APPLICATION`, forever, which then defeated `ChatSidebar.set_zoom_projection`'s own same-priority widget-scoped provider in any later test. Never observed before because alphabetical file collection always ran the sidebar's zoom tests first. Both tests now stub `_apply_global_css`, which neither is testing.
-- **The attach-button test's dialog finder matched the wrong dialog after an earlier test ran.** `test_attach_button_opens_in_app_file_chooser` located the open dialog with `isinstance(w, Gtk.FileChooserDialog)`, but GRC's own `FileDialogs.SaveFlowGraph` — permanently swapped in by an earlier save-flow test for the life of the process — subclasses it, so once that swap had happened the `isinstance` check matched a leftover `SaveFlowGraph` instance instead of the attach chooser this test opens. Found by bisecting a `pytest --reverse` failure that looked like flakiness but reproduced deterministically. Now matches with `type(w) is Gtk.FileChooserDialog` and takes the most recently opened dialog; `pytest-reverse` is added to the dev extra so order-dependence like this is caught going forward instead of by chance collection order.
-- **`_set_tool_result` always rendered a tool's outcome as a success.** The label helper's `ok` parameter was never threaded from the streaming path, which has the failure signal on `event.part`/`part.outcome`, so a genuinely failed tool call still rendered its green checkmark. Both `_stream_tools`' `FunctionToolResultEvent` handling and `_on_part_start`'s `NativeToolReturnPart` branch now pass `ok=(outcome != "failed")` through.
-- **The copy-to-clipboard transcript split a tool call from its own result.** A tool's call and result stream as two separate `pydantic-ai` events, so the raw-text accumulator recorded them as two independent fragments; if any other text streamed in between, "Copy as text" produced a transcript with the call and result out of order relative to how the chat renders them. `_ChunkAccumulator` gains `replace_chunk`, and the call fragment is now patched in place into the combined `_transcript_tool_call(name, args, result)` once the matching result arrives, preserving transcript order without re-parsing the stored args string.
-- **The approval card rendered `?` instead of what the user was approving.** `format_change_summary` read `name`/`param`/`value` while `change_graph` emits `instance_name`/`params` via `BlockAdd`/`ParamUpdate`/`StateUpdate.model_dump()`, so every consent card showed the block as `` `?` `` and dropped parameter updates entirely (`` `?.?` = ``). The human-in-the-loop consent surface AGENTS.md section 4 makes an invariant was unreadable. The card now renders the real field names, one line per parameter, and surfaces a new block's initial state when the model asked for a non-default one. The old test passed because it hand-wrote the wrong payload shape; it now builds from the argument models.
-- **The fast gate made live network calls and failed at random.** Three tests in `tests/test_isolation.py` performed a real Ollama Cloud chat completion, a real OpenRouter completion, and a live `probe_backend` request, gated only on a key present in `.env` — inside the gate AGENTS.md section 6 documents as having no LLM and no external network dependency. All three now carry `@pytest.mark.integration`. Separately, `test_ctrl_v_with_clipboard_image_attaches_png` negotiates X clipboard ownership in a 150-round loop its own comment calls racy, then proceeded whether or not ownership settled, so a lost race surfaced as a false failure of the paste handler; verified non-deterministic across repeated runs on an unmodified tree, and the unmet precondition is now an explicit evidenced skip.
-- **`change_graph` reported outcomes it never verified.** `_revert_flow_graph` discarded `import_data`'s return value, and GNU Radio reports a partial restore by return value rather than by raising ("any blocks or connections in error will be ignored"), so a rollback that silently dropped wiring looked clean. When the in-memory restore raised, the fallback re-parsed the `.grc` from disk and reported success — destroying any unsaved manual canvas edit while claiming a clean revert. An exception after the atomic write reverted memory, leaving disk and memory silently disagreeing; the commit is now latched. Three further claims are now evidence-backed: `persisted` (a graph with no file path mutates but writes nothing), `still_invalid` (a commit made on a graph GNU Radio still calls invalid), and `relayout` (previously derived from the request, so a layout pass that threw still claimed one happened).
-- **Local models were compacted at 27,200 tokens regardless of their real window.** The context window was resolved once, at agent-build time; a probe that failed because the backend was still starting froze the conservative 32,000 for the life of the agent, discarding 79% of a 131,072-token model's context. The registry cannot rescue this — `resolve_context_window` returns `None` for every self-hosted model id, so switching to `fallback_context_window` alone changes nothing — so the capability re-probes on the first request that can, then caches.
-- **A blocking HTTP probe ran on the unified GTK+asyncio loop after every node.** The sidebar's context-label refresh called the synchronous context-length probe from inside the `agent.iter()` node loop, stalling the whole loop for up to 3 seconds on a cache miss and repeating every 60 seconds for providers whose window can never resolve. The label now reads a cache filled off-loop.
-- **`query_knowledge` executed code from the block library.** Resolving a catalog block's implementation docstring `exec()`'d every line of its imports template, reachable from a read-only tool, while `save_block` writes agent-authored Python into `~/.grc_gnuradio` outside the filesystem sandbox. Import lines are now parsed with `ast`; only genuine imports are honoured, and anything else is refused with a warning. The capability is unaffected — `analog_pll_carriertracking_cc` still resolves the docstring documenting its frequencies as "in radians per sample, NOT HERTZ".
-- **`inspect_graph` emitted connections in non-deterministic order.** GRC stores them in a set, so the model saw a different payload for an unchanged graph on every call — defeating prompt caching and making two inspections impossible to diff.
-- **Non-breaking-space normalisation covered two of five argument families.** An NBSP inside a connection string — a common artefact in model-generated text — survived into `parse_conn` and surfaced as a lookup error instead of being cleaned up like the rest.
-- **`_always_approve_all` ran its body twice**, double-destroying already-destroyed approval cards.
-- **Both transformation disclosures shared one `message` slot** behind an `if`/`elif`, so a query that was both token-capped and fell back to lexical search reported only the first.
-- **The agent message's copy button vanished on every rich re-render.** `_render_last_message_rich` wiped all children of the message box — including the action row `_start_agent_message` had packed — and never re-attached it, so the copy button was orphaned out of the widget tree while its text kept updating on the detached object. The wipe now skips the row; the badge-pill hover guard still applies to content children.
-- **A reasoning turn's copy text differed mid-stream from after re-render.** The streaming accumulator appended thinking content bare while the history renderer wrapped it in `<Thinking>` tags, so copying mid-turn produced different text than copying the same turn after it completed — a violation of the sidebar-decomposition plan's own scenario. One fragment builder in `chat/format.py` now owns the wrapped form (canonical: it matches the persistent post-render copy users keep), and the accumulator grows it incrementally with explicit open/close tracking, consecutive-part boundaries included.
-- **The cancel path's history save was invisible to background-task cancellation.** The `CancelledError` branch fired `asyncio.ensure_future(self._save_history())` untracked, so a racing clear/stop orphaned the handle and could persist pre-clear history over the wipe. It registers through `_track_background_task` like every other fire-and-forget.
-- **Text in agent replies could not be selected with the mouse.** The sidebar registered one uri-list drop target on itself, so any drag inside the transcript — including a text-selection drag — started the file-drop gesture instead. The drop surface now lives on the composer's input area only: files land at the attach seam, the entry keeps its own text drag-paste (text targets win at the innermost site), and selection gestures win in the message list. `.chat-copy-btn` also rests at full opacity instead of dimmed to 0.60, and a coverage matrix pins every render path (streaming, single-turn replace, history rebuild, rich re-render) so each user and agent message ends with an attached, working copy row.
+- **Spawn-crashed flowgraph runs misreported as clean successes**: GRC's `Executor` emits `send_verbose_exec` + `send_end_exec()` (default code 0) when the run subprocess fails to spawn — byte-identical in the console stream to a legitimate clean exit. `exec_monitor` now snapshots the page-process identity at the start marker; a code-less Done marker with absent-or-unchanged identity (wired provider only) records a spawn failure with an additive `spawn_failed` flag, and run results plus `get_run_log` report `ran_successfully: False` with a spawn note pointing at the retained exception. The return code stays truthful; no-provider, code-carrying, and mid-run tab-switch paths keep legacy behavior.
+- **Leaked GLib timers in test suite**: Added `destroy()` to `ChatSidebar` to remove armed 60s and 500ms repeating timer sources, and replaced 15 unbounded `Gtk.main_iteration()` loops with bounded helper drains to prevent order-dependent test hangs.
+- **Screen CSS pollution in desktop tests**: Stubbed `_apply_global_css` in `test_desktop_app.py` fatal-error tests to prevent process-wide `Gtk.CssProvider` leaks from overriding widget-scoped zoom styling in subsequent tests.
+- **Attach dialog test lookup collision**: Changed file chooser detection from `isinstance(w, Gtk.FileChooserDialog)` to `type(w) is Gtk.FileChooserDialog` to avoid matching GRC's `SaveFlowGraph` subclass; added `pytest-reverse` to dev dependencies.
+- **Streaming tool success indicator**: Corrected `_set_tool_result` to thread `ok=(outcome != "failed")` from streaming events in `_stream_tools` and `_on_part_start`, rather than unconditionally displaying success checkmarks.
+- **Transcript tool call ordering**: Added `replace_chunk` to `_ChunkAccumulator` to patch streaming tool calls and their results into unified entries in place, preventing transcript copy ordering bugs.
+- **Consent approval card rendering**: Updated `format_change_summary` to read `instance_name`/`params` from `change_graph` models instead of obsolete `name`/`param`/`value` keys, rendering accurate block names, parameter diffs, and initial states.
+- **Hermetic test gate and clipboard race**: Marked live API tests in `tests/test_isolation.py` with `@pytest.mark.integration`; added explicit skip for clipboard negotiation races in `test_ctrl_v_with_clipboard_image_attaches_png`.
+- **Verification of `change_graph` transactions**: Checked `import_data` return values during rollback, removed unsafe disk re-parse fallbacks, latched commits, and truthfully reported `persisted`, `still_invalid`, and `relayout` statuses.
+- **Local model context window probing**: Dynamically re-probes and caches backend context limits on the first request rather than permanently defaulting to a conservative 27,200 tokens when the server is cold.
+- **Off-loop context probe**: Cached synchronous context-length lookups off the main loop to prevent 3-second UI freezes during sidebar label refreshes.
+- **Safe docstring imports**: Replaced `exec()` in `query_knowledge` block docstring resolution with `ast` parsing, allowing only genuine import statements and rejecting unsafe code.
+- **Deterministic graph inspection**: Emitted connections in `inspect_graph` in deterministic sorted order instead of arbitrary set order, improving diffing and prompt caching.
+- **Non-breaking space normalization**: Extended NBSP cleanup across all argument families, including connection DSL strings.
+- **Approval helper re-entrance**: Prevented `_always_approve_all` from running its body twice and double-destroying approval cards.
+- **Dual transformation disclosures**: Fixed `if/elif` branch in disclosure reporting so queries that are both token-capped and fall back to lexical search report both notices.
+- **Retained copy button on rich re-render**: Prevented `_render_last_message_rich` from wiping the action row containing the message copy button.
+- **Consistent reasoning copy text**: Unified mid-stream and post-render thinking block formatting using canonical `<Thinking>` tags via `chat/format.py`.
+- **Tracked history saving on cancellation**: Wrapped `CancelledError` history saves with `_track_background_task` to prevent race conditions during chat clearing.
+- **Transcript mouse selection**: Restricted `text/uri-list` drag-and-drop target to the composer input area, allowing normal mouse text selection inside the transcript message list; set `.chat-copy-btn` to full opacity.
+- **Resilient `write_plan` input coercion**: Added Pydantic `BeforeValidator` to `write_plan` to decode stringified JSON lists, coerce numeric IDs to strings, normalize `name` to `content`, and emit actionable schema `ModelRetry` feedback.
+- **Flexible `change_graph` argument ingestion**: Decoded stringified JSON arguments, aliased `block_id` to `id` for block adds/removals, coerced 2-element tuples and dictionaries into connection strings, and wrapped single-item inputs into sequences.
+- **Responsive HTTP transport timeouts**: Lowered default HTTP read timeout from 1800s to 120s across providers to fail fast with actionable errors on dropped or overloaded connections.
 
 ### Changed
 
-- **Tool argument bounds and formats moved from prose into the JSON schema.** `query_knowledge` declared its 1-20 range only in its docstring and silently clamped out-of-range values; `generate_python` declared "up to 20" and passed anything through to an engine that clamped just as silently. Both now use `Annotated[int, Field(ge=1, le=20)]`, so `minimum`/`maximum` reach the model and an out-of-range value is a validation error before the tool body runs. `change_graph`'s six list arguments are plain arrays rather than array-or-null unions (eleven nullable unions across the surface drop to five — the ones where `None` carries meaning). The connection mini-DSL carries `parse_conn`'s rule as a schema `pattern`, verified to accept and reject exactly what the parser does. `inspect_graph.targets` narrows from three branches to two.
-- **Terminal faults use `ToolFailed`, not `ModelRetry` plus prose.** Four sites reported an unfixable environment fault by raising `ModelRetry` with text telling the model not to retry. They now raise `ToolFailed`. Because that consumes no retry budget, `StopGracefully` gains `max_repeated_failures`: three terminal failures of the same tool in a row end the run, with a success breaking the streak. `run_flowgraph`'s conditional approval moved to an `args_validator`, where invalid arguments are rejected before a human is asked. Tools stop probing their dependency with `hasattr`/`getattr` and are typed against a GTK-free `deps` Protocol — annotating `NativeFlowgraphProxy` directly would have made the tool layer unimportable without PyGObject.
-- **`query_knowledge` returns one shape across both domains.** `catalog` gave a `results` list while `docs` gave a single `answer` string joined by a `"\n\n---\n\n"` delimiter, so the model branched on the domain it had itself supplied and could only recover chunk boundaries by splitting on a magic separator. Catalog results also dropped GRC's Advanced bookkeeping parameters (`alias`, `affinity`, `minoutbuf`, `maxoutbuf`, `comment`), filtered by `param.category` rather than a hardcoded list.
-- **Troubleshooting recipes moved from the system prompt into the searchable corpus.** The prompt carried the full SDR udev and TUN/TAP `CAP_NET_ADMIN` remediations, exact shell commands included, on every request. They now live in `docs/wiki_gnuradio_org/Flowgraph_Runtime_Permissions.md` and `Verifying_Flowgraph_Behaviour_With_Probes.md`; retrieval verified at rank 1 for both permission cases and rank 2 for probes. The prompt states the class of failure and points at `query_knowledge`.
-- **`Planning` registers `write_plan` only.** `read_plan` duplicated a feature already on (the harness appends the rendered plan to every request), and registering it forced a hand-written `guidance` string that enumerated the planning tools by name — which AGENTS.md section 4 forbids. The executor deliberately keeps `SystemReminders` rather than the harness's own injection, which would point it at tools it does not have and drop its read-only framing.
-- **`pydantic-ai` 2.31 -> 2.37 and `pydantic-ai-harness` 0.23 -> 0.28**, with the harness pin upper-bounded (`>=0.28.0,<0.29`) because `fs_tools`/`shell_tools` still import private symbols from a 0.x package. The upgrade surfaced a break the unbounded pin was hiding: 2.37 is mid-migration between HTTP stacks, and Anthropic now rejects an `httpx.AsyncClient` outright while Groq still rejects an `httpx2.AsyncClient`. A single shared client can no longer serve every provider, so the client is chosen per provider — `httpx2` by default with Groq as the one named exception, pinned by a test that says when the carve-out can go.
-- **`adapter/__init__.py` exports only its consumed surface.** Eleven underscore-prefixed helpers were re-exported; eight had no `src/` consumer and were public purely so tests could reach them. The package now exports 22 names, each verified consumed. The GUI polls a new `rag.build_status()` instead of a private module global.
-- Three preflight messages gained the fuller provider names the shared label table carries (`"Anthropic (Claude)"`, `"xAI (Grok)"`, `"OpenAI API"`) when an eighth duplicate label table was removed.
-- **`chat_sidebar.py`'s display-free logic moved out into a new `chat/` package** (`format.py`, `errors.py`, `history.py`, `usage.py`) — tool-label/transcript formatting, turn-error message extraction, message-history cleanup, and token/cost usage accounting, none of which touch GTK. Each is now directly unit-testable without a display; a behavioral golden captured before the split stays byte-identical after it. `chat_sidebar.py` drops from 4,173 to under 3,800 lines.
-- **Three duplicated pieces of `ChatSidebar` state collapsed to one authority each.** The canvas manager was re-derived via `getattr(self._flowgraph_proxy, "_canvas_manager", None)` at seven call sites instead of the file's own existing `_get_cm()` helper; "what are the current messages" was inlined again in `_update_context_label` instead of reading through one method (`_current_messages`, covering both the stable `_message_history` snapshot and a live run's `all_messages()`); and `clear_messages`/`stop_chat` each hand-enumerated the same four named task attributes to cancel them. The four fire-and-forget tasks (`_chat_task`, `_compact_task`, `_fix_task`, `_implement_plan_task`) now also register into one `_background_tasks` set via `_track_background_task`, read by a single `_cancel_background_tasks`, while keeping their named references where a call site needs to ask "is this specific kind of task running" (the implement-plan guard).
-- **`_clean_message_history_for_new_turn` and `_without_truncated_thinking_tail` moved from a downstream repair to the read boundary that actually needs them.** `_run_agent_turn` re-ran both filters on `self._message_history` at the top of every turn, papering over whatever state an earlier write left behind — AGENTS.md section 1 asks for the source fixed instead. The abort path (`_recover_history_after_failure`) already persisted clean history; the one write site that didn't was loading a saved session, which can carry a trailing unfulfilled tool call (a session persisted mid-approval-pause, or one saved by a pre-fix build) — pydantic-ai rejects a new prompt against that history outright. `_on_recent_session_clicked` now cleans at load, and the turn-start repair is gone.
-- **`ChatSidebar`'s six widget-owning concerns split into their own mixin modules**, mixed back in rather than composed (`class ChatSidebar(StreamViewMixin, TranscriptViewMixin, ComposerMixin, ApprovalsMixin, ZoomProjectionMixin, SettingsControllerMixin, Gtk.Box)`) — an organizational split of one widget's behavior, not a new encapsulation boundary, since every method still assumes the full instance. `chat/stream_view.py` owns the live-streaming render (plus `_StreamCtx`/`_ChunkAccumulator`, moved from module scope); `transcript_view.py` owns rendering completed turns and the tool-card/copy-button primitives; `composer.py` owns the input area, attachments, and send dispatch (plus `_ChatTextView`); `approvals.py` owns the Manual/Auto/YOLO gate; `zoom_projection.py` owns the canvas-zoom-to-font projection; `settings_controller.py` owns the Preferences dialog's save flow. Two small shared leaves came out alongside them: `chat/constants.py` (`_SCROLL_STICK_THRESHOLD`, read by three of the mixins) and `chat/images.py` (`_thumbnail`, read by two). `chat_sidebar.py`: 4,173 -> 1,937 lines against its pre-split baseline.
-- **The copy-confirmation machinery is one implementation.** The transcript's revert (1500 ms) and code blocks' revert (2 s) were written out twice with divergent timeouts, so the confirmation behavior depended on which surface you clicked. `ui/copy_confirm.py` owns clipboard write, icon/tooltip/label flip, the re-arm guard, revert, and destroy cleanup with one canonical 1500 ms delay; the per-context tooltip and optional reverting label are parameters. The near-bottom scroll test likewise existed in three copies (scroll tracker, streaming flush, zoom anchor) and now has one helper beside its threshold constant.
-- **Integration scenarios prefer OpenRouter and default to `inclusionai/ling-3.0-flash-fin:free`.** With `OPENROUTER_API_KEY` configured the suite runs against OpenRouter first; Ollama Cloud stays selectable via `GRC_TEST_BACKEND=ollama_cloud`, and the default model matches the app's own `.env` setting. Recorded honestly: all three free models tried this session fail the schema-strict `01_add_throttle` scenario (dots on `inspect_graph` retries, poolside on upstream 429, ling on a `change_graph` schema retry) — passing scenario runs need a stronger model via `GRC_OPENROUTER_MODEL` or `GRC_TEST_BACKEND=ollama_cloud` (backlog item 10).
+- **Structured `search_mode` tool labels**: Replaced nine literal substring spellings in the `query_knowledge` tool-label helper with one `json.loads` rule reading the parsed payload's `search_mode` field; callers pass the raw result payload (fix at the source), and non-JSON or field-less results render the plain label.
+- **Shared provider behavior table**: Added `PROVIDER_BEHAVIORS` to the provider catalog (`ui/providers.py`); the codex thinking-summary label, sign-in gate, and settings preflight read the table instead of scattered `provider == "openai_codex"` comparisons — zero provider string literals remain under `chat/`.
+- **Frame-bounded stream flush**: Replaced the four-interval adaptive throttle (0.25/0.066/0.050/0.033 s plus 2,000/5,000-char branches) with one per-turn `add_tick_callback` frame-cadence source that disarms on stream end and sidebar destroy; golden transcript copy text stays byte-identical.
+- **Wiki corpus chrome strip and GREP1 consolidation**: 70 of 101 crawl files carried trailing MediaWiki navigation chrome diluting lexical/vector ranking mass; one structure-based rule (cut at the first `## Navigation menu` heading) cleans them. `Coding_guide_impl.md` — live-verified upstream as a 116-byte "replaced by GREP1" pointer stub — now carries the real GREP-0001 coding guidelines. Verified-distinct near-duplicate page pairs untouched; the RAG index auto-rebuilds on corpus fingerprint change.
+- **Scenario suite default model**: Integration scenarios default OpenRouter to `dots-studio/dots-3-note-preview:free` (user-directed, free tier accepted knowingly — the recorded `01_add_throttle` double-encoding failure stands; no real-token burn unless needed); `GRC_OPENROUTER_MODEL` override intact.
+- **JSON schema bounds and formats**: Moved tool parameter constraints into Pydantic schema annotations (`Field(ge=1, le=20)`, connection string regex `pattern`, and plain lists instead of nullable `anyOf` unions).
+- **Standardized tool error reporting**: Replaced `ModelRetry` prose workarounds with `ToolFailed` for unfixable environment faults; added `StopGracefully.max_repeated_failures` (3 strikes); typed dependencies against a GTK-free Protocol.
+- **Unified `query_knowledge` return shape**: Standardized catalog and docs search payloads into a consistent structure and filtered GRC Advanced parameters via `param.category`.
+- **Offloaded troubleshooting recipes**: Moved SDR udev and TUN/TAP `CAP_NET_ADMIN` setup guides from system prompt into knowledge corpus markdown files (`Flowgraph_Runtime_Permissions.md`, `Verifying_Flowgraph_Behaviour_With_Probes.md`).
+- **Streamlined `Planning` capability**: Registered `write_plan` only, removing redundant `read_plan` and manual prompt tool enumerations.
+- **Dependency upgrades**: Upgraded `pydantic-ai` to 2.37 and `pydantic-ai-harness` to 0.28 (bounded `<0.29`); assigned provider-specific HTTP clients (`httpx2` default, `httpx` for Groq).
+- **Minimal `adapter` public exports**: Reduced `adapter/__init__.py` exports to 22 consumed symbols and migrated build status polling to `rag.build_status()`.
+- **Standardized provider preflight names**: Harmonized provider labels (`"Anthropic (Claude)"`, `"xAI (Grok)"`, `"OpenAI API"`) against a single shared table.
+- **Decoupled headless chat logic**: Extracted GTK-free formatting, errors, history, and usage accounting into the `chat/` package (`format.py`, `errors.py`, `history.py`, `usage.py`).
+- **Consolidated `ChatSidebar` state accessors**: Unified canvas manager access via `_get_cm()`, message queries via `_current_messages()`, and task cancellation via `_track_background_task`.
+- **Shifted message history sanitation**: Moved unfulfilled tool call cleanup from turn start to the session load boundary (`_on_recent_session_clicked`).
+- **Modularized `ChatSidebar` widget hierarchy**: Split monolithic sidebar into 9 specialized mixins (`StreamViewMixin`, `TranscriptViewMixin`, `ComposerMixin`, `ApprovalsMixin`, `ZoomProjectionMixin`, `SettingsControllerMixin`, `TurnDriverMixin`, `SessionMixin`, `StatusContextMixin`), reducing `chat_sidebar.py` to 943 lines and keeping all modules under 1,000 lines.
+- **Unified copy feedback and scroll detection**: Consolidated copy button clipboard handling and tooltip timeouts (1500ms) in `ui/copy_confirm.py`, and unified bottom-scroll checks into a shared helper.
+- **OpenRouter integration test defaults**: Defaulted integration scenarios to OpenRouter using `inclusionai/ling-3.0-flash-fin:free` with optional Ollama Cloud selection.
+- **Architectural alignment for planning context**: Replaced ad-hoc regex scrapers (`extract_plan_from_text`) and silent history mutations (`_sanitize_history_for_executor`) with source validation and native `TieredCompaction`.
 
 ### Removed
 
-- **The scenario/benchmark harness left the installed package.** `agent.py` shipped 547 lines of it — a 15-entry `SCENARIOS` corpus, `build_scenario_model`, `fresh_agent`, `check_expect`, `render_scenario_markdown` — with no production consumer. Relocated to `tests/scenarios/harness.py`; `agent.py` drops 1,229 -> 653 lines.
-- **The write-only undo stack.** `push_undo_snapshot` wrote a numbered `.grc` and a `cursor.json` per tracked edit, and the only reader of that cursor was the writer incrementing it. The `.grc_agent/backups/` copies stay — they have no code reader either, but that is their design: plain `.grc` files a person opens in a file manager, and the only pre-image that survives an app restart. Both behaviours were untested and now are.
-- **`_MODEL_WINDOW_OVERRIDES`.** It corrected `genai-prices` for two Claude models, and at 0.1.3 both rows were wrong — `claude-sonnet-4-5` over-recorded at 1,000,000 against a real 200,000, the dangerous direction. The upgrade to 0.1.6 fixed both upstream, verified against the installed registry, so the workaround is gone and the registry values are pinned by a test.
-- **Verified-dead code across eight modules**: `inspect_graph`'s constant `view` parameter and the now-dead `render_port` `mode` axis; `chat_sidebar`'s `_make_text_label`, `_proj_chooser`, `_content`, `_ChunkAccumulator.__eq__` and an unreachable tooltip block guarded on a widget that is never created; `agent_factory`'s unreachable `_CTX_PROBES["ollama"]`, `_codex_context_length` shim and duplicate `_PREFLIGHT_LABELS`; `css`'s duplicate theme branch and substring dark-theme heuristic; `markdown_view`'s unreachable `list_item` branch and `"b"`/`"i"` aliases; and `ingest.py`'s branch on whether a test had monkeypatched it, which meant none of the nine tests patching embedding ever exercised the batched production path.
-- **The write-only active-graph state.** `_active_graph_name`/`_active_graph_path` and `set_active_graph` had no production reader since the toolbar label they fed was removed — the origin plan had already slated them and only test assertions read them. The setter's one production call site in `desktop_app`'s page sync and the name/path computation feeding it went with it.
+- **Scenario benchmark harness from package**: Relocated 547 lines of test scenarios from `src/grc_agent/agent.py` to `tests/scenarios/harness.py`.
+- **Write-only undo snapshot stack**: Removed unused `push_undo_snapshot` and `cursor.json` writes while preserving `.grc_agent/backups/` directory.
+- **Outdated model context overrides**: Removed manual `_MODEL_WINDOW_OVERRIDES` following upstream fixes in `genai-prices` 0.1.6.
+- **Dead code across 8 modules**: Deleted unused view/mode parameters, obsolete widget helpers, duplicate CSS themes, and test-only branches.
+- **Write-only active-graph state**: Removed unused `_active_graph_name`, `_active_graph_path`, and `set_active_graph`.
 
 ### Notes
 
-Three audit findings were verified as **wrong** and the code left alone: `settings.get_theme_mode`/`set_theme_mode` are live with five call sites; the `ingest` <-> `rag` lazy import is a genuine cycle (hoisting it raises `ImportError` from a partially initialised module, now documented in place); and `event_loop`'s gbulb path is the only working backend on this project's minimum supported Python (3.12 with PyGObject 3.48 has no `gi.events`), so it stays and now has a test pinning the third-party attribute its patch reaches for.
-
-`AGENTS.md` was amended alongside the code it describes: section 3 now names both `ModelRetry` and `ToolFailed` with the boundary between them and the run-level bound; section 5 records the new schema contract; section 6's gate description is true again and its xvfb list gains the two GTK-constructing files it omitted.
-
-The sidebar-decomposition work was subsequently independently audited (follow-up plan: `docs/plans/2026-09-03-0829-refactor-sidebar-decomposition-review-plan.md`): a move-only line audit of all six extraction commits found zero semantic deviations, every test monkeypatch target was re-verified against its real call site, and the committed behavioral golden ran byte-identical against the pre-split tree at `1fb1d19` — substantiating claims the lost scratchpad script had left unverifiable. The audit surfaced the four behavioral defects fixed above (detached copy button, thinking-copy divergence, untracked cancel-path save, selection-stealing drop target). U15's remaining verification bar of no module over 1,000 lines was then completed per that plan's units U5 and U6: the turn-driver cluster moved to `chat/turn_driver.py` (TurnDriverMixin), the session-lifecycle cluster to `chat/session.py` (SessionMixin), and the status/context cluster to `chat/status_view.py` (StatusContextMixin) — move-only, golden byte-identical at every step. `chat_sidebar.py` is now 943 lines (composition root: `__init__` and the `_build_*` widget-tree methods) and the largest `chat/` module is 574; U15's verification bar is met in full.
+- Verified audit non-issues: Retained `get_theme_mode`/`set_theme_mode`, documented `ingest`<->`rag` circular import, and kept `gbulb` for Python 3.12/PyGObject 3.48 support.
+- Updated `AGENTS.md`: Documented `ModelRetry` vs `ToolFailed` contracts, tool schema invariants, and headless xvfb test gates.
+- Sidebar decomposition verified: All extractions audited with zero semantic deviation, validated against pre-split tree at `1fb1d19` via byte-identical golden tests.
 
 ## [0.6.0] - 2026-09-01
 
 ### Added
-- **Agent-side flowgraph save (`save_graph`)**: The agent can now save the active flowgraph itself — no more "please press Ctrl+S" mid-task. An untitled graph is named by pure derivation rules and lands in the project directory (SAVE_COPY-style collision counter `untitled(1).grc`, SAVE_AS-parity options-id rename so the graph's id always matches its file stem); a titled page re-saves in place at its existing path, exactly like native Ctrl+S. The write goes through GRC's own serializer into a temp file, then fsync + atomic rename under the existing per-graph flock (GRC's native save is a plain non-atomic `open(w)` — the agent path must never be able to corrupt a file mid-write, and file-mode parity keeps saved `.grc` files indistinguishable from hand-saved ones). Ordered pre-flight guards produce actionable, retryable errors: missing project directory (the same directive the filesystem tools give), target open in another tab (named), read-only target, and a content-identical fast path that updates state without touching bytes. A successful save replicates GRC's full save surface — title bar, tab markup, Save-action enablement, close-page guard, File > Open Recent — and refreshes the manual-edit sync baselines so the 1.5 s poll never misfires. The unsaved-run gate was rewired from "Save it in GRC first (File > Save)" to a self-serve directive (call `save_graph`, then retry `run_flowgraph`) that states the true invariant: GRC generates into the saved graph's directory and executes from there.
-- **Canvas-to-chat zoom sync**: The GRC canvas zoom is now the single zoom source, and the agent chat sidebar follows it — every zoom path (Ctrl+scroll, toolbar/menu actions, fit-to-view) flows through GRC's own `_set_zoom_factor` choke point, and the sidebar re-derives its font scale from one pure law: `sqrt(zoom)` clamped to a readable 0.7–1.8× band, exactly the theme size at zoom 1.0. Applied as one scoped, session-only CSS rule (all sidebar styles are em-relative, so the whole subtree rescales; GRC's panels are untouched), with an anchor-preserving settle that keeps stick-to-bottom scrolling intact mid-stream and re-pins code blocks so rows never clip at any size. Tab switches re-project the newly foregrounded page's zoom, identical projected steps are skipped as no-ops, and fit-to-view auto-zoom is suppressed so agent relayouts never hijack the user's zoom preference. Ctrl+scroll over the chat zooms the canvas in return — one-directional by construction, so there is no feedback loop and the gesture never steals focus or scroll intent.
-- **Reliable composer image input**: The paperclip button opens an in-app file chooser (the previous `FileChooserNative` round-trips through xdg-desktop-portal on Wayland and could present nothing at all when that fails), with multi-select and the image filter preserved. **Ctrl+V now pastes a copied image** (screenshot, copy-image) as a pending attachment through the same admission seam as the paperclip, with a status-bar confirmation — text clipboards keep the default paste.
-- **TUN/TAP privilege-failure guidance (agent + README)**: The executor system prompt's "Execution & Diagnostics" block gained a TUN/TAP platform quirk beside the existing SDR USB entry: when run logs show `tun_alloc`/`TUNSETIFF` EPERM allocating a named tun/tap interface (e.g. `network_tuntap_pdu`), the agent now attributes it to missing `CAP_NET_ADMIN` (not a graph defect — a world-accessible `/dev/net/tun` does not substitute), and steers the user to the one-time safe remediation run outside the app: `sudo ip tuntap add dev tap0 mode tap user $USER` (match the block's `ifname`), after which the flowgraph attaches to the pre-created persistent interface without privileges. The guidance states the persistence boundary (survives flowgraph restarts, not reboots; re-create per boot or make durable with a systemd unit) and explicitly advises against running the app as root or setcap-ing the interpreter, matching the standing no-sudo posture for SDR hardware. `README.md` gained the matching human-facing bullet beside "SDR hardware permissions". Both environment-quirk rules (SDR udev, TUN/TAP `CAP_NET_ADMIN`) are now locked by fragment assertions in `test_system_prompt_keeps_unobservable_contracts`, with a new boundary test keeping execution-remediation commands out of the read-only planner prompt. Grounded in kernel `drivers/net/tun.c` semantics (attach-to-owned-persistent-device needs no capability; interface creation requires `ns_capable(CAP_NET_ADMIN)`) and iproute2 `iptuntap.c` (create + `TUNSETOWNER` + `TUNSETPERSIST`).
-- **Chat image input (multimodal user prompts)**: The composer gained a paperclip attach button opening a multi-select image chooser (png/jpeg/gif/webp — pydantic-ai's `ImageMediaType` set, derived via `get_args`), with removable thumbnail chips; image-only sends are allowed, and files can also be **dragged-and-dropped** onto the chat sidebar (GTK3 `text/uri-list` drop target) — both paths queue preview chips through the same admission seam, sent only when the user dispatches (Enter/Send). Dispatch builds the user prompt as pydantic-ai's native `Sequence[UserContent]` (`[text, BinaryContent...]`) straight into `agent.iter()`, so images reach vision-capable models through the standard multimodal contract — no provider-specific code. The agent can now also **read project-dir images from disk**: `read_file` passes image files through as `BinaryContent` (carried natively by pydantic-ai's `ToolReturnContent` to provider multimodal context) instead of the binary-placeholder string, with missing files raising the same `ModelRetry('File not found')` shape. Session persistence needed no schema change: the existing `ModelMessagesTypeAdapter` store round-trips `BinaryContent` bytes as base64, verified by a new regression test; the new canonical `db.user_request()` builder replaces both `ModelRequest.user_text_prompt` sites (new-session insert and failed-turn remember) and `db.prompt_images()` extracts image parts. User bubbles and reloaded history render thumbnails decoded at target scale via `PixbufLoader`'s `size-prepared` hint (a 24MP photo never allocates a full-resolution RGBA buffer for a 128px thumb). Screenshot tooling and vision-capability probing remain out of scope (backlog #1).
-- **Offline knowledge corpus expansion & cleanup (`docs/wiki_gnuradio_org/`)**: 18 new high-signal pages crawled from official wiki snapshots (Wayback Machine — the live wiki's Cloudflare challenge blocks automated fetches): UHD USRP Source/Sink, PlutoSDR Source/Sink, Costas Loop, Symbol Sync (successor to the deprecated Polyphase Clock Sync), Correlation Estimator, MPSK SNR Estimator, a full PSK Demodulation guided tutorial, PDU Split, Tags To PDU, Rational Resampler, Frequency Xlating FIR, QT GUI Range/Time/Frequency/Waterfall/Time-Raster sinks, and full replacements for Message Passing (257→3,187 words) and Tagged Stream Blocks (257→1,978 words). All 93 pre-existing files scrubbed of MediaWiki debris (`From GNU Radio`, jump-nav links, `## Contents` TOCs, `Retrieved from` footers, edit/image junk); 136 duplicate H1 headings demoted to H2 across 18 files so level-1/2 chunking splits on natural section boundaries; 12 zero-signal meta pages removed (Chat, Wiki_account, UsingVSCode, AcademicPapers, Tutorials index, DevelopersCalls, Hack Fests, Octave, CB, Eclipse). Docs vector DB rebuilt through the standard `_ensure_db_built` → `ingest_docs` path (670 chunks, FTS5 + sqlite-vec); 17-query retrieval battery returned hybrid RRF mode with new documents at rank ≤ 3 on every topic, `tests/test_adapter_rag.py` 18 passed, full unit suite 495 passed, ruff clean.
-- **Option-based RAG installation instructions in `README.md`**: Added explicit pre-launch installation commands and guidance for Option 1 (Lexical Search) vs Option 2 (Local Vector Search Hybrid RAG with lightweight `llama.cpp` and `EmbeddingGemma`), detailing retrieval benefits and system requirements.
-- **`hermes-subagent` project skill** (`.agents/skills/hermes-subagent/`): online research subagent persona (packages, features, system design — never local coding), now tracked in-repo to match its `AGENTS.md` reference; local pi-harness state (`.pi/`) gitignored.
-- **Structured product backlog tracks**: Restructured `docs/backlog.md` into 5 discrete capability tracks: Multimodal GRC Visual Inspection, Data-Plane File & Stream Visualization, Project File-RAG, Knowledge Corpus Expansion, and Platform Hardening.
-- **Dynamic thinking expander streaming & auto-collapse**: When the model streams reasoning (`ThinkingPart`/`ThinkingPartDelta`), the thinking container in `ChatSidebar` now expands automatically (`expanded=True`) and auto-scrolls newly streamed tokens to the latest lines (via `scroll_to_mark`). When reasoning finishes (or transitions to text/tools), the container collapses automatically (`expanded=False`) and transitions its label from `"Thinking..."` to `"Thought"` (or `"Thought summary (Codex)"`). Completed/reloaded thoughts in message history remain collapsed by default.
-- **Taller reasoning viewport**: Increased `ChatSidebar` thinking container height (`min_content_height: 200px`, `max_content_height: 750px`), allowing substantial vertical reading space for complex reasoning traces before internal scrollbars engage.
-- **Integration test isolation in pytest**: Configured `addopts = "-ra -m 'not integration'"` and registered the `integration` marker in `pyproject.toml`, isolating live-LLM integration test suites (`test_integration.py` and `test_button_integration.py`) from default test runs while keeping them runnable on-demand via `pytest -m integration`.
-- **Native Wayland startup advisory**: Detects native Wayland sessions (`XDG_SESSION_TYPE=wayland` or `WAYLAND_DISPLAY` without `GDK_BACKEND=x11`) during startup preflight and surfaces an actionable non-blocking advisory in the status bar (`GDK_BACKEND=x11 uv run grc-agent`) to prevent dropped GTK3 nested menu grabs.
-- **ChatGPT (Codex) reasoning summary expander label**: When the active provider is `openai_codex`, the thinking widget in `ChatSidebar` displays `Thinking (summary)...` while streaming and `Thought summary (Codex)` when completed or reloaded from session history, accurately indicating OpenAI's summary reasoning API design.
-- **`no_gui` flowgraph external terminal logging annotation**: `NativeFlowgraphProxy.get_run_log()` and `run_flowgraph()` now inspect GNU Radio's native `flow_graph.get_option("generate_options")` and annotate the tool result payload with `generate_options='no_gui'` and an explanatory `external_terminal_note` when console output is directed to an external terminal wrapper.
-- **Validation-gate error attribution**: `change_graph` now snapshots pre-existing validation errors prior to Phase 1 mutations and isolates them from the Phase 7 validation gate and the turn-end `validate_flowgraph_state` output validator. The agent is only penalized via `ModelRetry` for errors newly introduced by its own mutations, allowing valid edits to succeed on flowgraphs that were already broken by pre-existing user state.
-- **Catalog implementation docstrings in `query_knowledge`**: catalog payloads now embed each block's implementation-class docstring — resolved through the block's own code templates (imports exec'd exactly as GRC's generator runs them; `templates.make`'s target resolved to the installed SWIG class), so parameter units and semantics ("All settings max_freq and min_freq are in terms of radians per sample, NOT HERTZ") are retrievable offline without web fetches. Templated `*_x` blocks honestly carry no doc. The catalog corpus fingerprint gained a composition marker (`catalog-docstrings-v2`) so cached DBs rebuild exactly once. Validated against a corpus-derived ground-truth stress run: 7/7 units/semantics queries returned the correct block at rank ≤ 2 with the docstring attached, on both embedding backends.
-- **Hybrid retrieval (Reciprocal Rank Fusion)**: when a backend DB contains both a vec0 index and an FTS5 index (llamacpp DBs always do) and the query embeds successfully, `_query_index` runs both rankings and fuses them via RRF (`_RRF_K = 60`, the Cormack/Clarke/Bütcher SIGIR 2009 literature constant — never tuned locally), tagging `search_mode: "hybrid"` and attaching a truthful fused `score` to catalog results. The complementary failure modes measured by the ground-truth stress run (lexical owns verbatim phrases, vector owns paraphrases; union hit@5 0.97 vs 0.87 best single) are now captured by the default engine: docs hit@5 0.87 → 0.95, MRR 0.72 → 0.79, exact-tier hit@5 1.00, with all 11 vector-only misses rescued and latency unchanged (~33 ms; the lexical leg costs ~1 ms on the already-open connection). All lexical-only paths (native lexical backend, embed-call failure, outage-built lexical-only DBs) are structurally excluded by the both-indexes guard and behave exactly as before, still tagged `search_mode: "lexical"`.
+
+- **Agent-side flowgraph save (`save_graph`)**: Enabled the agent to save active flowgraphs directly (untitled graphs auto-named in project directory with collision handling and options-id sync; titled graphs saved in place). Implemented atomic writes via temp file, fsync, and flock. Added pre-flight validation (project dir, open tabs, read-only paths) and updated unsaved run prompts to self-serve via `save_graph`.
+- **Canvas-to-chat zoom sync**: Unified zoom tracking through GRC's `_set_zoom_factor`, scaling sidebar typography proportionally via `sqrt(zoom)` clamped to 0.7–1.8× in scoped CSS. Supports tab switches, preserves scroll anchoring, and allows Ctrl+scroll over chat to zoom canvas without feedback loops.
+- **Reliable composer image input**: Replaced portal-dependent `FileChooserNative` with in-app `Gtk.FileChooserDialog` supporting multi-select and image filters. Added Ctrl+V clipboard image paste with pending attachment preview.
+- **TUN/TAP privilege-failure guidance**: Added system prompt guidance and README documentation attributing `tun_alloc`/`TUNSETIFF` EPERM to missing `CAP_NET_ADMIN`, directing users to safe one-time interface pre-creation (`sudo ip tuntap add dev tap0 mode tap user $USER`).
+- **Chat image input (multimodal user prompts)**: Added paperclip image chooser (png/jpeg/gif/webp), drag-and-drop support, thumbnail chips, and native `BinaryContent` dispatch for vision models. Updated `read_file` to return images as `BinaryContent`, verified base64 SQLite persistence, and optimized decoding via `PixbufLoader` target scaling.
+- **Offline knowledge corpus expansion & cleanup (`docs/wiki_gnuradio_org/`)**: Crawled 18 new wiki pages (UHD USRP, PlutoSDR, Costas Loop, Symbol Sync, Correlation Estimator, QT GUI sinks, etc.) and replaced Message Passing / Tagged Stream guides. Cleaned MediaWiki artifacts, demoted duplicate H1 headings, and rebuilt hybrid vector/FTS5 database across 670 chunks.
+- **Option-based RAG installation instructions in `README.md`**: Documented setup for Option 1 (Lexical FTS5) vs Option 2 (Local Vector Search Hybrid RAG via bundled llama.cpp and EmbeddingGemma).
+- **`hermes-subagent` project skill**: Added in-repo skill definition for online research persona in `.agents/skills/hermes-subagent/`.
+- **Structured product backlog tracks**: Reorganized `docs/backlog.md` into 5 capability tracks (Visual Inspection, Stream Visualization, File-RAG, Corpus Expansion, Platform Hardening).
+- **Dynamic thinking expander streaming & auto-collapse**: Auto-expands and scrolls `ThinkingPartDelta` reasoning streams; auto-collapses on completion and labels as "Thought" or "Thought summary (Codex)".
+- **Taller reasoning viewport**: Expanded thinking widget height bounds in `ChatSidebar` (min 200px, max 750px) to prevent early scrollbars.
+- **Integration test isolation in pytest**: Configured `addopts = "-ra -m 'not integration'"` and registered `integration` marker in `pyproject.toml` to separate live-LLM suites from default test runs.
+- **Native Wayland startup advisory**: Added preflight detection for native Wayland sessions, showing status-bar recommendations (`GDK_BACKEND=x11`) to avoid dropped GTK3 menu grabs.
+- **ChatGPT (Codex) reasoning summary expander label**: Tailored thinking labels for `openai_codex` provider (`Thinking (summary)...` -> `Thought summary (Codex)`).
+- **`no_gui` flowgraph external terminal logging annotation**: Annotated `run_flowgraph` and `get_run_log` results with `generate_options='no_gui'` and terminal notice when logs route to an external wrapper.
+- **Validation-gate error attribution**: Isolated pre-existing flowgraph errors prior to mutations so `change_graph` and `validate_flowgraph_state` only raise `ModelRetry` for errors introduced by the agent's own edits.
+- **Catalog implementation docstrings in `query_knowledge`**: Extracted SWIG/C++ implementation class docstrings via block code templates into catalog payloads to expose units and parameter semantics offline (`catalog-docstrings-v2`).
+- **Hybrid retrieval (Reciprocal Rank Fusion)**: Fused vector (vec0) and lexical (FTS5) rankings using RRF ($k=60$) when both indexes exist, tagging `search_mode: "hybrid"` with combined scoring.
 
 ### Changed
-- **Default Ollama Cloud model is now `deepseek-v4-flash:0731`** (faster than the previous default) across the settings default, the Settings placeholder, the agent environment fallback, and the integration tests; the live ollama-cloud round-trip test runs on it. Saved model choices are never overwritten.
 
-- **Scientific rules & commandments rewrite of `AGENTS.md`**: Restructured `AGENTS.md` into a zero-fluff engineering guide centered on an empirical verification persona (evidence before assertions, mandatory `context7` MCP/skills lookups), core engineering practices (simplify first, no brittle reinventions, zero ad-hoc heuristics, no backwards-compatibility shims), and native GRC invariants.
-- **C++ catalog block priority & EPB NumPy slice vectorization**: Mandated vectorized NumPy/SciPy slice operations in `work()` when custom logic requires an `epy_block`, while prioritizing standard GNU Radio C++ catalog blocks with VOLK SIMD vectorization.
-- **Streamlined system prompts and tool docstrings**: Reduced static prompt and tool docstring surface by ~42%, eliminating tool parameter duplication for `run_flowgraph`, removing hardcoded command folklore, aligning filesystem sandbox descriptions with the project directory, and grounding block selection to prioritize standard GNU Radio C++ catalog blocks over Embedded Python Blocks.
-- **SDR hardware permissions streamlined**: Updated prerequisite instructions and system prompt diagnostics to guide users toward driver udev rules installation (`uhd-host`, `rtl-sdr`, `hackrf`) and reloading (`sudo udevadm control --reload-rules`) rather than recommending overly broad group additions (`usermod -aG plugdev,dialout,usrp`).
-- **Silenced embedding ingestion context truncation warnings**: Lowered `_cap_words` and `fit_to_context` log levels from `WARNING` to `DEBUG` in `adapter/rag.py` and `embed_runtime.py`, eliminating console log noise during initial vector database ingestion while retaining complete untruncated document bodies in the database payloads.
-- **Indirect prompt-injection defense is detect-and-log, never withhold** (`block_high_risk=False`): withholding high-risk tool results false-positived deterministically on official GNU Radio doxygen pages — their own jQuery boilerplate (`$(document)` ×2) trips the tier-1 `shell_command` regex `\$\([^)]+\)` escalated to high by the 2-matches+entropy rule — blinding the agent mid-build (sessions 150/151 forensic). Every detection is still classified and logged via `_log_injection_detection`; the tool result passes through unchanged.
-- **Shell timeout: tighter default, truthful schema**: `GRC_SHELL_TIMEOUT` is set to 120 s (from 600) in `.env` — a hung command is killed visibly and recoverably instead of stalling the turn for 10 minutes — and `run_command`'s model-facing `timeout_seconds` description now states the resolved value (`Maximum seconds to wait (default: GRC_SHELL_TIMEOUT, 120s)`) instead of a hardcoded "600s", so the schema can no longer lie about the user-tunable knob. Long jobs keep the documented escapes: an explicit `timeout_seconds` per call, or `start_command` for unbounded background work. (The true root cause of the session-150 hang — the harness spawning commands with an open, never-written stdin pipe — is an upstream issue: anyio's unset `stdin` default is `PIPE`.)
-- **Cancelled-run salvage visibility**: `_clean_message_history_for_new_turn` now logs a warning whenever it drops a response carrying unprocessed tool calls, ending the silent divergence between the canonical history blob (popped) and the step-store snapshots (which retain the calls) that made session-forensics tool-call counts undercount.
+- **Default Ollama Cloud model**: Updated default to `deepseek-v4-flash:0731` across settings, fallbacks, and integration tests.
+- **Scientific rules & commandments rewrite of `AGENTS.md`**: Structured `AGENTS.md` around empirical verification, standard library usage, single-branch git workflows, and native GRC invariants.
+- **C++ catalog block priority & EPB NumPy slice vectorization**: Mandated standard C++ VOLK-vectorized catalog blocks by default and required NumPy slice vectorization in Embedded Python Blocks (`epy_block`).
+- **Streamlined system prompts and tool docstrings**: Reduced prompt and tool docstring footprints by ~42%, eliminating parameter duplication, hardcoded command lists, and aligning sandbox descriptions.
+- **SDR hardware permissions streamlined**: Recommended package udev rule reloads (`uhd-host`, `rtl-sdr`, `hackrf`) over broad group additions.
+- **Silenced embedding ingestion context truncation warnings**: Reduced `_cap_words` and `fit_to_context` logs from WARNING to DEBUG during vector database ingestion.
+- **Indirect prompt-injection defense switched to detect-and-log**: Configured `block_high_risk=False` to log detections without withholding results, preventing false positives on documentation JavaScript boilerplate.
+- **Shell timeout: tighter default, truthful schema**: Set default `GRC_SHELL_TIMEOUT` to 120s and dynamically reflected the configured timeout in `run_command`'s schema description.
+- **Cancelled-run salvage visibility**: Added warning logs in `_clean_message_history_for_new_turn` when unfulfilled tool calls are discarded.
 
 ### Fixed
-- **Stale zoom projection after tab switch**: GRC stores zoom per DrawingArea and a tab switch never fires the zoom choke point, so the chat could keep projecting the previous tab's zoom; the page-switch handler now re-projects the foregrounded page's zoom.
-- **Composer chooser could silently never appear** on Wayland sessions (portal failure with no fallback) — fixed by the in-app chooser above.
 
-- **Ollama Cloud has its own model slot again**: the v0.1.5 backend consolidation had collapsed `ollama_local` and `ollama_cloud` onto one shared `ollama_model`/`OLLAMA_CHAT_MODEL` setting, so switching to Ollama Cloud silently sent the local quantized model name (e.g. `qwen3.6:35b-a3b-q4_K_M`) to `ollama.com/v1`. Cloud now resolves its dedicated `ollama_cloud_model`/`OLLAMA_CLOUD_MODEL` slot (default now `deepseek-v4-flash:0731`, matching the scenario fallback in `agent.py`), each provider remembers its own model across switches, and the Settings placeholder advertises the cloud-tier name.
-- **Catalog distance semantics & distance honesty**: Omitted the `distance` key on non-vector lexical rows (`distance is None`) in `render_catalog_block` and `ingest.py`, eliminating misleading fabricated `0.0` values while retaining true cosine distances on vector-evaluated candidates and fused scores in hybrid mode.
-- **Flowgraph validation retry error message**: Removed misleading `(or set force=True if they are unresolvable)` suggestion from `validate_flowgraph_state` retry prompt, ensuring the model resolves genuine graph errors rather than getting trapped in retry loops.
-- **`output_truncated` now exists — and can fire — on the docs domain**: `query_docs` previously omitted the key entirely and, passing no over-fetch, could structurally never report truncation; the model had no "more results exist" signal on docs. Both `query_knowledge` domains now pass `extra_limit=1`, surface at most `limit` entries (docs slices its joined answer — the spare rowid is a truncation probe, never an extra chunk), and copy the engine-computed boolean. Truncation stays exact under hybrid fusion (per-index over-fetch, flag computed from the full fused pool).
-- **`run_command`'s schema no longer hardcodes the timeout default**: the model-facing `timeout_seconds` description derives from the resolved `GRC_SHELL_TIMEOUT` value, so changing the knob in `.env` keeps the schema truthful.
-- **Catalog rendering no longer floods the terminal with GRC's expected variable-eval noise**: rendering any of the 7 stock variables (`json_config`, `yaml_config`, `variable_file_filter_taps`, `variable_ldpc_encoder_def`, `variable_adaptive_algorithm`, `variable_modulate_vector`, `variable_struct`) inside the one-block dummy flowgraph makes `FlowGraph._reload_variables` fail by design ("tolerant of evaluation failures") and upstream `log.exception` flooded stderr via `logging.lastResort` on every rebuild and every query rendering one into top-k. The gnuradio.grc logger level is now raised for the render only and restored after — real GRC diagnostics during actual flowgraph load/run are unaffected. Also fixed: an unknown block id now returns `None` from `render_catalog_block` (the `except KeyError` was dead — `FlowGraph.new_block` never raises).
+- **Stale zoom projection after tab switch**: Re-projected foregrounded page zoom upon switching tabs.
+- **Composer chooser on Wayland**: Replaced native portal chooser with in-app dialog to prevent silent failures on Wayland.
+- **Dedicated Ollama Cloud model slot**: Separated `ollama_cloud_model` setting from local `ollama_model` so provider switches retain distinct model selections.
+- **Catalog distance semantics & distance honesty**: Omitted `distance` key on non-vector lexical results instead of emitting misleading `0.0` values.
+- **Flowgraph validation retry error message**: Removed misleading `force=True` suggestion from retry messages to prevent unresolvable loops.
+- **`output_truncated` probe on docs domain**: Added `extra_limit=1` probe to `query_docs` to accurately report truncation flags under lexical and hybrid search.
+- **Truthful `run_command` schema timeout default**: Derived `timeout_seconds` schema description directly from resolved `GRC_SHELL_TIMEOUT`.
+- **Variable evaluation noise in catalog rendering**: Temporarily suppressed `gnuradio.grc` logger during catalog rendering to eliminate stderr noise from expected variable evaluation failures; returned `None` for missing block IDs.
 
 ## [0.5.0] - 2026-08-26
 
 ### Added
-- **Unified flowgraph execution tool**: Consolidated `run_flowgraph` and `stop_flowgraph` into a single domain tool [`run_flowgraph(action='start'|'stop', wait=True, timeout_seconds=60.0)`](src/grc_agent/agent.py). Dynamic conditional approval via Pydantic AI's native `ApprovalRequired()` gates `action='start'` before RF/hardware execution, while `action='stop'` executes ungated immediately.
-- **Flowgraph execution boundary & shell tool grounding**: Added explicit system prompt invariants and Pydantic AI tool descriptions in `run_flowgraph_func` and `GrcShellToolset` (`run_command`/`start_command`) clarifying that flowgraphs must be executed via `run_flowgraph` (which compiles and generates the latest Python code from the in-memory graph and streams to GRC console) rather than via shell tools (which execute stale/un-compiled scripts on disk and bypass console logging).
-- **`run_flowgraph` bounded-run auto-stop (`stop_after_seconds`)**: an optional runtime budget for `action='start'` + `wait=True` — the flowgraph is stopped automatically once it has run that many seconds without finishing on its own, one call instead of the start-then-stop pair (the old pattern forced two calls: `start` → `still_running` → `stop`, or a `wait=False` start the model had to remember to stop — a leaked process, possibly transmitting RF). The kill reuses the exact `stop_flowgraph()` native Stop path the toolbar button takes (SIGTERM) and reports `status='stopped_after_timeout'` with the return code; the timer runs on the existing unified loop via `exec_monitor.wait_for_run_end` — no background-task machinery, and the start marker fires synchronously inside Execute so the budget is measured from the run's own start. Deliberately opt-in (`default: null`): an enforced default would silently kill long GUI captures unless the model remembered to override it — a silent dead run is worse than the visible leaked one it prevents. Rejected up front (`ModelRetry`) when combined with `wait=False` (the call returns before anything could enforce the deadline) or a non-positive value; a run that finishes on its own right at the deadline reports the real `completed` outcome instead of a stop that never happened. `timeout_seconds` is ignored while the budget is set. Schema, system-prompt guidance, and AGENTS.md updated; 5 new hermetic tests.
+
+- **Unified flowgraph execution tool**: Consolidated start and stop actions into single domain tool [`run_flowgraph(action='start'|'stop', wait=True, timeout_seconds=60.0, stop_after_seconds=...)`](src/grc_agent/agent.py) with conditional approval gating for `start`.
+- **Flowgraph execution boundary & shell tool grounding**: Instructed agent to execute flowgraphs exclusively via `run_flowgraph` to ensure live in-memory compilation and console streaming, discouraging stale script execution via shell tools.
+- **Bounded-run auto-stop (`stop_after_seconds`)**: Added optional runtime deadline to `run_flowgraph(action='start', wait=True)` that cleanly terminates the flowgraph via SIGTERM after the specified duration, returning `status='stopped_after_timeout'`.
 
 ### Removed
-- **Removed `search_conversation_history` & `ConversationSearch`**: Deleted the capability and tool from both executor and planner, eliminating snapshot search overhead and keeping message histories direct and lossless.
-- **Removed `read_tool_result` & `ToolOutputLimits`**: Deleted output spill handles and slice-reading indirection.
-- **Removed redundant live-cloud compaction test**: Deleted slow 140s cloud test in favor of the existing 100% hermetic compaction test suite.
+
+- **Removed `search_conversation_history` & `ConversationSearch`**: Eliminated snapshot search indirection in favor of direct message history.
+- **Removed `read_tool_result` & `ToolOutputLimits`**: Deleted output spill handles and slice-reading tools.
+- **Removed redundant live-cloud compaction test**: Replaced slow cloud test with hermetic test suite.
 
 ### Changed
-- **Focused System Prompts on 7 Domain Tools**: Refined `prompts.py` to instruct exclusively on our 7 custom domain tools (`inspect_graph`, `query_knowledge`, `generate_python`, `change_graph`, `run_flowgraph`, `get_run_log`, `save_block`), removing hand-written tool lists in favor of Pydantic AI's automatic JSON schemas.
-- **Single Provider-Adaptive Web Search**: Verified unified `WebSearch` capability resolving cleanly per backend (native `web_search` or fallback `duckduckgo_search`) with zero tool shadowing.
+
+- **Focused System Prompts on 7 Domain Tools**: Centered `prompts.py` on the 7 custom domain tools, relying on automatic JSON schemas instead of manual tool lists.
+- **Single Provider-Adaptive Web Search**: Unified `WebSearch` capability across providers with automatic fallback to DuckDuckGo.
+- **Dead code removal**: Deleted unused `get_project_dir`/`set_project_dir`, `get_state_lock`, `_compute_ranks`, and `ApprovalCard.get_tool_call_id`.
+- **Consolidated preflight endpoint table**: Unified fixed-endpoint provider configurations into `_PREFLIGHT_ENDPOINTS` in `agent_factory.py`.
+- **Flowgraph execution boundary deduplicated**: Consolidated flowgraph execution rules across prompt clauses and shell tool descriptions.
+- **Planner allowlist and Mode toggle updates**: Added `web_search` to planner tools and clarified Auto mode coverage across flowgraph edits, runs, and shell commands.
+- **Documentation drift corrected in `AGENTS.md`**: Updated layout, validity gate, and approval mode documentation to match implementation.
+- **Agent-facing schemas compressed**: Reduced tool description footprints from 3,907 to 3,347 characters across `change_graph`, `generate_python`, `query_knowledge`, and `run_flowgraph`.
+- **Unified secret resolution (`settings.resolve_key`)**: Centralized environment variable and settings secret lookup logic into a single helper.
 
 ### Fixed
-- **Block-name badges no longer render as superscript in chat prose.** GTK3
-  child-anchor widgets are top-aligned and stretch to the full line box, with
-  the label text centered inside that stretched box — so the pill text rode
-  ~4px above the surrounding sentence baseline (measured: label center 11.5px
-  vs text center ~15.2px). The proposed `rise`-tag fix does nothing (measured
-  0px movement), and CSS padding on the `EventBox` is ignored by GtkBin. The
-  anchored badge now wraps its label in a `Gtk.Box` with `padding-top: 4px`
-  (GtkBox respects CSS padding), landing the label center within 0.2px of the
-  text baseline; table-cell badges keep the plain centered look. Regression
-  test measures the alignment numerically against the TextView's own font
-  baseline.
-- **`validate_flowgraph_state` no longer blames the agent for denied or rolled-back edits.** The turn-end validity gate previously armed on ANY `change_graph` ToolCallPart — including approval-card denials (the tool body never ran) and failed/rolled-back calls — so an invalid graph the USER created before the turn would `ModelRetry` the agent for it. It now arms only on calls that actually executed (`ToolReturnPart.outcome == 'success'`) plus the `rollback_failed` double-fault marker (the one failure path that can leave a mutated graph). Gated on pydantic-ai 2.31.0 semantics (denial normalizes to `outcome='denied'`; tool retries leave a no-outcome `RetryPromptPart`), grounded via context7 + pydantic.dev docs.
-- **`run_command`'s model-visible schema no longer lies about the timeout default.** The harness docstring hardcodes `"(default: 30)"`; the app's real default is `GRC_SHELL_TIMEOUT` → 600s. `_apply_exec_approval` now corrects the `timeout_seconds` parameter description in-place (`Tool.description` and `function_schema` are separate fields — verified the mutation reaches every `tool_def` read).
-- **exec_monitor: silent no-ops and stale suppression flags.** `wait_for_run_end` gains an `epoch` parameter — the run tool captures the run counter before triggering Execute, so a silent no-op (disabled Gio action) reports `not_started` instead of the previous run's stale `completed`. The `agent_initiated` suppression flag is now dropped when no start marker fires (`mark_run_agent_initiated_cancelled` + an `is_tracking` check in the proxy) instead of lingering to wrongly suppress a later user-run failure notification. Race-free: the start marker fires synchronously inside the Execute action.
-- **Chat auto-scroll intent is tracked on the vadjustment, not wheel events.** The old `scroll-event` handler only saw wheel events — GTK3 emits none for scrollbar thumb dragging or keyboard scrolling (keybindings write the adjustment directly), so a user who scrolled up by dragging the bar or pressing PageUp kept `_auto_scroll = True` and the next streaming flush yanked them back to the bottom. `_on_scroll_value_changed` is now connected to the vadjustment's `value-changed` and recomputes stickiness from the scroll position on every change — one uniform rule for every scroll source (wheel, drag, keyboard, touch/kinetic). This is safe against streaming: `value-changed` fires only for the `value` property, while content growth only fires `changed`, so appends can never corrupt the intent flag (verified against the GTK3 docs' signal semantics). The 50-line `_on_user_scroll` wheel-direction/SMOOTH special-casing was deleted.
-- **Expanding a thinking/tool container no longer scrolls the chat elsewhere.** GTK3 anchors the viewport to the adjustment *value*, so a row growing above the fold pushes every visible row down — clicking an expander in an older message visibly jumped the conversation. The shared `_on_expander_toggled` handler now compensates: after a synchronous re-layout it shifts the value by the toggled row's bottom-edge delta when the row ends at/above the viewport top, so the visible content stays anchored (the same compensation Polari applies to prepended log entries — verified via its commit history); at/below the fold no compensation is needed, and users pinned to the bottom still get the expansion revealed. The old "`_auto_scroll = False` on expand" hack — which permanently killed follow until a manual bottom-scroll — is gone; the two byte-identical expander callbacks are unified.
-- **`_listbox.check_resize()` never re-laid-out rows (fixed at all 6 call sites).** Verified empirically: `Gtk.ListBox.check_resize()` compares its requisition against its viewport-fixed allocation and only *queues* a resize, so rows never re-allocate through that path — the original code's "force immediate re-measure" was a no-op. `self._scrolled.check_resize()` re-allocates the scrollable child synchronously, which is what makes the post-toggle allocation read in the expander compensation valid.
-- **Appending rows no longer force-scrolls the view.** `_add_message_row` and `_replace_streaming_turn` dropped `force=True` — previously every tool expander/error label added mid-turn yanked a user reading earlier content to the bottom. New rows now follow the same stickiness gate as streaming; sending a message still re-engages follow explicitly in `send_message()`, and full rebuilds (`_render_history`) still force. Regression coverage: the old `test_tool_expander_disables_auto_scroll` (which encoded the removed hack) is replaced by three new tests — expand-toggles-keep-intent, anchor compensation with real widget allocations under xvfb, and intent tracking on direct adjustment changes.
 
-### Changed
-- **Dead code removed** (verification round A, all confirmed zero-callers): `settings.get_project_dir`/`set_project_dir`, `NativeFlowgraphProxy.get_state_lock`, `fs_tools.set_project_dir_provider`, `adapter/layout._compute_ranks` (incl. its `adapter/__init__` re-export), and `ApprovalCard.get_tool_call_id`. Tests re-pointed (`test_layout` → `_compute_layout_model(...).ranks`; project-dir assertion → `get_env_value("GRC_PROJECT_DIR")`; shell cwd test → monkeypatch).
-- **One endpoint table instead of three** (`agent_factory.py`): `_PREFLIGHT_ENDPOINTS` now carries every fixed-endpoint provider (openrouter/openai added) as (URL template, key var, header builder); the duplicated `_OPENAI_SHAPED_PROVIDERS` dict is deleted and `_OPENAI_SHAPED_PROVIDER_IDS` is derived from the single table; the hand-built Google URL and the two 3-way `/models`-suffix expressions are replaced by the table + one `_models_url()` helper. Behavior spot-checks pass.
-- **Flowgraph-execution boundary deduplicated** (×5 → 3): the invariant "run flowgraphs only via `run_flowgraph`, never shell scripts" now lives in the system prompt's Execution & Diagnostics clause plus the two shell tool descriptions; the duplicate prompt clause and the duplicated docstring paragraph were removed.
-- **Planner allowlist += `web_search`** (defensive; native tools bypass `PrepareTools` today). **Mode toggle tooltip/accessible name** now state that Auto covers flowgraph changes, runs, and shell commands.
-- **AGENTS.md drift corrected** (4 claims): `_compute_ranks` deleted → production uses `_compute_layout_model`/`LayoutModel`; the validity-gate description now says conversation-wide (run ids change per deferred-approval resume) and outcome-gated; `get_state_lock` mention removed; the Mode-toggle "only way to approve everything" claim corrected — any non-shell card's 'Always accept' also persists the global gate (backlog item 6's documented design).
-- **Agent-facing schemas compressed** (verification round B, R3–R5): the model-visible tool descriptions shrank 3,907 → 3,347 chars. `change_graph` 788 → 514 (phase-order enumeration moved into a code comment — backend detail the model never needs; kept atomic-batch, approval, `auto`-resolution, and `force` semantics), `generate_python` 593 → 480 (failure modes condensed), the `k` argument descriptions in `query_knowledge`/`generate_python` shortened inline (a shared constant is not expressible in docstring-derived descriptions), and `run_flowgraph`'s probe-before-run paragraph reduced to a pointer at the system prompt (the strategy lives there once).
-- **`settings.resolve_key`** — one uniform "where do secrets come from" rule replacing the repeated `get_env_value(X) or os.environ.get(X)` idiom at 5 call sites (provider key reads, compaction override, sidebar probe).
-
+- **Block-name badges baseline alignment**: Wrapped anchored `BlockBadge` labels in `Gtk.Box` with 4px top padding, aligning pill text with surrounding TextView prose baselines.
+- **Validation gate attribution**: Configured `validate_flowgraph_state` to trigger only on successful tool executions (`outcome == 'success'`) or double-fault rollbacks, preventing retries for pre-existing graph errors or denied actions.
+- **Truthful shell timeout schema**: Corrected `run_command` schema to describe real `GRC_SHELL_TIMEOUT` (600s default) rather than harness default 30s.
+- **`exec_monitor` state tracking**: Added run `epoch` tracking to `wait_for_run_end` to detect no-op runs and reliably cleared agent-initiated suppression flags.
+- **Unified scroll intent tracking**: Bound auto-scroll tracking directly to vadjustment `value-changed` signals, supporting wheel, scrollbar drag, and keyboard navigation while deleting 50 lines of event-specific heuristics.
+- **Viewport anchoring on expander toggle**: Compensated vadjustment shifts when expanding thinking or tool containers above the fold, keeping visible content stable.
+- **Synchronous scroll child allocation**: Replaced ineffective `_listbox.check_resize()` calls with `self._scrolled.check_resize()` across 6 call sites for reliable allocation measurements.
+- **Preserved scroll position on message append**: Dropped forced bottom-scrolling on `_add_message_row` and `_replace_streaming_turn`, adhering to active user scroll position.
 
 ## [0.4.0] - 2026-08-26
 
 ### Added
-- **Flowgraph execution tools** (`run_flowgraph`/`stop_flowgraph`): the agent triggers GRC's native Execute/Stop — the exact toolbar path — with output streaming to the GRC console where the user watches it live, and reads results back via `get_run_log`. Running is approval-gated (`requires_approval=True`, same native deferred-tool mechanism as `change_graph`) because it may transmit RF on connected hardware; stopping is the safe direction and ungated. `exec_monitor` gained a run-completion event (`wait_for_run_end`) and an agent-initiated flag that suppresses the redundant follow-up failure-notification turn when the tool result already reported the failure; `get_run_log` now always reports `run_in_progress` (with a note while a run is live, since the retained log then belongs to the previous run). Pre-gates replicate GRC's own handler conditions (unsaved page, already-running, invalid graph) because a disabled `Gio` action is a silent no-op and the unsaved path would open a modal Save-As that blocks the unified loop. GUI flowgraphs run until stopped: the tool returns `started` with `wait=False` and the prompt teaches the run/poll/stop pattern, making the probe-verification strategy (probe blocks -> run -> read log) fully autonomous in one turn.
-- **Shell execution capability** (`shell_tools.py`, executor-only): the harness `Shell` toolset narrowed to this app — commands run in the configured project directory (dynamic per spawn, same providers as the file sandbox; unset root gates with the same actionable error), `run_command`/`start_command` require user approval showing the full literal command, and long jobs get background start/check/stop tools with automatic process-group cleanup at run end. Policy is a DENYLIST, not an allowlist: the harness's destructive defaults stay denied (user-tunable via `GRC_SHELL_DENIED_COMMANDS`/`GRC_SHELL_TIMEOUT`) while every engineering command (cmake/make/python3/gr_modtool, uhd_*/SoapySDRUtil/rtl_* SDR CLIs, project scripts, pipes) stays available — risk is managed by consent granularity, not by forecasting command names. Environment scrubbing is derived from the app's provider catalog (covers both Ollama keys and groq/mistral/cohere/xai, which the harness's `LLM_API_KEY_ENV_PATTERNS` misses). The planner stays structurally read-only (fail-closed allowlist).
-- **Session-scoped shell prefix-allow**: shell approval cards offer "Always allow `<command>`" for the first token (approve `cmake` once, the rest of the build flows without nagging) — scoped to the current chat session only, never persisted, leaving the global Manual/Auto gate untouched. Non-shell cards keep the persisted "Always accept".
-- **Generic approval cards**: `ApprovalCard` now renders per-tool titles and summaries (`format_tool_summary`) — the literal fenced command for shell tools, intent lines for `run_flowgraph`, the existing structured diff for `change_graph`, and one uniform per-argument bullet list for anything else.
-- `adapter.gui_actions()` accessor: imports GRC's gui `Actions` namespace via the canonical Platform-first order — importing `Actions` directly into a fresh interpreter hits an upstream circular import (Actions -> Dialogs/Utils -> Bars -> partially-initialized Actions).
-- Grounding notes for the autonomous-loop future (backlog item 4): vision-model probe design, V1 data-plane screenshot capture, and the file-RAG tool boundary (a separate bounded query tool, never a patch inside `read_file`).
-- **Untitled graph save defaults to the project directory**: `Ctrl+S` on a new (untitled) flowgraph now opens GRC's own Save-As dialog pre-pointed at the sidebar's configured project directory (`GRC_PROJECT_DIR`), instead of GRC's arbitrary default folder. Implemented by seeding GRC's native `SaveFlowGraph` dialog class for the untitled case only — the entire native save flow (dialog, id rename, recent-files, `page.saved`/`grc_file_path`) still runs unmodified, with no duplicated handler logic and no new modal `.run()` in our code. Uniformly covers `Ctrl+S`, `Ctrl+Shift+S`, and File → Save As; already-named graphs keep GRC's own "start in the file's folder" behavior.
-- **Untitled Save-As starts in the project directory**: GRC's own Save-As dialog is seeded with the sidebar's configured work directory for new, never-saved graphs (Ctrl+S proposes the project folder instead of GRC's arbitrary default) — one uniform rule, enforced by swapping `FileDialogs.SaveFlowGraph` for a thin subclass that only seeds the default folder; the native save flow, id rename, recent-files bookkeeping, and `page.file_path`/`page.saved` handling all stay GRC's own.
-- **Layout: per-component row bands + crossing minimization** (`adapter/layout.py`): the flow band now gives each weakly-connected component its own row band (independent chains no longer interleave in shared columns with wires threading through each other's blocks), same-rank blocks are ordered by a bounded barycenter crossing-minimizer (8 sweeps), and the rank/order model is computed once per batch (`LayoutModel`) and shared between the add-blocks ordering and the full relayout — no second grandalf pass.
+
+- **Flowgraph execution tools (`run_flowgraph`/`stop_flowgraph`)**: Enabled the agent to trigger GRC's native Execute/Stop actions with console output streaming, approval gating on start, and post-run log retrieval via `get_run_log`.
+- **Sandboxed shell execution capability (`shell_tools.py`)**: Added project-directory-rooted shell tools (`run_command`, `start_command`, `check_command`, `stop_command`) with denylist security, full-command approval cards, background job management, and API key environment scrubbing.
+- **Session-scoped shell prefix-allow**: Allowed users to "Always allow `<command>`" by prefix token for the current chat session without altering persistent global approval settings.
+- **Generic approval cards**: Rendered clear approval summaries in `ApprovalCard` (fenced shell commands, flowgraph run intent, structured graph diffs).
+- **`adapter.gui_actions()` accessor**: Centralized GRC `Actions` namespace imports in platform-first order to avoid upstream circular dependencies.
+- **Untitled graph save defaults to project directory**: Configured Ctrl+S and Save-As on untitled flowgraphs to default to the configured `GRC_PROJECT_DIR`.
+- **Per-component Sugiyama layout (`adapter/layout.py`)**: Arranged connected flowgraph components into independent row bands with 8-sweep barycenter crossing minimization and shared `LayoutModel` caching.
 
 ### Changed
-- **Full-canvas auto-arrange is now a proper Sugiyama layout with per-component row bands** (`adapter/layout.py`): one grandalf pass (`_compute_layout_model`) ranks every block AND runs grandalf's own `Layer.order` crossing-minimizing barycenter sweeps per weakly-connected component, returning a `LayoutModel` (ranks + per-component ordered layers) that is computed once per `change_graph` batch and reused for both `add_blocks_sorted` and `compute_full_layout(model=...)` — never a second grandalf pass. `_place_flow_components` then gives each connected component its own row band starting again at the left margin (column = rank × `GRID_W`, rows in the crossing-minimized order), replacing the old single shared vertical stack where two independent chains interleaved in the same columns and their wires threaded through each other's blocks. Determinism is explicit, not incidental: grandalf's discovery/initial layer order walks Python sets (identity-hash order, varies between processes), so components are sorted by first member and every layer is alphabetically sorted before the sweeps — two independent runs produce byte-identical coordinates. A component grandalf's `init_all` refuses contributes no ranks and lands in a deterministic alphabetical fallback band instead of silently missing a coordinate. `ROW_GAP = GRID_H` between bands keeps one collision assumption for the whole canvas. Invocation is unchanged: still event-driven from inside `change_graph` after every topology-changing batch — never a tool or manual action. The old single-shared-stack `_order_flow_band` was deleted; `_compute_ranks` remains as a thin wrapper for tests.
+
+- **Sugiyama full-canvas auto-arrange**: Replaced shared vertical stack with per-component horizontal bands, ensuring deterministic alphabetical sorting and untangled wiring.
 
 ### Fixed
-- **Layout crash on skip-layer connections (`'DummyVertex' object has no attribute 'data'`)**: Grandalf's Sugiyama layout splits multi-rank edges ($\Delta\text{rank} > 1$) by inserting intermediate `DummyVertex` routing objects that lack a `.data` attribute. `_rank_and_order_component` (`adapter/layout.py`) previously sorted layers by `v.data` directly, throwing an unhandled `AttributeError` on any branching topology that skipped a layer. Layer sorting now accesses vertex data defensively (`getattr(v, "data", "")`), barycenter sweeps are guarded against unexpected ordering failures, and `change_graph` (`adapter/graph.py`) isolates cosmetic layout computations so that any unexpected layout exception falls back to default grid coordinates instead of rolling back the flowgraph mutation.
-- **Manual edits after saving an untitled graph were never auto-synced**: saving an untitled graph in place (or Save-As to a new path) changes `page.file_path` without firing `switch-page`, so `last_disk_hash` stayed `None` and the 1.5s safety-net poll's `sync_manual_edit` early-return silently dropped every later manual edit for that tab. The poll now tracks the path it baselined and re-baselines on any path change — one uniform rule ("baselines follow the page's path").
+
+- **Layout crash on skip-layer connections**: Handled grandalf's intermediate `DummyVertex` routing objects safely by using `getattr(v, "data", "")` during layer sorting.
+- **Manual edit synchronization after saving untitled graphs**: Re-baselined manual edit tracking on `page.file_path` changes, preventing dropped canvas change detection after initial saves.
 
 ## [0.3.2] - 2026-08-25
 
 ### Added
-- **Direct AST Markdown Renderer (`markdown-it-py` `SyntaxTreeNode`)**: Replaced the intermediate HTML generation and BeautifulSoup (`bs4`) DOM parser with a direct recursive AST walker into `Gtk.TextBuffer` tags and native GTK widgets. Removed `beautifulsoup4` dependency.
-- **Native GTK3 List Typography & Hanging Indents**: Replaced manual whitespace prefixes with centralized `Gtk.TextTag` indentation (`left_margin=24`, `indent=-16`), ensuring wrapped list continuation lines align with the bullet text across arbitrarily nested depths and ordered steps (`1.`, `9.`, `10.`, `100.`). Contiguous tag coverage spans all embedded `BlockBadge` child anchor characters (`U+FFFC`).
-- **Normalized Vertical Rhythm & Loose Lists**: Consolidated structural block boundary newlines so list items and paragraphs emit single structural newlines with GTK text tag spacing (`pixels_above_lines`/`pixels_below_lines`), eliminating redundant blank lines and oversized gaps at list-to-block transitions while supporting multi-paragraph loose lists.
-- **Search Mode Tool Indicator**: Settled `query_knowledge` tool expander titles dynamically display the active search mode (`⚙ query_knowledge (vector) ✓` or `⚙ query_knowledge (lexical) ✓`).
-- **Stream Pacing & Timing Instrumentation**: Added monotonic timing fields (`queue_wait_ms`, `flush_duration_ms`, `pending_chunks`, `pending_chars`) in `_flush_streaming()` to diagnose streaming pacing without artificial debouncing or timers.
-- **Human-in-the-loop flowgraph-change approval** via pydantic-ai's native `requires_approval=True` deferred-tool mechanism: `change_graph` calls never execute before the user approves. Each proposed edit shows an in-chat `ApprovalCard` with the model's required one-line `reason`, a uniform structured summary of the change (rendered as Markdown bullets — no raw JSON), and Approve / Deny / Always-accept actions. The gate persists in `.env` (`GRC_AGENT_APPROVE_CHANGES`, default `ask`) and is re-enabled any time via the new `Mode` toggle under the composer (Manual = ask, Auto = apply without asking). Denial feeds back to the model natively (`ToolDenied`); the same turn resumes automatically after the decision.
-- `change_graph` now requires a `reason: str` argument (one-sentence intent) shown to the user in the approval card and echoed into the success payload, so the persisted transcript carries the edit's intent next to its outcome.
-- The layout gate became one uniform rule: any `change_graph` batch that changes topology (`add_blocks`/`remove_blocks`/`add_connections`/`remove_connections`) re-ranks and relayouts the whole flowgraph — a later wire-only call now heals the stale alphabetical stack that add-then-wire editing previously froze.
-- RCA hardening (backlog item 9): ports now expose `vlen` when ≠ 1 in both `inspect_graph` and catalog results (turns the opaque "8 vs 8192" item-size puzzle into vlen 1024 vs vlen 1); retry-budget turn deaths render a friendly continuation message instead of pydantic-ai's developer-aimed "Consider raising the max retry limit" text; chat CodeBlock + prose TextViews gained GTK3-native 3px inter-line spacing (with the code-block height pin updated to include per-line spacing); the prompt gained a formatting rule (lists as Markdown lists, fences for code only).
-- System prompt: failed-fix counter-strategy (never repeat a failed fix; re-inspect and reconsider topology), external-grounding nudge for concepts local knowledge can't cover, the QT GUI freq-sink-owns-its-FFT quirk, and the approval/reason contract.
+
+- **Direct AST Markdown Renderer**: Replaced intermediate HTML and BeautifulSoup parsing with a direct `markdown-it-py` `SyntaxTreeNode` recursive AST walker into `Gtk.TextBuffer` tags and widgets.
+- **Native GTK3 List Typography & Hanging Indents**: Replaced manual whitespace prefixes with `Gtk.TextTag` margin indentation (`left_margin=24`, `indent=-16`) for consistent multi-line list alignment across nesting depths.
+- **Normalized Vertical Rhythm & Loose Lists**: Consolidated structural block boundary newlines using GTK tag line spacing (`pixels_above_lines`/`pixels_below_lines`).
+- **Search Mode Tool Indicator**: Displayed active search mode in `query_knowledge` tool headers (`vector` vs `lexical`).
+- **Stream Pacing & Timing Instrumentation**: Added monotonic timing fields (`queue_wait_ms`, `flush_duration_ms`, etc.) to diagnose streaming performance.
+- **Human-in-the-loop flowgraph-change approval**: Integrated Pydantic AI deferred-tool approvals for `change_graph`, presenting in-chat `ApprovalCard` widgets with diffs, reason display, and Manual/Auto mode toggling.
+- **Explicit edit reason requirement**: Required a `reason: str` argument on `change_graph` calls to capture edit intent in the transcript.
+- **Topology-driven full relayout**: Automatically re-ranked and relaid out the entire flowgraph whenever a mutation altered graph topology.
+- **Context-aware port vlen inspection**: Exposed `vlen` on ports when not equal to 1 in `inspect_graph` and catalog results to clarify vector sizing.
+- **System prompt guidance improvements**: Added guidance on recovering from failed fixes, consulting external documentation, and QT GUI frequency sink FFT properties.
 
 ### Changed
-- **Icon-based copy buttons** on code blocks and chat messages (compact, tooltip feedback instead of text swap), and the chat column chrome constant reduced 140 → 36 px — bubbles are wider with more reading width, empirically verified hbar-free at 320–1000 px window widths.
-- Standardized footer typography and font sizes (`0.92em`) across toggle buttons and status labels.
+
+- **Icon-based copy buttons & reduced chrome**: Replaced text swap copy buttons with compact icon buttons on code blocks and messages, narrowing sidebar horizontal chrome from 140px to 36px.
+- **Standardized footer typography**: Unified button and label font sizing to `0.92em` across toggles.
 
 ### Fixed
-- Fixed PyGObject segfaults caused by background `GLib.timeout_add` timers on destroyed copy buttons in `CodeBlock` and message rows.
+
+- **PyGObject timer segfaults**: Cleaned up active `GLib.timeout_add` timers when copy buttons in `CodeBlock` and message rows were destroyed.
 
 ## [0.3.1] - 2026-08-24
 
 ### Added
-- **Native GTK3 System & Dark/Light Theming**: Full 3-way theme switching (`System Default`, `Dark (Black)`, and `Light`) with 1-click header toolbar toggle and Settings Dialog dropdown; dynamically pairs installed system dark themes (`Yaru-dark`, `Adwaita-dark`) with symbolic `@theme_*` palette variables and automatic Pygments syntax highlighting (`monokai` on dark, `friendly` on light) derived from background relative luminance.
-- Planning state is now durable per saved chat session through the harness `SqlitePlanStore`, co-located with `chat_sessions.db`; plans survive turns, restarts, and agent/provider live-swaps, while ungrouped runs remain in memory and session delete/clear/prune operations cascade plan rows.
-- Automatic and manual compaction now preserve the complete pre-compaction transcript—including emitted `ThinkingPart` reasoning—in unbounded StepPersistence snapshots inside the same user-exported database, so compacted session history remains usable without sacrificing fine-tuning data.
-- A separate, manually selected Planner agent now shares the current chat history and durable plan store with the GRC executor. Its model-visible surface is structurally read-only (`PrepareTools` plus only `write_plan`/`read_plan`), its reasoning/tool activity persists under the `grc_planner` identity, and a compact `Plan` toggle supports both empty-session planning and explicit mid-session plan revision.
-- Successful planner turns that call `write_plan` now produce an in-chat `Implement the Plan` action after the UI verifies the session's `SqlitePlanStore` is non-empty. Clicking it automatically flips to GRC-Agent and sends a visible implementation request; merely finishing a response or reading a plan does not trigger the action, and execution never starts without the click.
+
+- **Native GTK3 System & Dark/Light Theming**: Added 3-way theme switching (`System Default`, `Dark (Black)`, `Light`) with dynamic Pygments syntax highlighting matching theme luminance.
+- **Durable SQLite plan storage (`SqlitePlanStore`)**: Co-located persistent planning state in `chat_sessions.db` to survive turns, restarts, and provider swaps.
+- **Transcript preservation during compaction**: Preserved full pre-compaction history including `ThinkingPart` reasoning in `StepPersistence` SQLite snapshots.
+- **Dedicated Planner agent mode**: Introduced read-only Planner agent (`write_plan`/`read_plan`) with durable plan creation and distinct session identity.
+- **"Implement the Plan" action handoff**: Added in-chat action button on completed plans to transition execution to GRC-Agent.
 
 ### Changed
-- Color-coded `Agent` (Blue `#3584e4`) / `Planner` (Orange `#e66100`) toggle button with clear mode indicators replacing the old switch.
-- Streamlined project selector ("Browse" button with downward menu expansion) and moved "Delete all sessions" action inside recent sessions view.
-- The GTK chat welcome screen is denser and sidebar-safe: smaller one-row quick prompts, two-line ellipsized recent-session rows, long-name width bounds, and clearer composer/message boundaries reduce the measured minimum width from 562 px to 472 px while preserving full details in tooltips.
-- Session durability tests are named for the active StepPersistence architecture (`test_session_persistence*.py`), and the known-issues document now contains only unresolved defects instead of retaining fixed provider and indexing history.
-- The main GRC executor no longer has any planning capability or planning tools. Approved plans are injected read-only from `SqlitePlanStore` through a cache-safe ephemeral `SystemReminders` handoff; switching back from Planner mode never auto-executes.
-- Planner mode and manual compaction now live beside the Context readout under the composer instead of in the top toolbar. A native switch is paired with an explicit `Planner active`/`GRC-Agent Active` label; the old refresh-icon compaction affordance is replaced by a `Compact` text button with a default-No confirmation explaining summarization and retained transcript snapshots.
-- The composer is taller (64px minimum, growing to 160px), and the header now presents active graph plus provider/model in flexible bordered badges with middle ellipsis and full tooltips. The Context row also displays Pydantic AI's native persisted USD cost for the latest turn (aggregating all model requests around tool calls) when every response is priceable, or `Cost: NA` when the framework returns `None`; no local price table or partial estimate is used.
+
+- **Color-coded agent mode indicators**: Added blue (`Agent`) and orange (`Planner`) mode toggle buttons.
+- **Streamlined Welcome Screen & project selector**: Reduced sidebar minimum width from 562px to 472px with compact prompt chips and two-line ellipsized session rows.
+- **Executor planning separation**: Removed planning capabilities from the executor agent, injecting approved plans via read-only system reminders.
+- **Relocated planner and compaction controls**: Moved Planner toggle and `Compact` button beneath the composer with explicit status labels.
+- **Dynamic composer height and turn cost display**: Increased composer height range (64–160px) and added per-turn USD cost display from native framework metrics.
 
 ### Fixed
-- Code blocks collapsed to a 46px porthole — height-pinned scroll area fixed with clean vertical expansion and Pygments dynamic token styling.
-- Provider failures now surface the real cause: turn errors extract the provider's JSON error message from the httpx response/body chain (e.g. "Invalid API key provided" instead of a bare status line), and a missing API key for the configured cloud provider is caught before the turn with a clear "Open Preferences (Ctrl+,) to configure" message instead of a confusing model error. The model-build error from startup/live-swap is carried into the sidebar and shown when a turn is attempted.
-- Near-100% CPU during long reasoning streams: every `ThinkingPartDelta` tried to close a nonexistent text part, which force-flushed and laid out the entire growing thought on every delta (with the reciprocal defect on text deltas). Stream accumulation is now chunked and append-only, nonexistent parts are true no-ops, collapsed thinking does no hidden GTK layout work until close, and expanded thinking refreshes at 4 Hz. A deterministic 196,608-character reproduction dropped from 20.7 CPU-seconds to 0.057 seconds while preserving every character.
-- Removed the misleading tok/s display. Pydantic AI 2.31 exposes native token counts and cost but no generation-duration/throughput metric; streamed `ModelResponse.timestamp` records first-chunk time for the OpenAI-compatible path, not stream completion. The previous calculation divided reasoning-inclusive Ollama output by roughly TTFT, producing impossible values such as 3,381 tok/s.
-- Thinking-only provider-limit failures no longer poison active history with unusable repetition. A structurally identified `finish_reason='length'` + thinking-only response is archived losslessly in a session-scoped StepPersistence snapshot, removed from active context, and replaced with an actionable error. Executor reminders now reinforce exact tool-grounded schema lookup instead of schema recall from memory.
-- Transcript copying is reliable after turn completion: only the temporary streaming row is rebuilt, older selections and transcript focus survive, explicit `Copy` text buttons copy complete messages, table cells are selectable, and dragging across a markdown link no longer opens it. Cross-widget selection remains a GTK limitation, so the per-message Copy action is the complete-message path.
+
+- **Code block scroll clipping**: Enforced vertical scroll expansion and fixed code block height clamping.
+- **Clear provider API error extraction**: Extracted structured JSON error messages from HTTP error responses (e.g. invalid API keys or quota limits).
+- **CPU optimization during reasoning streaming**: Batched `ThinkingPartDelta` streaming appends, reducing long-thought CPU overhead from 20.7s to 0.057s.
+- **Removed misleading generation rate display**: Removed inaccurate tok/s calculation derived from first-chunk timestamps.
+- **Length-limit truncation recovery**: Safely archived `finish_reason='length'` reasoning responses to prevent poisoned repetition loops.
+- **Reliable message transcript copying**: Ensured full-message copy actions cleanly capture markdown and code blocks without widget selection conflicts.
 
 ## [0.3.0] - 2026-08-19
 
 ### Added
-- **Filesystem tools** (`fs_tools.py`, a harness `FileSystemToolset` subclass — pydantic-ai-harness 0.23): eight sandboxed tools (`read_file`, `write_file`, `edit_file`, `list_directory`, `search_files`, `find_files`, `create_directory`, `file_info`) scoped to the active flowgraph's project folder, re-resolved per tool call (tab switches and saves are followed; unsaved tabs gate with a clear "save first" error). `.grc` files never reach the model as raw XML — `read_file` routes them through the structural `inspect_graph` engine (active file from the live in-memory graph, others headlessly) — and can never be written: `change_graph` owns all flowgraph edits, and one uniform name rule (case-insensitive `.grc`, covering `.GRC` and `.grc~` backups) drives both read routing and the write gate, which is re-checked against the symlink-resolved target. `write_file`/`edit_file` accept source/config formats only (`.py .cmake .txt .md .m .json .yml/.yaml C/C++ .xml .conf .rst .i` — OOT-module-ready), write atomically (temp → fsync → rename) with `expected_hash` conflict detection, and require an existing parent directory. Secret/config paths denied outright at root and nested (`.env`/`.env.*`/`.envrc`/`.grc_agent/`/`.git/`), on top of the harness-protected defaults. Reads capped at 1000 lines, listings at 200 entries.
-- **Indirect prompt-injection defense** (`PromptInjectionDefender`, `stackone-defender` tier-1 pattern detection over every client-executed tool result): the agent ingests untrusted text (project files, web content) and can write files, so a high/critical-risk result is withheld and replaced with a short notice; flags are logged. Live-verified end-to-end: an injection payload planted in a project file — via `read_file` or surfaced by a `search_files` grep — never reaches the model's message history.
-- **Oversized tool outputs spill losslessly** (`ToolOutputLimits`, default `Spill(then=Truncate())` band at 10k chars): the full payload is persisted under `.grc_agent/tool_overflow` (0700, alongside the chat DB) and replaced with a handle + bounded head/tail preview; a new `read_tool_result` tool reads slices back on demand (`offset`/`limit`/`from_end`/`pattern`). A 20k-char tool return no longer re-floods context on every later request, and nothing is silently dropped.
-- **Twelve-provider support, live-swappable**: Ollama (local) and Ollama Cloud, OpenRouter, OpenAI, any OpenAI-compatible endpoint, plus pydantic-ai's dedicated native classes for Anthropic (Claude), Google (Gemini), Groq, Mistral, Cohere, and xAI (Grok) — and ChatGPT Plus/Pro (Codex) via OAuth. Legacy `.env` provider values are normalized on load; each provider has its own model env var and API-key var, fixed-endpoint providers show their URL read-only, and the Settings dialog's model Load button lists what the backend actually serves for every provider. Changes apply immediately on Save (agent rebuilt in place, chat history preserved), with the active provider shown live in a toolbar badge; a model the backend doesn't list (or an unreachable backend) is a non-blocking status-bar warning backed by one bounded HTTP probe — never a modal popup.
-- **Adopted pydantic-ai-harness capabilities in place of hand-rolled layers**: `StepPersistence` on a `SqliteStepStore` co-located with the chat DB (per-run events and full-history snapshots at every settled tool boundary — crash-mid-turn resume points, session-scoped cascade cleanup) and the `Planning` capability (`write_plan`/`read_plan`/task tools with a cache-safe reminder tail). The old `trace.py`/`turn_traces` layer is gone.
-- **Compaction targets the model's REAL context window**: the trigger threshold is 85% of the window probed from the backend itself (Ollama `/api/show` `num_ctx`, OpenRouter/OpenAI `/v1/models`, Codex `context_window`) instead of hardcoded 24k/96k guesses; the pricing registry remains only a fallback. `GRC_COMPACTION_TARGET_TOKENS` is the absolute override.
-- **Consolidated search architecture (RAG packaging)**: knowledge-base search is two first-class options — default **Lexical Search** (instant SQLite FTS5/BM25 keyword search, zero external dependencies or background processes) and **Local Vector Search** (in-tree `llama.cpp` + `EmbeddingGemma-300M-QAT` over a private UNIX socket, one-click install from Settings, nothing system-wide). Each backend gets its own database file (never one model's vectors in another's index), vector ingest is all-or-nothing (a failed embed never leaves a silently partial index), and an unreachable embeddings backend falls back to lexical search with a clear status message.
-- `ResilientSummarizingCompaction` and a manual `Compact` action: summarizes aging turns when approaching context limits while preserving all user prompts (`keep_user_messages=True`) and degrading gracefully (history unchanged) if summarization fails — verified against the harness source, a summary failure escalates to the zero-LLM sliding-window tier instead of failing the turn.
-- `ConversationSearch` over `SnapshotHistorySource(store)`: the agent can search prior turn snapshots even after context compaction.
-- Continuous prose grouping in `MarkdownView`: contiguous markdown paragraphs, headings, and lists stream into a single `Gtk.TextBuffer` for unified selection and natural paragraph spacing.
+
+- **Sandboxed filesystem tools (`fs_tools.py`)**: Added 8 project-directory sandboxed tools (`read_file`, `write_file`, `edit_file`, `list_directory`, `search_files`, `find_files`, `create_directory`, `file_info`). Routed `.grc` file reads through `inspect_graph`, blocked raw `.grc` file writes, enforced atomic writes with hash checks, and denied access to secret paths (`.env`, `.git`).
+- **Indirect prompt-injection defense (`PromptInjectionDefender`)**: Integrated pattern scanning over tool results to detect and log high-risk content.
+- **Lossless oversized tool output spilling (`ToolOutputLimits`)**: Spilled tool outputs exceeding 10k characters to `.grc_agent/tool_overflow` with retrieval handles via `read_tool_result`.
+- **Twelve live-swappable LLM providers**: Added support for Ollama (local/cloud), OpenRouter, OpenAI, OpenAI-compatible backends, Anthropic, Gemini, Groq, Mistral, Cohere, Grok, and ChatGPT Codex OAuth.
+- **`pydantic-ai-harness` capabilities adoption**: Integrated `StepPersistence` on SQLite and `Planning` capabilities.
+- **Model-calibrated context compaction**: Calibrated compaction triggers to 85% of dynamically probed backend context limits.
+- **Consolidated dual-backend search architecture**: Provided default Lexical Search (SQLite FTS5/BM25) and optional Local Vector Search (bundled llama.cpp + EmbeddingGemma over UNIX socket) with automatic fallback.
+- **Resilient summarizing compaction**: Summarized aging conversation turns while preserving all user messages.
+- **Historical conversation search**: Added `ConversationSearch` over pre-compaction session snapshots.
+- **Continuous prose markdown grouping**: Grouped contiguous markdown elements into single `Gtk.TextBuffer` instances for natural selection and spacing.
 
 ### Changed
-- Role-appropriate planning, filesystem, and web tools surface through harness capabilities — the app now rides `pydantic-ai-harness` 0.23 (upgraded from 0.21 for the `list_directory` result cap and symlink-hardened walker authorization).
-- Unbounded snapshot retention (`max_snapshots_per_run=None`) across all settled tool boundaries so `ConversationSearch` always has a pre-compaction snapshot.
-- Settings dialog simplified to the two search backends with inline status and one-click installation triggers.
-- Fast test suite reorganized from a 5056-line `test_unit.py` god file into a clustered minimal suite (adapter graph/layout/RAG, sidebar, canvas, factory, sessions, fs tools, injection defense).
+
+- **Upgraded to `pydantic-ai-harness` 0.23**: Adopted upstream improvements for path traversal defenses and directory listing caps.
+- **Unbounded snapshot retention**: Enabled unbounded snapshot persistence across tool boundaries for full historical searchability.
+- **Simplified search settings**: Streamlined Settings dialog around the two search backends with one-click installer triggers.
+- **Decomposed unit test suite**: Split monolithic 5,056-line `test_unit.py` into modular, domain-focused test suites.
 
 ### Fixed
-- `ClearToolResults` evicted small mid-turn answers (a ~100-token catalog answer was blanked within a tool call or two, making the model re-ask the same question up to 18 times): now keeps the last 3 tool-call/return pairs and only clears when the clearable set reclaims at least 2000 tokens.
-- `Ctrl+,` crashed on every keypress (`Gdk.KEY_Comma` does not exist in GTK3).
-- Ghost vertical gaps below chat markdown paragraphs in GTK3: unallocated initial listbox widths (`allocated_width <= 1`) forced a 160px wrap calculation and excessive height allocations.
-- Widget fragmentation in markdown rendering: specialized containers (`CodeBlock`, `TableBlock`) stay distinct while contiguous plain prose consolidates.
-- Filesystem sandbox gaps found by two adversarial audits and re-verified by a third independent auditor (all closed with live repros, no regressions): nested secret files readable, `.grc` write bypass via in-root symlink, case-variant `.GRC`/`.grc~` raw-source leaks, ModelRetry text interpolating arbitrary file content, and missing-`.grc` reads reporting a parse error instead of File-not-found.
+
+- **Preserved recent tool outputs in `ClearToolResults`**: Retained last 3 tool-call/return pairs and required a minimum 2,000 token reclaim threshold before clearing.
+- **GTK3 Preferences shortcut crash**: Resolved `Gdk.KEY_Comma` crash on `Ctrl+,`.
+- **Unallocated markdown widget gaps**: Fixed excessive vertical spacing caused by unallocated initial widget widths.
+- **Widget fragmentation in markdown**: Consolidated contiguous prose into single text buffers while isolating specialized code and table containers.
+- **Filesystem sandbox hardening**: Resolved security vulnerabilities regarding nested secrets, symlink traversal, case-insensitive `.grc` leaks, and missing-file errors.
 
 ## [0.2.0] - 2026-08-17
 
 ### Added
-- `save_block` tool: exports an existing Embedded Python Block (`epy_block`) instance into GNU Radio's native hier-block library (`~/.grc_gnuradio`) as a standalone, reusable catalog block — available to `change_graph` in this flowgraph or any other. Not an out-of-tree (OOT) module; the current flowgraph's own `epy_block` instance is left untouched.
-- Tiered context compaction via `pydantic-ai-harness`'s `TieredCompaction` capability: when a conversation approaches the context budget, bulky older tool-return contents (e.g. `inspect_graph` JSON payloads, `generate_python` previews) are cleared to a short placeholder first — keeping the last 2 tool-call/return pairs intact — and only if that isn't enough does a sliding window trim the oldest dialogue (preserving the first user message). Target threshold defaults to 24k tokens for local Ollama models (~75% of a 32k window) and 96k for cloud providers, overridable via `GRC_COMPACTION_TARGET_TOKENS`. Per-turn reasoning traces in `turn_traces` are unaffected — they record the full uncompacted events in memory.
-- System prompt now teaches a native runtime-verification strategy: wire a diagnostic block (`blocks_probe_rate` → `blocks_message_debug`, or a signal-magnitude probe) into a flowgraph before asking the user to run it, then read `get_run_log` — since a zero exit code doesn't guarantee correct output.
-- System prompt now nudges the agent to consult `query_knowledge` (catalog domain) for casual/symptom-described requests (e.g. "remove the gaps", "make it smoother") before concluding no fix exists.
-- ChatGPT Plus/Pro (Codex) as a third provider: OAuth sign-in with PKCE against `auth.openai.com` (loopback callback on port 1455 with a manual-paste fallback), tokens stored 0600 under `~/.config/grc_agent/openai-codex-auth.json` (never in `.env`), a thin `OpenAIResponsesModel` subclass that only adds the OAuth bearer, the three Codex headers, and a subscription-limit error taxonomy, and reasoning summaries requested so thinking parts populate the trace.
-- Optional local llama.cpp + EmbeddingGemma embedding runtime (`embed_runtime.py` + Settings dialog provisioning): downloads a pinned llama.cpp build and the EmbeddingGemma GGUF into `~/.local/share/grc-agent` (hash-verified, path-traversal-safe extraction, glibc/musl platform gate before download), serves `/v1/embeddings` on a UNIX socket in a 0700 directory, and is stopped on app exit. Nothing is installed system-wide; an existing `llama-server` on `PATH` is reused.
-- Model picker in Settings: an editable dropdown with a Load button that lists the models the configured backend actually serves (Ollama `/api/tags`, OpenAI `/v1/models`, ChatGPT `/codex/models`) — no more guessing model ids by hand.
-- Context label now shows `tokens / context-window` (resolved per provider) plus the last turn's generation rate in tok/s, taken from the persisted trace row so the displayed and stored numbers cannot disagree.
-- Ubuntu 26.04 / Python 3.14 support: `event_loop.py` picks PyGObject's in-tree `gi.events` (>= 3.50) and falls back to `gbulb` (Ubuntu 24.04), with CI running a 24.04 + 26.04 matrix.
-- `docs/known-issues.md`: defects found in review, each with a verified observation and a proposed fix.
+
+- **Hier-block library export (`save_block`)**: Enabled exporting Embedded Python Blocks (`epy_block`) to GNU Radio's reusable block library (`~/.grc_gnuradio`).
+- **Tiered context compaction (`TieredCompaction`)**: Integrated harness compaction to prune bulky older tool results before trimming dialogue turns.
+- **Runtime verification prompting**: Added system prompt guidance for inserting diagnostic probe blocks and inspecting execution logs.
+- **Catalog query nudges**: Encouraged consulting catalog knowledge for symptom-based troubleshooting before concluding no fix exists.
+- **ChatGPT Plus/Pro (Codex) provider**: Added OAuth PKCE sign-in for ChatGPT accounts with secure token storage and reasoning summary extraction.
+- **Bundled local embedding runtime**: Added downloadable llama.cpp + EmbeddingGemma runtime served over local UNIX socket.
+- **Settings model catalog loader**: Added dynamic model listing from provider endpoints directly into the Settings dropdown.
+- **Real-time context and throughput readout**: Displayed live token usage against model context limits along with generation speed in tok/s.
+- **Ubuntu 26.04 & Python 3.14 support**: Supported PyGObject in-tree `gi.events` with fallback to `gbulb` on older platforms.
+- **Added `docs/known-issues.md`**: Documented verified codebase issues and planned remediations.
 
 ### Changed
-- New dependency: `pydantic-ai-harness>=0.21.0` (tiered context compaction capability).
-- The embeddings backend is now chosen independently of the chat provider (`GRC_EMBED_BACKEND`: `auto` | `ollama` | `llamacpp` | `openai_compatible`) — a chat endpoint that speaks the OpenAI API need not serve `/v1/embeddings`, and coupling the two silently degraded `query_knowledge` to lexical search. Vector-DB filenames are keyed on the backend so switching never queries one model's index with another model's vectors.
-- `change_graph`'s `add_blocks` phase now relays out the *entire* flowgraph from scratch on every batch that adds a block, not just the new block: variables/options/imports/snippets pack into an alphabetically-sorted header band (options pinned first), everything else flows below via rank-ordered placement. Fixes new variables landing mid-signal-path (they never had wire-connection neighbors to anchor from). Only ever triggered by `change_graph`; manual canvas edits are untouched.
-- Integration scenario harness (`agent.py`'s `check_expect`) gained a mode-agnostic `tools_called` expectation field, generalized from the previous hardcoded read-tool-name check, so any scenario can assert a specific tool was actually invoked by the model.
+
+- **Added `pydantic-ai-harness>=0.21.0` dependency**: Adopted harness tiered context compaction.
+- **Independent embeddings backend configuration**: Decoupled `GRC_EMBED_BACKEND` from the active chat provider.
+- **Full canvas relayout on block addition**: Re-arranged all flowgraph blocks into sorted header bands and rank-ordered flow bands upon adding blocks.
+- **Integration scenario tool assertions**: Added generalized `tools_called` checks to scenario test expectations.
 
 ### Fixed
-- The status line's tok/s rate was computed from the LAST model response's output tokens over the WHOLE turn's wall time — undercounting multi-request turns (each response's output was dropped) and tool-heavy turns (tool-call latency inflated the denominator). It now uses the run's own aggregated output tokens (pydantic-ai's `run.usage`, which sums every request in the turn) minus hidden reasoning tokens, over the time the model was actually generating — computed **natively** from pydantic-ai's own `ModelRequest`/`ModelResponse` high-precision timestamps (the delta per request/response pair; tool execution happens between pairs and is excluded by construction; `result.new_messages()` scopes it to this run only, so prior turns can't leak in). The trace row's `output_tokens`/`reasoning_tokens`/`total_tokens` also come from `run.usage`, and `generation_ms` is a new `turn_traces` column (schema v2→v3 migration, existing rows default to 0) so the displayed rate and the persisted row can never disagree.
-- `save_block_to_library` no longer accepts a `gui_platform` parameter that rebuilt the GNU Radio block registry a second, redundant time on every successful live save — `NativeFlowgraphProxy.save_block()` already calls `NativeCanvasManager.reload_block_library()` afterward, which rebuilds it (and refreshes the visible block panel) on its own.
-- Silently partial vector indexes: a single mid-build embed failure used to leave a `vec0` table over a fraction of the corpus that still reported `search_mode: "vector"`. The index is now all-or-nothing; any failure discards the partial embeddings and builds lexical-only.
-- The EmbeddingGemma task prefix was applied to every backend (it keyed on `provider != "openrouter"`, a string `load_settings()` can no longer return). It now keys on the resolved embedding model, applied identically at ingest and query.
-- Crash on content-free `ThinkingPartDelta`s (Codex emits them around its reasoning summaries): `content_delta` is Optional and appending `None` killed the turn.
-- `change_graph`'s rollback could itself raise on GNU Radio 3.10.12 (whose `import_data` calls `validate()` itself), replacing the structured error with a traceback; reverts now go through `_revert_flow_graph`, which reports a `rollback_failed` error instead of raising.
-- Two ChatGPT sign-in races: the callback server now binds both loopback families (a dual-stack `localhost` resolves to `::1` first), and `_cancel_task` never cancels the task it runs in (which killed its own token exchange mid-flight).
-- Settings dialog `show_all()` no longer re-shows widgets the per-provider sync had hidden (the Ollama Cloud checkbox leaked into the OpenAI-compatible view).
-- `ensure_server()` is serialized: concurrent cold-start embedding fans-out used to race several llama-servers onto one socket and the survivor answered every request "unauthorized".
+
+- **Accurate generation throughput calculation**: Calculated generation tok/s from aggregated output tokens over active model execution time; added `generation_ms` database column.
+- **Redundant block registry rebuilds**: Prevented duplicate block library indexing during `save_block_to_library`.
+- **Atomic vector index building**: Discarded partial vector tables on embedding failure, falling back completely to lexical indexing.
+- **Embedding task prefix scoping**: Scoped EmbeddingGemma task prefixes strictly to the resolved model.
+- **Empty reasoning delta crash**: Handled empty `ThinkingPartDelta` objects from Codex safely.
+- **Revert error handling on GNU Radio 3.10.12**: Caught exceptions during `import_data` rollback and reported structured `rollback_failed` errors.
+- **ChatGPT OAuth callback server races**: Bound callback server to both IPv4 and IPv6 loopback addresses and prevented task self-cancellation.
+- **Hidden widget leakage in Settings**: Prevented `show_all()` from exposing provider-specific widgets across different provider views.
+- **Serialized embedding server startup**: Serialized `ensure_server()` to prevent socket collisions during concurrent embedding initialization.
 
 ### Removed
-- `_find_block_placement`, the old per-new-block spiral-search placement function, deleted outright now that `compute_full_layout` replaced its only caller.
+
+- **Deleted `_find_block_placement`**: Removed obsolete spiral-search placement helper in favor of `compute_full_layout`.
 
 ## [0.1.5] - 2026-08-15
 
 ### Added
-- Universal OpenAI-compatible backend support (`OpenAIChatModel` + `OpenAIProvider`) covering OpenRouter, llama.cpp / llama-server, vLLM, LM Studio, OpenAI, Groq, and custom endpoints.
-- Settings dialog options for Ollama Cloud toggle (automatic `https://ollama.com/v1` endpoint handling and key management) and default local Ollama URL (`http://localhost:11434`) with optional customization.
+
+- **Universal OpenAI-compatible backend support**: Added support for OpenRouter, llama.cpp, vLLM, LM Studio, OpenAI, Groq, and custom endpoints via `OpenAIChatModel` and `OpenAIProvider`.
+- **Settings dialog Ollama Cloud controls**: Added Ollama Cloud endpoint toggle and configurable local Ollama URL.
 
 ### Changed
-- Consolidated provider configuration into two unified native categories: `ollama` (local / cloud) and `openai_compatible` (OpenRouter, llama.cpp, vLLM, etc.).
-- Upgraded dependencies to latest releases, including `pydantic-ai` 2.31.0 and `openai` 3.1.0.
-- Streamlined RAG embedding client and SQLite FTS5 lexical fallback logic to seamlessly handle the consolidated endpoints.
+
+- **Consolidated provider taxonomy**: Grouped providers into unified `ollama` and `openai_compatible` native categories.
+- **Dependency upgrades**: Upgraded `pydantic-ai` to 2.31.0 and `openai` to 3.1.0.
+- **Streamlined RAG embedding and lexical search**: Unified embedding client and FTS5 fallback across all configured endpoints.
 
 ## [0.1.4] - 2026-08-14
 
 ### Fixed
-- Fixed an `UnboundLocalError` on `dst_port` in `change_graph` (Phase 7) when looking up non-existent destination ports or blocks, which previously caused the mutation to fail with an internal Python error instead of returning clear, actionable port connection diagnostic messages.
-- Fixed session lockout caused by saving unfulfilled `ToolCallPart` instances into `_message_history` when turns failed or were cancelled mid-stream. Added `_clean_message_history_for_new_turn()` to strip trailing unprocessed tool calls before new agent runs, auto-repairing existing corrupted sessions and preventing PydanticAI `UserError: Cannot provide a new user prompt when the message history contains unprocessed tool calls.`.
+
+- **UnboundLocalError on missing port lookup**: Resolved `UnboundLocalError` on `dst_port` in `change_graph` when destination blocks or ports are missing, returning actionable diagnostics.
+- **Unprocessed tool call session lockouts**: Stripped trailing unfulfilled `ToolCallPart` instances from message history on failed or aborted turns via `_clean_message_history_for_new_turn`.
 
 ## [0.1.3] - 2026-08-14
 
 ### Added
-- Per-turn reasoning traces: every agent turn (success, abort, or error) is now
-  recorded as a row in a new `turn_traces` SQLite table — run/conversation ids,
-  provider/model/base_url snapshot at turn start, system-prompt hash, user
-  prompt, origin flowgraph, timings, the ordered event stream (part starts,
-  tool calls with args, tool results, errors), final output, and per-turn token
-  usage (input/output/reasoning/total). Traces cascade-delete with their
-  session and can never resurrect after a Clear History.
-- WAL journal mode, `busy_timeout`, and `foreign_keys` pragmas on every
-  chat-DB connection — session/trace writes (worker threads) can no longer
-  hit "database is locked" against main-loop reads.
-- Versioned DB schema: a `_meta(schema_version)` table with ordered, idempotent
-  migrations (v1 adds the `first_message` column, v2 adds `turn_traces`);
-  existing databases migrate in place on first launch.
-- Two new hermetic test suites: `tests/test_session_traces.py` (23 tests) and
-  `tests/test_session_traces_advanced.py` (16 tests — real pydantic-ai
-  `TestModel` agent runs, multi-thread concurrency stress, Unicode/large-blob
-  integrity, v1→v2 migration, and end-to-end ChatSidebar → trace-row coverage).
-- CI now installs xvfb and runs the session/trace suites alongside the unit
-  tests.
+
+- **Per-turn reasoning traces (`turn_traces`)**: Recorded detailed per-turn event streams, prompts, system prompt hashes, timings, and token metrics into SQLite.
+- **Hardened SQLite concurrency settings**: Configured WAL mode, `busy_timeout`, and foreign keys across chat database connections.
+- **Versioned database schema migrations**: Added `_meta(schema_version)` table with automated, idempotent migrations.
+- **Hermetic session and trace test suites**: Added `test_session_traces.py` and `test_session_traces_advanced.py`.
+- **CI xvfb test execution**: Configured xvfb in CI to run GTK session and trace suites headlessly.
 
 ### Changed
-- Message-history serialization now uses pydantic-ai's builtin
-  `ModelMessagesTypeAdapter.dump_json`/`validate_json` (single step, ~9%
-  smaller output) instead of the redundant `json.dumps(to_jsonable_python(...))`
-  double conversion; `ThinkingPart` reasoning, tool parts, usage, and
-  run/conversation ids all round-trip exactly.
-- The recent-sessions list reads a `first_message` column populated at save
-  time instead of re-deserializing each row's full messages blob.
-- Removed the one-time legacy `chat_sessions.db` path-migration code
-  (the relocation ran for all existing installs long ago).
+
+- **Pydantic AI message serialization**: Switched history serialization to native `ModelMessagesTypeAdapter.dump_json`/`validate_json`.
+- **Indexed recent session lookups**: Populated `first_message` column at save time for fast recent-session listing.
+- **Removed legacy DB path migration**: Deleted obsolete `chat_sessions.db` path relocation logic.
 
 ### Fixed
-- Hardened `init_db()` against concurrent first-run initialization with a
-  threading lock, and the v0→v1 migration now survives a crash between the
-  `ALTER TABLE` (auto-committed) and the `first_message` backfill
-  (the backfill is idempotent and re-runs on the next launch).
-- Recorder/trace wiring no longer feeds the trace recorder before the GTK
-  handlers, and a cancellation during the final trace save can no longer skip
-  the chat UI's busy-state cleanup.
+
+- **Concurrent DB initialization**: Protected `init_db()` with a threading lock and made v0→v1 schema migrations crash-resilient.
+- **Trace recorder timing and cancellation**: Ensured UI event handlers execute before trace recording and preserved UI cleanup on cancellation.
 
 ## [0.1.2] - 2026-08-01
 
 ### Added
-- Chat-to-canvas block highlighting: when an agent message mentions a flowgraph
-  block by name, it now renders as a rounded pill badge in the chat. Hovering
-  a badge outlines the corresponding block on the GRC canvas with a blue
-  border overlay (drawn via a second `draw` handler on GRC's own
-  `DrawingArea`, independent of GRC's native selection highlighting, which
-  gets reset on every canvas action); clicking a badge scrolls the canvas to
-  center that block. Prose markdown (paragraphs, lists, headings) now renders into a
-  `Gtk.TextView` with `GtkTextChildAnchor`-embedded badge widgets, replacing the
-  previous Pango-markup label path; code blocks and tables are unaffected.
-- OpenAI-compatible local server provider support (e.g., llama.cpp / vLLM) in
-  `settings.py`, `agent_factory.py`, and Preferences UI with custom base URL and
-  reasoning toggle configuration.
-- SQLite chat session persistence fallback for unsaved flowgraph tabs (`untitled:<page_title>`).
-- Persisting complete intermediate tool call history and error traces in `chat_sessions.db` on failed or aborted turns.
-- Real-time active context token usage label updates during streaming turns, featuring output and reasoning token breakdown tooltips.
-- System prompt connection validation guidance for GNU Radio stream fan-in (strictly 1 source per sink port) and vector itemsize matching.
-- Keyboard numeric keypad `Ctrl+0` (`Gdk.KEY_KP_0`) zoom reset support.
+
+- **Chat-to-canvas block highlighting**: Highlighted mentioned blocks with interactive pill badges that outline blocks on the GRC canvas and scroll into view on click.
+- **OpenAI-compatible local server provider**: Added settings and Preferences UI for local servers (e.g. llama.cpp, vLLM) with configurable base URLs and reasoning toggles.
+- **Session persistence for untitled tabs**: Supported SQLite session persistence for unsaved flowgraph tabs (`untitled:<page_title>`).
+- **Persisted intermediate tool calls on failure**: Saved complete intermediate tool calls and error traces on failed or cancelled turns.
+- **Real-time token usage indicator**: Added live active context token usage label with detailed tooltip breakdowns.
+- **Connection validation guidance in system prompt**: Added guidance for single-source sink ports and vector itemsizes.
+- **Numeric keypad zoom reset**: Supported `Ctrl+0` (`Gdk.KEY_KP_0`) for resetting canvas zoom.
 
 ### Fixed
-- Fixed tool expander jump-scrolling by connecting a `notify::expanded` listener that pauses `_auto_scroll` upon click.
-- Fixed thinking box readability by increasing max content height (from 250px to 500px), enlarging typography (1.0em), and expanding padding.
-- Enhanced `_format_turn_error()` to unpack structured JSON/dict error bodies returned by API providers (such as OpenRouter HTTP 403 quota limits) and expose underlying exception causes.
-- Fixed HTTP transport retry configuration in `_retrying_http_client()` by catching all `httpx.TransportError` subtypes.
-- Fixed agent message bubbles collapsing to a one-word-per-line column.
-  `Gtk.TextView` (unlike the `Gtk.Label` it replaced for prose rendering)
-  doesn't self-report a usable natural width for word-wrapped content, which
-  broke the message bubble's "hug the content" sizing. Bubbles now measure
-  their actual text via Pango and clamp to the available column width, and
-  re-clamp automatically on the sidebar's next layout pass.
+
+- **Paused auto-scroll on tool expander interaction**: Stopped chat auto-scrolling when users expand tool containers.
+- **Thinking box dimensions and typography**: Increased maximum content height to 500px, font size to 1.0em, and expanded padding.
+- **Detailed provider error formatting**: Unpacked structured JSON error bodies from HTTP responses in `_format_turn_error`.
+- **Comprehensive HTTP transport error handling**: Caught all `httpx.TransportError` subtypes in HTTP retry client.
+- **Gtk.TextView message bubble width collapse**: Measured Pango layout widths to ensure text bubbles hug content properly without horizontal collapse.
 
 ## [0.1.1] - 2026-07-22
 
 ### Added
-- Native agent context usage indicator under text input box displaying exact input context tokens and dynamic provider-reported maximum model context limits.
-- Dynamic API model context resolution (`resolve_model_context_length`) querying `/api/show` (Ollama / Ollama Cloud) and `/api/v1/models` (OpenRouter) with zero hardcoded lookup tables.
+
+- **Context token usage indicator**: Displayed active input context tokens and dynamic provider-reported limits beneath the input box.
+- **Dynamic model context length resolution**: Queried `/api/show` (Ollama) and `/api/v1/models` (OpenRouter) dynamically to resolve model context windows.
 
 ### Fixed
-- Fixed block layout wire criss-crossing and backward loops by enforcing topological rank sorting on `add_blocks` and `min_allowed_x` downstream placement boundaries in `layout.py`.
-- Fixed thinking expander sizing to expand 100% width and label transition ("Thinking..." -> "Thinked").
-- Fixed quick prompt chip handler and recent sessions list rendering in Welcome Screen.
-- Attached `_graph_modified_since_last_run` warning to `get_run_log` when called post-edit before a fresh run.
+
+- **Topological block layout ordering**: Enforced topological rank sorting and downstream placement boundaries to eliminate wire criss-crossing.
+- **Full-width thinking container**: Sized thinking container to 100% width and corrected state transition labels.
+- **Welcome screen rendering**: Fixed quick prompt chips and recent sessions rendering on the Welcome Screen.
+- **Modified graph warning on log inspection**: Added warning to `get_run_log` when inspecting logs of flowgraphs edited after the last run.
 
 ## [0.1.0] - 2026-07-18
 
 ### Added
-- SQLite FTS5/BM25 lexical fallback for `query_knowledge` (catalog and docs
-  domains): when the embedding backend is unreachable, results now come from
-  a local keyword search instead of a hard failure — including on a cold
-  cache where embeddings were never reachable at all. Every result is
-  tagged `search_mode: "vector" | "lexical"`, never silent.
-- Real, non-mocked Ollama Cloud integration tests covering the lexical
-  fallback end-to-end, plus a new scenario (`23_lexical_conjugate_insert`)
-  exercising the full agent loop under a genuine embedding-backend outage.
-- A `on_sync_failed` callback surfacing previously log-only manual-edit
-  auto-save failures through the sidebar's status bar.
-- `query_knowledge` now takes a model-controlled `k` parameter (how many
-  results to return; default 5, clamped 1-20) instead of a fixed count, so
-  the agent can widen or narrow recall per query.
-- `CHANGELOG.md` (this file).
+
+- **SQLite FTS5/BM25 lexical fallback for `query_knowledge`**: Automatically fell back to local keyword search when embeddings are unavailable, tagging results with `search_mode`.
+- **Ollama Cloud integration tests**: Added non-mocked integration tests and scenario (`23_lexical_conjugate_insert`) verifying the agent under embedding outages.
+- **Status bar sync failure notifications**: Surfaced manual-edit auto-save failures via `on_sync_failed` callback in the status bar.
+- **Configurable `k` parameter for `query_knowledge`**: Supported model-controlled result count `k` (1–20, default 5).
+- **Initial `CHANGELOG.md`**: Created project changelog following Keep a Changelog conventions.
 
 ### Fixed
-- The 1.5s canvas safety-net poll no longer re-serializes the entire
-  flowgraph on every tick — gated behind a cheap check of GRC's own
-  undo/redo `state_cache`, with a periodic backstop covering the two edit
-  paths that bypass it (found via adversarial testing: an undo-then-edit
-  tuple collision, and block-library drag-and-drop/Variable Editor
-  add-remove).
-- `ollama_cloud` with no API key configured used to silently proceed with a
-  placeholder credential and only fail on the first real chat call;
-  `agent_factory.py` now raises explicitly, degrading the same way
-  `openrouter` already did.
-- An unreadable `.env` (e.g. permission error) is now caught by the same
-  fallback path as a bad model config, instead of crashing at startup.
-- GNU Radio failing to load in `build_app()` (e.g. not installed, or a venv
-  created without `--system-site-packages`) now shows a native GTK error
-  dialog with a specific remediation hint, instead of a raw traceback.
-- Several narrow, previously-silent failure paths in `chat_sidebar.py` (a
-  Settings-dialog save failure, corrupted/locked session-DB reads on
-  tab-switch, an unrecoverable stuck "sending fix" UI state) now surface
-  through the existing status-bar/logging mechanisms instead of failing
-  invisibly.
-- The RAG embedding client had no request timeout (SDK default allowed up
-  to ~30 minutes worst-case); now bounded to the same order of magnitude as
-  the chat-model client.
-- An adversarially long/repetitive `query_knowledge` query could stall the
-  lexical fallback for tens of seconds; the FTS5 match expression is now
-  deduplicated and capped.
-- CI's test step referenced `tests/test_web_app.py`, deleted since the
-  native-GTK3 rewrite — corrected to the actual current test suite.
-- Fixed a native-method inconsistency in `change_graph`'s duplicate-name
-  check (manual scan → `flow_graph.get_block()`, matching every other
-  lookup in the file).
-- `AGENTS.md` updated in several places where documentation had drifted
-  from actual behavior (the RAG lexical fallback, the poll's state-cache
-  gate, `after_agent_edit()`'s scope, the exact `dotenv` API used).
+
+- **State-cached canvas safety-net poll**: Optimized 1.5s poll by checking GRC's `state_cache` before re-serializing the flowgraph.
+- **Explicit Ollama Cloud missing-key handling**: Raised explicit configuration errors instead of silently using placeholder keys.
+- **Resilient `.env` loading**: Handled unreadable `.env` files gracefully during startup.
+- **Native GTK error dialog on GNU Radio load failure**: Displayed actionable GTK error dialogs when GNU Radio fails to import.
+- **Surfaced silent sidebar failures**: Reported settings save errors, locked database reads, and stuck fix states through status bar and logs.
+- **Bounded RAG embedding client timeouts**: Added request timeouts to embedding client requests.
+- **Sanitized FTS5 search queries**: Deduplicated and capped FTS5 query terms to prevent search stalls on repetitive queries.
+- **Updated CI test suite path**: Updated CI configuration to reference the native GTK3 test suite.
+- **Consistent block lookup in `change_graph`**: Standardized duplicate block name checks to use `flow_graph.get_block()`.
+- **Aligned documentation in `AGENTS.md`**: Corrected documentation drift regarding RAG fallbacks, auto-save polling, and dotenv handling.
 
 ### Changed
-- `pydantic-ai`, `pydantic-graph` (fast-moving, used directly and deeply)
-  and `sqlite-vec` (still pre-1.0) now have upper version bounds.
-- CI and the documented local dev setup both use `uv sync --locked`
-  (stricter than the previous `--frozen` — also catches a `uv.lock` that's
-  drifted out of sync with `pyproject.toml`).
-- README's GNU Radio version claim tightened to reflect what's actually
-  tested (3.10.x via CI) rather than an unverified "3.10+".
+
+- **Upper version bounds on core dependencies**: Added upper version constraints for `pydantic-ai`, `pydantic-graph`, and `sqlite-vec`.
+- **Locked dependency synchronization**: Switched local and CI installation commands to `uv sync --locked`.
+- **Tested GNU Radio version specification**: Clarified supported GNU Radio version in README as 3.10.x.
 
 ### Removed
-- `docs/codebase_audit_report.md` — a point-in-time code-quality audit.
-  Every finding in it was individually re-verified against the current tree
-  (18 of 19 fixed and confirmed via passing regression tests; the one
-  remaining item was already documented, accepted debt) before removal;
-  the full re-verification is recorded in `docs/efficiency_audit.md`.
+
+- **Removed point-in-time audit report**: Deleted `docs/codebase_audit_report.md` after verifying fixes.
 
 ### Architecture
-- This is a GUI-only application by explicit design going forward — no CLI
-  surface (no subcommands, no `--check`/`--doctor`, no `argparse`). Startup
-  diagnostics are handled inside the GUI itself. Documented as a permanent
-  rule in `AGENTS.md`.
+
+- **GUI-only native desktop design**: Established single-entry-point native GTK3 desktop architecture without CLI subcommands, enforced in `AGENTS.md`.
