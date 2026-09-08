@@ -11,6 +11,7 @@ new sequencing.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import time
 from collections.abc import Awaitable, Callable
@@ -55,7 +56,7 @@ async def drain(sidebar, monitor, *, timeout: float = 120.0, wait_run_end: bool 
     no flowgraph run is tracking. The post-hook drain skips the tracking wait:
     stopping a still-running flowgraph is teardown's own first step."""
     tracking_fn = tracking or (lambda: getattr(monitor, "is_tracking", False))
-    deadline = time.monotonic() + timeout
+    deadline = time.monotonic() + timeout  # per-turn wall-clock budget (review)
     while True:
         remaining = max(0.1, deadline - time.monotonic())
         try:
@@ -101,15 +102,22 @@ async def send_or_fail(sidebar, message: str) -> None:
         raise RunnerContractError("send_message returned False on an idle sidebar")
 
 
-async def await_turn(sidebar, *, timeout: float = 1800.0) -> None:
-    """Await the full turn, including approval-resume loops."""
+async def await_turn(sidebar, *, timeout: float = 600.0) -> None:
+    """Await the full turn, including approval-resume loops, under an
+    explicit per-turn budget (review: one wedged turn must not block the
+    campaign for 30 minutes). On timeout the orphaned chat task is cancelled
+    and joined before the contract error propagates."""
     task = getattr(sidebar, "_chat_task", None)
     if task is None:
         raise RunnerContractError("no _chat_task after send_message")
     try:
         await asyncio.wait_for(asyncio.shield(task), timeout=timeout)
     except TimeoutError as e:
-        raise RunnerContractError("turn exceeded the await timeout") from e
+        if not task.done():
+            task.cancel()
+            with contextlib.suppress(BaseException):
+                await asyncio.wait_for(task, timeout=10.0)
+        raise RunnerContractError(f"turn exceeded the {timeout:g}s budget; orphaned chat task cancelled") from e
 
 
 def tree_hash(root: Path) -> str:

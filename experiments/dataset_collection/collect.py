@@ -233,7 +233,9 @@ async def run_task(  # noqa: C901 - one task, one linear contract
 
     try:
         while turn_idx < task.max_simulator_turns:
-            sim_turn = await simulator.next_turn(reply)
+            sim_turn = await asyncio.wait_for(
+                simulator.next_turn(reply), timeout=300.0
+            )  # per-simulator-call budget (review: bulkhead)
             repetition_flagged = repetition.observe(sim_turn.message)
 
             await drain(sidebar, monitor, tracking=tracking)
