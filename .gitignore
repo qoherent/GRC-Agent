@@ -61,4 +61,10 @@ docs/blog.md
 
 # pi harness local state (goals pool, loops, session ledgers)
 .pi/
-experiments/dataset_collection/fixtures/
+# Local-only dataset-collection harness and every trace it produces
+# (plan: docs/plans/2026-09-08-1627-feat-finetuning-dataset-collection-harness-plan.md).
+# The harness drives the real app unattended with shell access; it stays out
+# of the repository by design. Code, fixtures, campaign DBs, manifests and
+# exports are all local-only.
+experiments/dataset_collection/
+*.campaign/
