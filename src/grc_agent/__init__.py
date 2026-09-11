@@ -1,1 +1,1 @@
-"""Qoherent GRC Agent — a GNU Radio Companion editing agent built on PydanticAI."""
+"""RIA GRC-Agent — a GNU Radio Companion editing agent built on PydanticAI."""
