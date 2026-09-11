@@ -879,3 +879,98 @@ def test_notify_run_failure_names_spawn_failure():
 
     asyncio.run(_drive(1, False))
     assert "return code 1" in captured["prompt"]
+
+
+# --- Kill-escalation synthesis (stop escalation retains partial output) ---
+
+
+def _feed_start_and_output(monitor, output="running...\n"):
+    """Start a run and buffer output without delivering any terminal marker."""
+    monitor.handle_message("\nExecuting: /tmp/flow.py\n")
+    for ch in output:
+        monitor.handle_message(ch)
+
+
+def test_synthesize_retains_buffer_with_kill_disclosure():
+    import signal as _signal
+
+    monitor = ExecutionErrorMonitor(on_error=_noop)
+    _feed_start_and_output(monitor, "partial line 1\npartial line 2\n")
+    assert monitor.synthesize_terminal_state(signal=_signal.SIGKILL) is True
+    data = monitor.get_last_run_log()
+    assert data is not None
+    assert data["log_text"] == (
+        "\nExecuting: /tmp/flow.py\npartial line 1\npartial line 2\n"
+    )
+    assert data["return_code"] is None
+    assert data["terminated_by_kill"] is True
+    assert "signal 9" in data["termination_note"]
+    assert data["ran_successfully"] is False
+    assert data["run_in_progress"] is False
+    assert data["run_id"] == 1
+
+
+def test_synthesize_noop_when_not_tracking():
+    monitor = ExecutionErrorMonitor(on_error=_noop)
+    assert monitor.synthesize_terminal_state(signal=9) is False
+    assert monitor.get_last_run_log() is None
+
+
+def test_synthesize_empty_buffer_retains_empty_string():
+    monitor = ExecutionErrorMonitor(on_error=_noop)
+    monitor.handle_message("\nExecuting: /tmp/flow.py\n")
+    assert monitor.synthesize_terminal_state(signal=9) is True
+    data = monitor.get_last_run_log()
+    assert data is not None
+    # Empty string, never None: "ran, nothing captured" is distinct from
+    # "never ran" (which returns None, not a dict).
+    assert data["log_text"] == "\nExecuting: /tmp/flow.py\n"
+    assert data["return_code"] is None
+
+
+def test_synthesize_vanished_process_disclosure():
+    monitor = ExecutionErrorMonitor(on_error=_noop)
+    _feed_start_and_output(monitor, "some output\n")
+    assert monitor.synthesize_terminal_state(signal=None) is True
+    data = monitor.get_last_run_log()
+    assert data["terminated_by_kill"] is False
+    assert "without delivering its terminal marker" in data["termination_note"]
+    assert data["ran_successfully"] is False
+
+
+def test_synthesize_never_fires_failure_callback():
+    calls = []
+    monitor = ExecutionErrorMonitor(on_error=lambda code, log, _spawn_failed=False: calls.append((code, log)))
+    _feed_start_and_output(monitor, "boom\n")
+    monitor.synthesize_terminal_state(signal=9)
+    assert calls == []
+
+
+def test_natural_done_after_synthesis_ignored():
+    monitor = ExecutionErrorMonitor(on_error=_noop)
+    _feed_start_and_output(monitor, "before kill\n")
+    monitor.synthesize_terminal_state(signal=9)
+    # A late natural marker for the dead run must not overwrite the retained state.
+    monitor.handle_message("\n>>> Done (return code -9)\n")
+    data = monitor.get_last_run_log()
+    assert data["log_text"].endswith("before kill\n")
+    assert data["return_code"] is None
+    assert data["terminated_by_kill"] is True
+
+
+def test_natural_done_wins_race_over_synthesis():
+    monitor = ExecutionErrorMonitor(on_error=_noop)
+    _feed_run(monitor, "/tmp/flow.py", "clean exit\n", code=0)
+    assert monitor.synthesize_terminal_state(signal=9) is False
+    data = monitor.get_last_run_log()
+    assert data["return_code"] == 0
+    assert data["ran_successfully"] is True
+    assert "terminated_by_kill" not in data
+
+
+def test_run_id_advances_per_run():
+    monitor = ExecutionErrorMonitor(on_error=_noop)
+    _feed_run(monitor, "/tmp/flow.py", "first\n", code=0)
+    assert monitor.get_last_run_log()["run_id"] == 1
+    _feed_run(monitor, "/tmp/flow.py", "second\n", code=0)
+    assert monitor.get_last_run_log()["run_id"] == 2

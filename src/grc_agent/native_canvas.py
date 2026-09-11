@@ -1,12 +1,15 @@
 # ruff: noqa: E402
+import asyncio
 import contextlib
 import fcntl
 import hashlib
 import logging
 import math
 import os
+import signal
 import stat
 import tempfile
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Literal, NoReturn
@@ -63,6 +66,64 @@ def sidebar_font_multiplier(zoom_factor: float) -> float:
 # bounding the staleness window for those two gaps to a few seconds instead of
 # "until the next unrelated state_cache movement, or never."
 _POLL_FULL_CHECK_EVERY = 10  # ~15s at the 1.5s poll interval
+
+# Stop-escalation budgets (stop_flowgraph / _finish_bounded_run). The native
+# Stop path is SIGTERM-only with no wait and no escalation, and a wedged
+# shutdown used to wedge the run monitor forever. After the native 10 s wait
+# expires, the app waits one grace window for a natural exit, then SIGKILLs
+# and synthesizes the terminal state. Worst case inside one tool call:
+# 10 s native wait + grace + settle (~25 s).
+_KILL_GRACE_SECONDS = 10.0
+_KILL_SETTLE_SECONDS = 5.0
+
+# Frozen tool-level run-status vocabulary (plan: run-monitor remediation).
+# run_flowgraph/stop_flowgraph return only these status strings; kill or
+# crash provenance travels in disclosure fields, never in new statuses — the
+# collection harness's run acceptance allowlists this exact set, so any
+# addition silently condemns good sessions. The vocabulary-conformance tests
+# in both suites assert against this constant.
+_RUN_STATUS_VOCABULARY = frozenset(
+    {
+        "completed",
+        "still_running",
+        "not_started",
+        "not_running",
+        "started",
+        "stopped",
+        "stop_requested",
+        "stopped_after_timeout",
+    }
+)
+
+
+def _descendant_pids(pid: int) -> list[int]:
+    """PIDs of the process tree rooted at `pid`, children before parents.
+
+    Linux-only stdlib /proc walk. Used only when the flowgraph's direct child
+    is a terminal wrapper (no_gui): the flowgraph grandchild inherits the
+    stdout pipe, so killing the wrapper alone never EOFs it and the run's
+    Done marker never arrives. Empty on any read failure — the caller then
+    kills the direct PID alone, which suffices for qt_gui runs."""
+    try:
+        children: dict[int, list[int]] = {}
+        for name in os.listdir("/proc"):
+            if not name.isdigit():
+                continue
+            try:
+                with open(f"/proc/{name}/stat") as fh:
+                    ppid = int(fh.read().rsplit(")", 1)[1].split()[1])
+            except (OSError, ValueError, IndexError):
+                continue
+            children.setdefault(ppid, []).append(int(name))
+    except OSError:
+        return []
+    ordered: list[int] = []
+    stack = list(children.get(pid, []))
+    while stack:
+        child = stack.pop()
+        ordered.append(child)
+        stack.extend(children.get(child, []))
+    return ordered
 
 from pydantic_ai import ToolFailed
 
@@ -185,8 +246,8 @@ class NativeFlowgraphProxy:
         With stop_after_seconds set (and wait=True), the run is stopped
         automatically once it has run that long without finishing on its own —
         one bounded run instead of a start-then-stop pair. The auto-stop sends
-        the same SIGTERM the toolbar Stop button does and reports
-        status='stopped_after_timeout'.
+        SIGTERM first and escalates to SIGKILL when the shutdown stalls, then
+        reports status='stopped_after_timeout'.
 
         Pre-gates mirror GRC's own handler conditions because a disabled
         Gio action is a SILENT no-op, and an unsaved/untitled page would
@@ -374,9 +435,9 @@ class NativeFlowgraphProxy:
             "status": "stopped_after_timeout",
             "return_code": monitor.last_run_code,
             "note": (
-                f"Auto-stopped after {stop_after_seconds}s of runtime (SIGTERM — the "
-                "same Stop the toolbar button sends; a deliberate stop, not a failure). "
-                "Read the full output with get_run_log."
+                f"Auto-stopped after {stop_after_seconds}s of runtime (stop escalation: "
+                "SIGTERM, then SIGKILL if the shutdown stalls — a deliberate stop, not a "
+                "failure). Read the full output with get_run_log."
             ),
         }
 
@@ -401,15 +462,81 @@ class NativeFlowgraphProxy:
             monitor.mark_run_agent_initiated_cancelled()
         return epoch
 
+    async def _escalate_stop(
+        self,
+        monitor,
+        page,
+        gen_opts: str | None,
+        *,
+        grace_seconds: float = _KILL_GRACE_SECONDS,
+        settle_seconds: float = _KILL_SETTLE_SECONDS,
+        clock=asyncio.sleep,
+        now=time.monotonic,
+    ) -> bool:
+        """Escalate a stalled SIGTERM shutdown to SIGKILL, then heal the monitor.
+
+        Precondition: the native Stop action (SIGTERM) was already sent and the
+        run still tracks. Waits one grace window for the natural Done marker —
+        the waits yield to the loop, so an arriving marker cancels the
+        escalation — then SIGKILLs, waits briefly for the natural marker (a
+        dead child's stdout EOF produces the real return code), and only then
+        asks the monitor to synthesize the terminal state from its buffer.
+        Finally clears `page.process` for the exact process killed (mirroring
+        `Executor.done()`), so the next start's pre-gate passes. The child
+        shares the app's process group (`Executor._popen` uses plain Popen),
+        so the kill is always direct PIDs — never the process group, which
+        would take the GUI down with it. For no_gui runs the direct child is
+        the xterm wrapper, so its descendants are killed first (they hold the
+        stdout pipe open). Returns True when SIGKILL was sent, False when the
+        natural terminal won during the grace window (or nothing tracked)."""
+        proc = getattr(page, "process", None)
+        if proc is None or not monitor.is_tracking:
+            return False
+        deadline = now() + grace_seconds
+        while monitor.is_tracking and now() < deadline:
+            await clock(0.2)
+        if not monitor.is_tracking:
+            return False
+        pids = [proc.pid]
+        if gen_opts == "no_gui":
+            # Terminal-wrapper spawn: the flowgraph grandchild inherits the
+            # pipe, so the wrapper alone must not be killed first.
+            pids = _descendant_pids(proc.pid) + [proc.pid]
+        for pid in pids:
+            with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+                os.kill(pid, signal.SIGKILL)
+        _log.warning(
+            "run_monitor: SIGTERM shutdown stalled, SIGKILLed %s (gen_opts=%s)",
+            pids,
+            gen_opts,
+        )
+        deadline = now() + settle_seconds
+        while monitor.is_tracking and now() < deadline:
+            await clock(0.2)
+        if monitor.synthesize_terminal_state(signal=signal.SIGKILL):
+            _log.warning("run_monitor: retained partial log for killed run")
+        if getattr(page, "process", None) is proc:
+            page.process = None
+        return True
+
     async def stop_flowgraph(self) -> dict:
-        """Stop the active flowgraph's run through GRC's native Stop action
-        (SIGTERM to the process group — the same thing the toolbar Stop
-        button does)."""
+        """Stop the active flowgraph's run through GRC's native Stop action.
+
+        Sends SIGTERM (the same thing the toolbar Stop button does); when the
+        shutdown stalls past the native wait, escalates to SIGKILL after a
+        grace window rather than leaving a wedged run behind. Buffered output
+        is retained either way — read it with get_run_log."""
         cm = object.__getattribute__(self, "_canvas_manager")
         page = cm.current_page
         if page is None:
             raise ValueError("No flowgraph is open, so nothing is running.")
+        monitor = object.__getattribute__(self, "_exec_monitor")
         if getattr(page, "process", None) is None:
+            if monitor is not None and monitor.is_tracking:
+                # The process is gone but the monitor never saw its terminal
+                # marker (crash or external reap): synthesize the terminal
+                # state from the buffer so the wedge does not survive this call.
+                monitor.synthesize_terminal_state(signal=None)
             return {
                 "status": "not_running",
                 "note": "No flowgraph execution is in progress.",
@@ -422,7 +549,6 @@ class NativeFlowgraphProxy:
         actions.FLOW_GRAPH_KILL.set_enabled(True)
         actions.FLOW_GRAPH_KILL()
 
-        monitor = object.__getattribute__(self, "_exec_monitor")
         if monitor is None:
             return {"status": "stop_requested"}
         outcome = await monitor.wait_for_run_end(10.0)
@@ -434,11 +560,30 @@ class NativeFlowgraphProxy:
                     "Buffered output is still captured: read it with get_run_log."
                 ),
             }
+        fg = getattr(page, "flow_graph", None)
+        gen_opts = None
+        if fg is not None:
+            with contextlib.suppress(Exception):
+                gen_opts = fg.get_option("generate_options")
+        killed = await self._escalate_stop(monitor, page, gen_opts)
+        if not killed:
+            # No kill was needed (or the natural terminal won the race): the
+            # plain SIGTERM account is the truthful one.
+            stopped = {
+                "status": "stopped",
+                "note": (
+                    "The run was stopped (SIGTERM — a user-requested stop, not a failure). "
+                    "Buffered output is still captured: read it with get_run_log."
+                ),
+            }
+            return stopped
         return {
-            "status": "stop_requested",
+            "status": "stopped",
             "note": (
-                "SIGTERM sent; the process is still shutting down. Check get_run_log "
-                "shortly (its run_in_progress field) to confirm it ended."
+                "The run was stopped, but its SIGTERM shutdown stalled, so the stop "
+                "escalated to SIGKILL after a grace window (a deliberate stop, not a "
+                "failure). The run DID execute — get_run_log carries everything "
+                "captured before termination, with the kill disclosed."
             ),
         }
 

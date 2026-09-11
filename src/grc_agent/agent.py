@@ -595,7 +595,7 @@ async def run_flowgraph_func(
     approval-gated (RF safety); stopping is not.
 
     Args:
-        action: 'start' to run the active flowgraph, or 'stop' to terminate it (SIGTERM).
+        action: 'start' to run the active flowgraph, or 'stop' to terminate it (SIGTERM, escalating to SIGKILL when shutdown stalls).
         wait: For action='start', True blocks until completion (for non-GUI graphs).
             False returns immediately while the graph runs in background (for QT GUI sinks).
         timeout_seconds: Max seconds to wait when wait=True before returning still_running.

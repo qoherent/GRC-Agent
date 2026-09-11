@@ -109,6 +109,22 @@ class ExecutionErrorMonitor:
         # every Done evaluation (the live snapshot is cleared there), so
         # _reset() must not clear it (same pattern as _last_run_had_runtime_error).
         self._last_run_spawn_failed = False
+        # Kill-escalation provenance of the last completed run. A run the app
+        # itself SIGKILLed (stop escalation) retains its buffered output with
+        # these set; a naturally-terminated run clears them. Same retention
+        # discipline as the fields above: set at every terminal evaluation,
+        # never cleared by _reset().
+        self._last_run_terminated_by_kill = False
+        self._last_run_termination_signal: int | None = None
+        # True when the retained terminal state was synthesized (kill
+        # escalation or vanished process) rather than observed via a natural
+        # marker. Gates the termination disclosure; a natural terminal always
+        # clears it.
+        self._last_run_synthesized = False
+        # The run_epoch of the last completed run, exposed as run_id in
+        # get_last_run_log so consumers can tell two quiet runs apart (the
+        # (log_text, return_code) fingerprint collides otherwise).
+        self._last_run_id = 0
         self._graph_modified_since_last_run = False
 
     def set_process_provider(
@@ -129,28 +145,36 @@ class ExecutionErrorMonitor:
         """Return the last completed run's log as a dict, or None if no run
         has completed yet.
 
-        Shape: ``{"return_code": int, "log_text": str, "ran_successfully": bool}``,
-        plus ``log_truncated: True`` when the ``_MAX_LOG_BYTES`` cap dropped the
-        run's oldest output, ``spawn_failed``/``spawn_note`` when the run died at
-        subprocess spawn, and ``note`` when the graph changed since the run.
+        Shape: ``{"return_code": int | None, "run_id": int, "log_text": str,
+        "ran_successfully": bool}``, plus ``log_truncated: True`` when the
+        ``_MAX_LOG_BYTES`` cap dropped the run's oldest output,
+        ``spawn_failed``/``spawn_note`` when the run died at subprocess spawn,
+        ``terminated_by_kill``/``termination_note`` when no natural terminal
+        marker arrived and the state was synthesized — either the app SIGKILLed
+        the run after its SIGTERM shutdown stalled, or the process vanished
+        (crash/external reap). The log is the captured output; ``return_code``
+        is then ``None`` because no exit code was observed), and ``note`` when
+        the graph changed since the run.
         ``ran_successfully`` is False when either the return code is non-zero
-        OR a ``:error:`` runtime error was detected in the output OR the run
-        failed to spawn.
+        (or absent) OR a ``:error:`` runtime error was detected in the output
+        OR the run failed to spawn OR the terminal state was synthesized.
 
         ``log_truncated`` exists because the reduction has to be visible to the
         model: the cap silently drops the *front* of the log, and a diagnostic
         read as complete when it is not is exactly the kind of silent
         transformation the tool contract forbids.
         """
-        if self._last_run_log is None or self._last_run_code is None:
+        if self._last_run_log is None:
             return None
         res = {
             "return_code": self._last_run_code,
+            "run_id": self._last_run_id,
             "log_text": self._last_run_log,
             "ran_successfully": (
                 self._last_run_code == 0
                 and not self._last_run_had_runtime_error
                 and not self._last_run_spawn_failed
+                and not self._last_run_terminated_by_kill
             ),
             # Always present, never a silent transformation: while a run is
             # in flight this log belongs to the PREVIOUS run — the model must
@@ -183,6 +207,23 @@ class ExecutionErrorMonitor:
                 "or terminal wrapper is missing, or the generated script is not runnable. "
                 "Fix the environment and run again."
             )
+        if self._last_run_synthesized:
+            res["terminated_by_kill"] = self._last_run_terminated_by_kill
+            if self._last_run_termination_signal is not None:
+                res["termination_note"] = (
+                    "The run was forcibly terminated: SIGTERM did not shut it down within "
+                    f"the grace window, so signal {self._last_run_termination_signal} was sent. "
+                    "The graph DID execute — this log is everything captured before "
+                    "termination, and output after the kill point is missing. A short or "
+                    "empty log here reflects the kill, not necessarily a broken graph."
+                )
+            else:
+                res["termination_note"] = (
+                    "The run's process ended without delivering its terminal marker (it "
+                    "may have crashed or been reaped externally). The graph DID execute — "
+                    "this log is everything captured, and output after the last captured "
+                    "line is missing."
+                )
         return res
 
     def mark_run_agent_initiated(self) -> None:
@@ -330,6 +371,10 @@ class ExecutionErrorMonitor:
                 self._has_runtime_error = True
             self._last_run_had_runtime_error = self._has_runtime_error
             self._last_run_spawn_failed = spawn_failed
+            self._last_run_terminated_by_kill = False
+            self._last_run_termination_signal = None
+            self._last_run_synthesized = False
+            self._last_run_id = self._run_epoch
             if spawn_failed or code != _SIGTERM_RETURN_CODE and (code != 0 or self._has_runtime_error):
                 self._fail(code)
             else:
@@ -347,10 +392,47 @@ class ExecutionErrorMonitor:
             self._last_run_code = 1
             self._last_run_evicted = self._evicted
             self._last_run_spawn_failed = False  # a generate error is not a spawn crash
+            self._last_run_terminated_by_kill = False
+            self._last_run_termination_signal = None
+            self._last_run_synthesized = False
+            self._last_run_id = self._run_epoch
             self._spawn_snapshot = None
             self._fail(1)
             self._agent_initiated = False
             self._run_end.set()
+
+    def synthesize_terminal_state(self, *, signal: int | None) -> bool:
+        """Retain the buffered output as a terminal state for a marker-less run end.
+
+        Called by the stop-escalation path after SIGKILL when no natural Done
+        marker arrived, or when the run's process is already gone with the
+        monitor still tracking (crashed or externally reaped): the run is over
+        for all observable purposes, so the monitor records what it captured
+        rather than wedging `_tracking` forever. `signal` is the terminating
+        signal the app itself sent, or None when the process vanished without
+        app action. `return_code` stays None (no exit code was observed — never
+        fabricated); provenance travels in the disclosure fields read by
+        `get_last_run_log`. Never invokes the failure callback: a deliberate
+        stop is not a failure turn. Returns True when a state was
+        synthesized, False when no run was tracking (a natural terminal
+        already won the race — a late natural marker afterwards is ignored by
+        the existing not-tracking guard, so double-terminal arrival is safe)."""
+        if not self._tracking:
+            return False
+        self._last_run_log = "".join(self._chunks)
+        self._last_run_code = None
+        self._last_run_evicted = self._evicted
+        self._last_run_had_runtime_error = self._has_runtime_error
+        self._last_run_spawn_failed = False
+        self._last_run_terminated_by_kill = signal is not None
+        self._last_run_termination_signal = signal
+        self._last_run_synthesized = True
+        self._last_run_id = self._run_epoch
+        self._reset()
+        self._tracking = False
+        self._agent_initiated = False
+        self._run_end.set()
+        return True
 
     def _append(self, text: str) -> None:
         self._chunks.append(text)

@@ -28,6 +28,10 @@ class _FakeExecMonitor:
         self.last_run_code = code
         self._tracking = tracking
         self.run_epoch = 0
+        self._tracking_seq = None
+        self._tracking_latch = None
+        self._tracking_reads = 0
+        self.synthesized = []
 
     def mark_run_agent_initiated(self):
         self.marked_agent_initiated += 1
@@ -37,7 +41,19 @@ class _FakeExecMonitor:
 
     @property
     def is_tracking(self):
+        if self._tracking_latch is not None:
+            self._tracking_reads += 1
+            return self._tracking_reads <= self._tracking_latch
+        if self._tracking_seq:
+            return self._tracking_seq.pop(0)
         return self._tracking
+
+    def synthesize_terminal_state(self, *, signal=None):
+        self.synthesized.append(signal)
+        if not self._tracking:
+            return False
+        self._tracking = False
+        return True
 
     async def wait_for_run_end(self, timeout, *, epoch=None):  # noqa: ARG002
         return self._outcome
@@ -368,14 +384,35 @@ def test_stop_terminates_via_native_action(fake_actions):
 
 
 @pytest.mark.usefixtures("fake_actions")
-def test_stop_pending_when_shutdown_lingers():
-    proxy, _ = _make_proxy(_valid_page(process=object()), outcome="still_running")
+def test_stop_escalates_when_shutdown_lingers(monkeypatch):
+    """A stalled SIGTERM shutdown escalates to SIGKILL instead of wedging.
 
+    This replaces the old stop_pending expectation: reporting
+    'stop_requested' forever left the run monitor stuck and poisoned every
+    later start. The escalated stop reports 'stopped', retains the terminal
+    state, and clears the dead process so the next start works."""
     import asyncio
+    import signal as _signal
 
+    import grc_agent.native_canvas as _nc
+
+    monkeypatch.setattr(_nc, "_KILL_GRACE_SECONDS", 0.2)
+    monkeypatch.setattr(_nc, "_KILL_SETTLE_SECONDS", 0.1)
+    proc = SimpleNamespace(pid=12345, poll=lambda: None)
+    proxy, monitor = _make_proxy(
+        _valid_page(process=proc), outcome="still_running", tracking=True
+    )
+    kills = []
+    monkeypatch.setattr(
+        _nc.os, "kill", lambda pid, sig: kills.append((pid, sig))
+    )
     res = asyncio.run(proxy.stop_flowgraph())
 
-    assert res["status"] == "stop_requested"
+    assert res["status"] == "stopped"
+    assert "SIGKILL" in res["note"]
+    assert kills == [(12345, _signal.SIGKILL)]
+    assert monitor.synthesized == [_signal.SIGKILL]
+    assert proxy._canvas_manager.window.current_page.process is None
 
 
 # --- tool functions ---
@@ -540,3 +577,181 @@ def test_run_flowgraph_annotates_no_gui():
     assert res["status"] == "completed"
     assert res["generate_options"] == "no_gui"
     assert "external terminal wrapper" in res["note"]
+
+
+# --- stop escalation (SIGTERM grace, then SIGKILL, then terminal synthesis) ---
+
+
+def test_stop_natural_completion_during_grace_skips_kill(monkeypatch, fake_actions):  # noqa: ARG001
+    """A Done marker arriving during the grace window cancels the escalation."""
+    import asyncio
+
+    import grc_agent.native_canvas as _nc
+
+    monkeypatch.setattr(_nc, "_KILL_GRACE_SECONDS", 5.0)
+    monkeypatch.setattr(_nc, "_KILL_SETTLE_SECONDS", 0.1)
+    proc = SimpleNamespace(pid=12345, poll=lambda: None)
+    proxy, monitor = _make_proxy(
+        _valid_page(process=proc), outcome="still_running", tracking=True
+    )
+    # Tracking clears early: the natural terminal won the race.
+    monitor._tracking_latch = 2
+    kills = []
+    monkeypatch.setattr(_nc.os, "kill", lambda pid, sig: kills.append((pid, sig)))
+    res = asyncio.run(proxy.stop_flowgraph())
+
+    assert res["status"] == "stopped"
+    assert "SIGKILL" not in res["note"]
+    assert kills == []
+    assert monitor.synthesized == []
+
+
+def test_escalation_uses_injected_clock_without_blocking(monkeypatch):
+    """The grace window awaits the injected clock — never a blocking sleep."""
+    import asyncio
+    import signal as _signal
+    import time as _time
+
+    import grc_agent.native_canvas as _nc
+
+    state = {"t": 0.0}
+    calls = []
+
+    async def fake_clock(dt):
+        calls.append(dt)
+        state["t"] += dt
+
+    proc = SimpleNamespace(pid=12345, poll=lambda: None)
+    proxy, monitor = _make_proxy(
+        _valid_page(process=proc), outcome="still_running", tracking=True
+    )
+    kills = []
+    monkeypatch.setattr(_nc.os, "kill", lambda pid, sig: kills.append((pid, sig)))
+    page = proxy._canvas_manager.window.current_page
+    start = _time.monotonic()
+    killed = asyncio.run(
+        proxy._escalate_stop(
+            monitor, page, "qt_gui", grace_seconds=30.0, clock=fake_clock, now=lambda: state["t"]
+        )
+    )
+    wall = _time.monotonic() - start
+
+    assert killed is True
+    assert calls, "escalation must await the clock (yield to the loop)"
+    assert wall < 5.0, f"escalation blocked the loop for {wall:.1f}s"
+    assert kills == [(12345, _signal.SIGKILL)]
+    assert monitor.synthesized == [_signal.SIGKILL]
+    assert page.process is None
+
+
+def test_escalation_does_not_clear_replaced_process(monkeypatch):
+    """Only the exact killed process object is cleared — never a successor."""
+    import asyncio
+
+    import grc_agent.native_canvas as _nc
+
+    monkeypatch.setattr(_nc, "_KILL_GRACE_SECONDS", 5.0)
+    monkeypatch.setattr(_nc, "_KILL_SETTLE_SECONDS", 0.1)
+    proc = SimpleNamespace(pid=12345, poll=lambda: None)
+    successor = SimpleNamespace(pid=54321, poll=lambda: None)
+    proxy, monitor = _make_proxy(
+        _valid_page(process=proc), outcome="still_running", tracking=True
+    )
+    page = proxy._canvas_manager.window.current_page
+    state = {"t": 0.0}
+
+    async def swapping_clock(dt):
+        state["t"] += dt
+        page.process = successor
+
+    monkeypatch.setattr(_nc.os, "kill", lambda pid, sig: None)  # noqa: ARG005
+    asyncio.run(
+        proxy._escalate_stop(
+            monitor, page, "qt_gui", clock=swapping_clock, now=lambda: state["t"]
+        )
+    )
+    assert page.process is successor
+
+
+def test_stop_heals_vanished_process_tracking():
+    """Process gone with the monitor still tracking: synthesize, report not_running."""
+    import asyncio
+
+    proxy, monitor = _make_proxy(_valid_page(process=None), tracking=True)
+    res = asyncio.run(proxy.stop_flowgraph())
+
+    assert res["status"] == "not_running"
+    assert monitor.synthesized == [None]
+    assert monitor.is_tracking is False
+
+
+def test_stop_not_running_without_tracking_synthesizes_nothing():
+    import asyncio
+
+    proxy, monitor = _make_proxy(_valid_page(process=None), tracking=False)
+    res = asyncio.run(proxy.stop_flowgraph())
+
+    assert res["status"] == "not_running"
+    assert monitor.synthesized == []
+
+
+def test_escalation_kills_descendants_first_for_terminal_wrapper(monkeypatch):
+    """no_gui spawns through xterm: grandchildren hold the pipe, so they die first."""
+    import asyncio
+    import signal as _signal
+
+    import grc_agent.native_canvas as _nc
+
+    monkeypatch.setattr(_nc, "_KILL_GRACE_SECONDS", 0.2)
+    monkeypatch.setattr(_nc, "_KILL_SETTLE_SECONDS", 0.1)
+    monkeypatch.setattr(_nc, "_descendant_pids", lambda pid: [111, 222] if pid == 12345 else [])
+    proc = SimpleNamespace(pid=12345, poll=lambda: None)
+    page = _valid_page(process=proc)
+    page.flow_graph.get_option.return_value = "no_gui"
+    proxy, monitor = _make_proxy(page, outcome="still_running", tracking=True)
+    kills = []
+    monkeypatch.setattr(_nc.os, "kill", lambda pid, sig: kills.append((pid, sig)))
+    res = asyncio.run(proxy.stop_flowgraph())
+
+    assert res["status"] == "stopped"
+    assert [pid for pid, _ in kills] == [111, 222, 12345]
+    assert all(sig == _signal.SIGKILL for _, sig in kills)
+
+
+def test_tool_status_vocabulary_conformance(fake_actions):  # noqa: ARG001
+    """Every status the tools can return belongs to the frozen vocabulary.
+
+    The vocabulary lives once in native_canvas._RUN_STATUS_VOCABULARY; the
+    collection harness allowlists against the same import. Any new status
+    must extend the constant first — a hand-copied list here would let the
+    two sides drift silently.
+    """
+    import asyncio
+
+    from grc_agent.native_canvas import _RUN_STATUS_VOCABULARY
+
+    observed = []
+
+    def collect(res):
+        observed.append(res["status"])
+        return res
+
+    # stop paths
+    collect(asyncio.run(_make_proxy(_valid_page(process=None), tracking=False)[0].stop_flowgraph()))
+    proc = SimpleNamespace(pid=99999, poll=lambda: 0)
+    collect(
+        asyncio.run(
+            _make_proxy(_valid_page(process=proc), outcome="completed", tracking=False)[0].stop_flowgraph()
+        )
+    )
+    # start paths (actions faked; monitor epoch never advances so wait is faked)
+    start_proxy, _ = _make_proxy(_valid_page(process=None), outcome="completed", tracking=False)
+    collect(asyncio.run(start_proxy.run_flowgraph(action="start", wait=False)))
+    collect(asyncio.run(start_proxy.run_flowgraph(action="start", wait=True)))
+    collect(asyncio.run(start_proxy.run_flowgraph(action="start", wait=True, timeout_seconds=1.0)))
+    bounded_proxy, _ = _make_proxy(_valid_page(process=None), outcome="still_running", tracking=False)
+    collect(asyncio.run(bounded_proxy.run_flowgraph(action="start", wait=True, stop_after_seconds=5)))
+
+    assert observed, "conformance battery produced no statuses"
+    outside = [s for s in observed if s not in _RUN_STATUS_VOCABULARY]
+    assert outside == [], f"statuses outside the frozen vocabulary: {outside}"
