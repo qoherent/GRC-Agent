@@ -21,6 +21,7 @@ from pydantic_ai_harness.step_persistence import (
     RunRecord,
     SqliteStepStore,
     StepEvent,
+    StepPersistence,
 )
 
 from .settings import env_path
@@ -203,6 +204,7 @@ async def archive_transcript(
     agent_name: str,
     kind: str,
     step_index: int = 0,
+    store: StepPersistence | None = None,
 ) -> str:
     """Persist `messages` as a standalone run in the shared step store.
 
@@ -214,10 +216,13 @@ async def archive_transcript(
     the single place that replicates it, and `kind` labels the run consistently
     in both the id and the metadata.
 
+    `store` overrides the process-bound step store, for offline tools that
+    archive into a specific database (repair CLIs) without importing app state.
+
     Returns the run id. Deliberately does not catch: a store failure must reach
     the caller, since compaction would otherwise destroy the only durable copy.
     """
-    store = get_step_store()
+    store = store or get_step_store()
     run_id = f"{agent_name}-{kind}-{uuid4().hex[:8]}"
     await store.register_run(
         RunRecord(
