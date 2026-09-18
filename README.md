@@ -41,6 +41,17 @@ flowchart LR
 
 ---
 
+## See it work
+
+| | |
+|:--:|:--:|
+| [![One prompt to a working BPSK radio link](https://img.youtube.com/vi/ZFxWPiHiSIs/maxresdefault.jpg)](https://youtu.be/ZFxWPiHiSIs) | [![A live ADS-B aircraft tracker off a PlutoSDR](https://img.youtube.com/vi/VW2oCMLzzL8/maxresdefault.jpg)](https://youtu.be/VW2oCMLzzL8) |
+| **[One prompt](https://youtu.be/ZFxWPiHiSIs)** — a complete simulated BPSK link with a live browser dashboard, from a single request. | **[Live ADS-B](https://youtu.be/VW2oCMLzzL8)** — a full receive and decode chain off a PlutoSDR, receive-only, tracking real aircraft. The first build did not decode; told so, it re-examined its own CRC and pulse-decoding logic and corrected the chain. |
+| [![A research paper turned into a working flowgraph](https://img.youtube.com/vi/2YdmG4ljzIg/maxresdefault.jpg)](https://youtu.be/2YdmG4ljzIg) | [![Running on a local model with the network unplugged](https://img.youtube.com/vi/0Jzu3HQCG4E/maxresdefault.jpg)](https://youtu.be/0Jzu3HQCG4E) |
+| **[Paper to flowgraph](https://youtu.be/2YdmG4ljzIg)** — a published design turned into a running GNU Radio implementation. | **[Offline](https://youtu.be/0Jzu3HQCG4E)** — running on a local model with the network unplugged. |
+
+---
+
 ## What it does
 
 ### Flowgraphs
