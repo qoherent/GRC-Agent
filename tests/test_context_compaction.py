@@ -13,6 +13,7 @@ from pydantic_ai.messages import (
     ToolReturnPart,
     UserPromptPart,
 )
+from pydantic_ai.models.function import FunctionModel
 from pydantic_ai.models.test import TestModel
 from pydantic_ai_harness.step_persistence import StepPersistence
 
@@ -253,27 +254,169 @@ def test_compaction_target_pins_conservative_window_for_localhost_ollama(monkeyp
     assert cap.target_tokens is None
 
 
-def test_compaction_clamp_tier_guards_the_window(monkeypatch):
-    """Tier 0 must be ClampOversizedMessages, the only strategy that can
-    reach a runaway NEWEST part; its threshold mirrors the window pins
-    (half the assumed window: 16k local / 64k cloud), so one part can never
-    alone overflow the context."""
-    from pydantic_ai_harness.compaction import ClampOversizedMessages
+def _bulky_tool_turn(index: int, content: str, *, args=None, text="done") -> list[ModelMessage]:
+    call_id = f"call_{index}"
+    return [
+        ModelRequest(parts=[UserPromptPart(content=f"turn {index}")]),
+        ModelResponse(
+            parts=[
+                TextPart(content=text),
+                ToolCallPart(tool_name="inspect_graph", args=args or {}, tool_call_id=call_id),
+            ]
+        ),
+        ModelRequest(
+            parts=[ToolReturnPart(tool_name="inspect_graph", content=content, tool_call_id=call_id)]
+        ),
+    ]
 
-    monkeypatch.delenv("GRC_COMPACTION_TARGET_TOKENS", raising=False)
-    local = _build_compaction_capability(
-        {"provider": "ollama_local", "ollama_base_url": "http://localhost:11434"}
+
+def test_compaction_clears_old_results_without_mutating_oversized_settled_parts(monkeypatch):
+    """Cheap result clearing alone meets the budget, so a settled tool call's
+    nested JSON args and its large response text (each past the old 16k-token
+    clamp) reach the provider byte-for-byte; only the oldest whole results are
+    replaced, and the untouched originals stay recoverable from the archive."""
+    import json
+
+    from pydantic_ai.models.function import AgentInfo
+
+    from grc_agent import db
+
+    monkeypatch.setenv("GRC_COMPACTION_TARGET_TOKENS", "60000")
+    db._initialized_paths.clear()
+    db._step_stores.clear()
+    store = get_step_store()
+
+    huge_args = {
+        "add_blocks": [
+            {"instance_name": f"blk_{i}", "params": {"expr": "x" * 400, "nested": {"k": [i] * 20}}}
+            for i in range(150)
+        ]
+    }
+    assert len(json.dumps(huge_args)) > 64_000
+    huge_text = "RESPONSE-" + "t" * 80_000
+    history: list[ModelMessage] = []
+    for i in range(1, 7):
+        history += _bulky_tool_turn(i, chr(64 + i) * 20_000)
+    history += _bulky_tool_turn(7, "G" * 20_000, args=huge_args, text=huge_text)
+    history.append(ModelResponse(parts=[TextPart(content="turn 7 done")]))
+
+    seen: list[list[ModelMessage]] = []
+
+    def capture(messages: list[ModelMessage], _info: AgentInfo) -> ModelResponse:
+        seen.append(list(messages))
+        return ModelResponse(parts=[TextPart(content="ok")])
+
+    agent = Agent(
+        FunctionModel(capture),
+        capabilities=[
+            StepPersistence(store=store, agent_name="grc_chat"),
+            _build_compaction_capability(
+                {"provider": "ollama_local", "ollama_base_url": "http://localhost:11434"}
+            ),
+        ],
     )
-    cloud = _build_compaction_capability(
+
+    async def _run():
+        await agent.run("next", message_history=history, conversation_id="session-clamp-free")
+
+        outgoing = seen[0]
+        parts = [p for m in outgoing for p in m.parts]
+        returns = {p.tool_call_id: p.content for p in parts if isinstance(p, ToolReturnPart)}
+        assert "[Flowgraph tool output cleared" in returns["call_1"]
+        assert returns["call_1"] != "A" * 20_000
+        for i in (5, 6, 7):
+            assert returns[f"call_{i}"] == chr(64 + i) * 20_000
+        call = next(p for p in parts if isinstance(p, ToolCallPart) and p.tool_call_id == "call_7")
+        assert call.args == huge_args
+        assert json.loads(call.args_as_json_str()) == huge_args
+        assert any(isinstance(p, TextPart) and p.content == huge_text for p in parts)
+
+        archived = [
+            p
+            for run in await store.list_runs(conversation_id="session-clamp-free")
+            for snap in await store.list_snapshots(run_id=run.run_id)
+            for m in snap.messages
+            for p in m.parts
+        ]
+        assert any(
+            isinstance(p, ToolReturnPart) and p.tool_call_id == "call_1" and p.content == "A" * 20_000
+            for p in archived
+        )
+
+    asyncio.run(_run())
+
+
+def _content_snapshot(messages: list[ModelMessage]) -> list[tuple]:
+    return [
+        (type(p).__name__, getattr(p, "content", None), getattr(p, "args", None))
+        for m in messages
+        for p in m.parts
+    ]
+
+
+def test_compaction_under_one_million_window_leaves_history_untouched(monkeypatch):
+    """Characterization: 85% of a probed 1M window is far above this ~150k-token
+    history, so no tier runs and the provider receives it unchanged."""
+    monkeypatch.delenv("GRC_COMPACTION_TARGET_TOKENS", raising=False)
+    monkeypatch.setattr(
+        "grc_agent.agent_factory.resolve_model_context_length", lambda *_a, **_k: 1_000_000
+    )
+    cap = _build_compaction_capability(
         {
-            "provider": "openai_compatible",
-            "openai_compatible_base_url": "https://openrouter.ai/api/v1",
+            "provider": "ollama_local",
+            "model": "big-window-model",
+            "ollama_base_url": "http://localhost:11434",
         }
     )
-    for cap in (local, cloud):
-        assert isinstance(cap.tiers[0], ClampOversizedMessages), type(cap.tiers[0])
-    assert local.tiers[0].max_part_tokens == 16_000
-    assert cloud.tiers[0].max_part_tokens == 64_000
+    assert cap.context_window == 1_000_000 and cap.target_tokens is None
+    history: list[ModelMessage] = []
+    for i in range(1, 7):
+        history += _bulky_tool_turn(i, chr(64 + i) * 20_000, text="T" * 80_000)
+    history.append(ModelResponse(parts=[TextPart(content="done")]))
+    before = _content_snapshot(history)
+    seen: list[list[ModelMessage]] = []
+
+    def capture(messages, _info):
+        seen.append(list(messages))
+        return ModelResponse(parts=[TextPart(content="ok")])
+
+    agent = Agent(FunctionModel(capture), capabilities=[cap])
+    asyncio.run(agent.run("next", message_history=history))
+    assert _content_snapshot(seen[0])[: len(before)] == before
+
+
+def test_pre_compaction_archive_failure_fails_the_request(monkeypatch):
+    import pytest
+
+    from grc_agent import agent_factory
+
+    async def failing_archive(*_a, **_k):
+        raise OSError("archive store down")
+
+    monkeypatch.setattr(agent_factory, "archive_transcript", failing_archive)
+    monkeypatch.setenv("GRC_COMPACTION_TARGET_TOKENS", "1500")
+    history: list[ModelMessage] = []
+    for i in range(1, 6):
+        history += _bulky_tool_turn(i, chr(64 + i) * 20_000)
+    before = _content_snapshot(history)
+    provider_calls: list[int] = []
+
+    def provider(_m, _i):
+        provider_calls.append(1)
+        return ModelResponse(parts=[TextPart(content="ok")])
+
+    agent = Agent(
+        FunctionModel(provider),
+        capabilities=[
+            _build_compaction_capability(
+                {"provider": "ollama_local", "ollama_base_url": "http://localhost:11434"}
+            )
+        ],
+    )
+    with pytest.raises(OSError, match="archive store down"):
+        asyncio.run(agent.run("next", message_history=history, conversation_id="s"))
+    assert provider_calls == []
+    assert _content_snapshot(history) == before
 
 
 def test_compaction_window_override_for_documented_registry_errors(monkeypatch):

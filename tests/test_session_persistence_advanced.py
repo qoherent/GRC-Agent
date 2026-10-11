@@ -815,3 +815,112 @@ def test_turn_failure_after_approval_request_is_recorded(tmp_path):
         if isinstance(message, ModelResponse)
         for part in message.parts
     )
+
+
+def _stop_gracefully_sidebar(tmp_path, script, *, max_requests, gated=False):
+    """A real ChatSidebar driving a real agent.iter loop whose only bound is
+    StopGracefully, on the shared step store."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from pydantic_ai import Agent
+    from pydantic_ai.tools import DeferredToolRequests, DeferredToolResults
+    from pydantic_ai_harness.step_persistence import StepPersistence
+
+    from grc_agent.agent import StopGracefully
+    from grc_agent.chat_sidebar import ChatSidebar
+    from grc_agent.db import get_step_store
+
+    agent = Agent(
+        script.model(),
+        output_type=[str, DeferredToolRequests],
+        capabilities=[
+            StepPersistence(store=get_step_store(), agent_name="grc_executor"),
+            StopGracefully(max_requests=max_requests),
+        ],
+    )
+
+    @agent.tool_plain
+    def ok() -> str:
+        return "fine"
+
+    @agent.tool_plain(requires_approval=gated)
+    def gated_tool() -> str:
+        return "applied"
+
+    sidebar = ChatSidebar()
+    sidebar._agent = agent
+    sidebar._agent_mode = "executor"
+    sidebar._active_provider = "test-provider"
+    sidebar._flowgraph_proxy = MagicMock()
+    sidebar._flowgraph_proxy._canvas_manager = None
+    sidebar._save_history = AsyncMock()
+    sidebar._render_history = MagicMock()
+    sidebar._scroll_to_bottom = MagicMock()
+    sidebar._update_context_label = MagicMock()
+
+    async def approve_all(_ctx, output):
+        return DeferredToolResults(approvals={c.tool_call_id: True for c in output.approvals})
+
+    sidebar._request_approvals = approve_all
+    sid, _f = _make_session(tmp_path)
+    sidebar._active_session_id = sid
+    return sidebar, sid
+
+
+def _visible_label_texts(sidebar):
+    from conftest import walk_widgets
+    from gi.repository import Gtk
+
+    return [w.get_text() for w in walk_widgets(sidebar._listbox) if isinstance(w, Gtk.Label)]
+
+
+def test_request_limit_stop_is_recorded_as_failure_and_shown(tmp_path):
+    from test_stop_gracefully import Script, _limit_message
+
+    from grc_agent.db import conversation_id_for_session, get_step_store
+
+    script = Script([["ok"]] * 10)
+    sidebar, sid = _stop_gracefully_sidebar(tmp_path, script, max_requests=2)
+
+    asyncio.run(sidebar._run_agent_turn("keep going"))
+
+    assert script.calls == 2
+    shown = [t for t in _visible_label_texts(sidebar) if t.startswith("Usage Limit Exceeded: ")]
+    assert len(shown) == 1
+    assert _limit_message(2) in shown[0]
+
+    store = get_step_store()
+    runs = asyncio.run(store.list_runs(conversation_id=conversation_id_for_session(sid)))
+    archives = [r for r in runs if r.metadata.get("kind") == "turn_failure"]
+    assert len(archives) == 1
+    archive_events = asyncio.run(store.list_events(run_id=archives[0].run_id))
+    assert _limit_message(2) in (archive_events[-1].error or "")
+    agent_runs = [r for r in runs if "kind" not in r.metadata]
+    assert len(agent_runs) == 1
+    kinds = [e.kind for e in asyncio.run(store.list_events(run_id=agent_runs[0].run_id))]
+    assert "run_failed" in kinds and "run_completed" not in kinds
+
+
+def test_approval_resume_shares_turn_usage_and_next_turn_resets_it(tmp_path):
+    from test_stop_gracefully import Script, _limit_message
+
+    from grc_agent.db import conversation_id_for_session, get_step_store
+
+    script = Script([["gated_tool"], ["ok"], ["ok"], ["ok"]])
+    sidebar, sid = _stop_gracefully_sidebar(tmp_path, script, max_requests=2, gated=True)
+
+    asyncio.run(sidebar._run_agent_turn("apply it"))
+
+    assert script.calls == 2, "the resumed run must not get a fresh request budget"
+    assert any(_limit_message(2) in t for t in _visible_label_texts(sidebar))
+
+    script.calls, script.batches = 0, []
+    errors_before = [t for t in _visible_label_texts(sidebar) if t.startswith("Usage Limit")]
+    asyncio.run(sidebar._run_agent_turn("one more thing"))
+    assert script.calls == 1
+    assert [t for t in _visible_label_texts(sidebar) if t.startswith("Usage Limit")] == errors_before
+
+    runs = asyncio.run(
+        get_step_store().list_runs(conversation_id=conversation_id_for_session(sid))
+    )
+    assert len([r for r in runs if r.metadata.get("kind") == "turn_failure"]) == 1

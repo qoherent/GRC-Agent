@@ -47,6 +47,9 @@ Harness lean-out and model-facing tool contract rework, planned in [`docs/plans/
 - **Resilient `write_plan` input coercion**: Added Pydantic `BeforeValidator` to `write_plan` to decode stringified JSON lists, coerce numeric IDs to strings, normalize `name` to `content`, and emit actionable schema `ModelRetry` feedback.
 - **Flexible `change_graph` argument ingestion**: Decoded stringified JSON arguments, aliased `block_id` to `id` for block adds/removals, coerced 2-element tuples and dictionaries into connection strings, and wrapped single-item inputs into sequences.
 - **Responsive HTTP transport timeouts**: Lowered default HTTP read timeout from 1800s to 120s across providers to fail fast with actionable errors on dropped or overloaded connections.
+- **Turn-wide loop limits and recorded stops**: Model requests now share native `RunUsage` across deferred approval resumes. Repeated terminal failures are scoped to the current user turn and checked before the next request. Limit stops reach the GUI and persistence failure path instead of becoming unrecorded completed answers.
+- **Transient-only transport retries**: Both HTTP client stacks retry transport failures, HTTP 408/429, and 5xx responses; permanent client errors pass through to the provider SDK. `Retry-After` is respected with a ten-second wait cap and the existing three-attempt transport limit.
+- **Complete, truthful error feedback**: Non-JSON HTTP error bodies are no longer silently clipped. Retry-exhaustion messages disclose that earlier completed edits may remain rather than claiming the entire flowgraph is unchanged.
 
 ### Changed
 
@@ -70,6 +73,7 @@ Harness lean-out and model-facing tool contract rework, planned in [`docs/plans/
 - **Unified copy feedback and scroll detection**: Consolidated copy button clipboard handling and tooltip timeouts (1500ms) in `ui/copy_confirm.py`, and unified bottom-scroll checks into a shared helper.
 - **OpenRouter integration test defaults**: Defaulted integration scenarios to OpenRouter using `inclusionai/ling-3.0-flash-fin:free` with optional Ollama Cloud selection.
 - **Architectural alignment for planning context**: Replaced ad-hoc regex scrapers (`extract_plan_from_text`) and silent history mutations (`_sanitize_history_for_executor`) with source validation and native `TieredCompaction`.
+- **Hermetic unit-test defaults**: Non-integration tests automatically isolate settings, session databases, and vector stores and block real model requests. Explicit integration tests retain their opt-in behavior. Regression coverage now exercises streaming and non-streaming loop bounds, approval resumes, failure persistence, context integrity, and transport retries.
 
 ### Removed
 
@@ -80,12 +84,15 @@ Harness lean-out and model-facing tool contract rework, planned in [`docs/plans/
 - **Write-only active-graph state**: Removed unused `_active_graph_name`, `_active_graph_path`, and `set_active_graph`.
 - **Test-only history helper**: Deleted `chat/history.py`'s `_messages_call_tool` and its test — the plan handoff reads the durable plan store (`_show_implement_plan_if_ready` → `load_plan_items`), so nothing in `src/` had called it since that refactor.
 - **Orphaned `run_tools` table**: Dropped from the session database (see Fixed).
+- **Fixed per-part context clamping**: Removed the compaction tier that rewrote large historical tool arguments and response text at fixed local/cloud thresholds. Stale tool-output clearing now runs first; backend-derived window budgets, recent-result retention, summarization, and pre-compaction archives remain in place.
 
 ### Notes
 
 - Verified audit non-issues: Retained `get_theme_mode`/`set_theme_mode`, documented `ingest`<->`rag` circular import, and kept `gbulb` for Python 3.12/PyGObject 3.48 support.
 - Updated `AGENTS.md`: Documented `ModelRetry` vs `ToolFailed` contracts, tool schema invariants, and headless xvfb test gates.
 - Sidebar decomposition verified: All extractions audited with zero semantic deviation, validated against pre-split tree at `1fb1d19` via byte-identical golden tests.
+- Native verification is pinned to the system-bridged interpreter; `AGENTS.md` records the interpreter requirement and Ollama Cloud live-test preference. Python codegen tests explicitly select Python, and provider-client compatibility checks remain strict for Pydantic AI deprecations without treating unrelated SDK warnings as stack failures.
+- Verified the native sidebar with a three-turn Ollama Cloud smoke using `deepseek-v4.1-flash:cloud`: inspect, approve a sample-rate edit, and inspect again. The original settings and session database stayed unchanged. The full unit sweep's three failures were fixed and the affected 60 tests passed; the GTK gate passed 183 tests with one existing clipboard-precondition skip, and Ruff passed.
 
 ## [0.6.0] - 2026-09-01
 

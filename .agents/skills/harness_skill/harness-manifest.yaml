@@ -1,0 +1,65 @@
+version: 2
+baseline_id: H0
+incumbent_id: H0
+best_reliable_score: null
+noise_tolerance_delta: null
+bounded_horizon_rounds: 20
+
+edit_budget:
+  early_max: 4
+  late_min: 1
+stall_window_rounds: 3
+prune_window_rounds: 4
+
+runtime_policy:
+  planning: auto
+  action_space: auto
+  context_management:
+    enabled: auto
+    soft_threshold_fraction: null  # calibrate from context budget and observed trajectory pressure
+    hard_threshold_fraction: null  # keep above soft threshold; do not hard-code from another harness
+    preserve_preamble: true
+    preserve_recent_turns_min: 2
+    cheap_elision_first: true
+    summarize_after_elision: true
+    lossless_recall: off_by_default
+  stuck_detection: true
+  bounded_retries: true
+  pre_completion_verification: true
+  post_edit_diagnostics: true
+
+metrics:
+  - task_score
+  - end_to_end_success
+  - first_pass_delivery
+  - input_tokens
+  - output_tokens
+  - total_policy_tokens
+  - tool_calls
+  - steps
+  - wall_time
+  - cost
+  - budget_stops
+  - context_overflow_rate
+  - premature_stop_rate
+  - repeated_action_rate
+  - invalid_tool_call_rate
+
+components:
+  prompt: editable
+  control_flow: editable
+  config: editable
+  output_plumbing: editable
+  context_mgmt: editable
+  client_tool: editable
+  skill: editable
+  memory: editable
+  subagent: editable
+
+protected:
+  - model_weights
+  - evaluator
+  - heldout_data
+  - ood_audit_data
+  - permissions
+  - safety_boundaries

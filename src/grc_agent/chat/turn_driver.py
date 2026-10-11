@@ -42,6 +42,7 @@ from pydantic_ai.tools import (
     DeferredToolRequests,
     DeferredToolResults,
 )
+from pydantic_ai.usage import RunUsage
 from pydantic_graph import End
 
 from ..db import (
@@ -283,11 +284,13 @@ class TurnDriverMixin:
             # (ToolApproved/ToolDenied) until the run reaches a final output.
             deferred_results: DeferredToolResults | None = None
             turn_required_approval = False
+            turn_usage = RunUsage()
             while True:
                 async with self._agent.iter(
                     prompt if deferred_results is None else None,
                     message_history=self._message_history,
                     deferred_tool_results=deferred_results,
+                    usage=turn_usage,
                     deps=self._flowgraph_proxy,
                     # Groups this turn's StepPersistence runs/events/snapshots
                     # under the active chat session — the same conversation id

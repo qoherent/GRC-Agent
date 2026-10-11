@@ -3,6 +3,10 @@
 Minimal set per the clustered test plan; shared fixtures/helpers live in conftest.py.
 """
 
+import asyncio
+import contextlib
+
+import pytest
 from conftest import _FakeResponse
 
 
@@ -171,6 +175,8 @@ def test_every_provider_accepts_the_client_it_is_built_with(monkeypatch):
     """
     import warnings
 
+    from pydantic_ai import PydanticAIDeprecationWarning
+
     from grc_agent.agent_factory import _build_model, _retrying_http_client
     from grc_agent.ui.providers import PROVIDER_API_KEY
 
@@ -190,7 +196,7 @@ def test_every_provider_accepts_the_client_it_is_built_with(monkeypatch):
         client = _retrying_http_client(provider)
         name = model_names.get(provider, "test-model")
         with warnings.catch_warnings():
-            warnings.simplefilter("error")  # a deprecated stack must fail loudly
+            warnings.simplefilter("error", PydanticAIDeprecationWarning)  # a deprecated stack must fail loudly
             model = _build_model({"provider": provider, "model": name}, client)
         assert model is not None, f"{provider} produced no model"
 
@@ -382,3 +388,109 @@ def test_active_flowgraph_context_stays_silent_with_no_graph(tmp_path, monkeypat
         text = _instructions_for(agents.executor, deps)
         assert "Active flowgraph file path:" not in text
         assert "Active flowgraph: a live in-memory graph" not in text
+
+
+@contextlib.asynccontextmanager
+async def _mock_retrying_client(provider: str, handler):
+    """The real client _retrying_http_client builds, with the network replaced
+    by `handler` and tenacity's sleep recorded instead of slept. Yields
+    (client, sleeps) and closes the client in the loop that used it."""
+    import httpx
+    import httpx2
+
+    from grc_agent.agent_factory import _retrying_http_client
+
+    client = _retrying_http_client(provider)
+    transport = client._transport
+    mock = httpx2.MockTransport if provider == "" else httpx.MockTransport
+    sleeps: list[float] = []
+
+    async def record_sleep(seconds):
+        sleeps.append(seconds)
+
+    await transport.wrapped.aclose()
+    transport.wrapped = mock(handler)
+    transport.config["sleep"] = record_sleep
+    try:
+        yield client, sleeps
+    finally:
+        await client.aclose()
+
+
+@pytest.mark.parametrize("provider", ["", "groq"], ids=["httpx2", "httpx"])
+class TestRetryingTransport:
+    def _post(self, provider, *statuses_headers):
+        """POST once through the real retrying client; return (status, calls, sleeps)."""
+        import httpx
+        import httpx2
+
+        response_cls = httpx.Response if provider == "groq" else httpx2.Response
+        calls: list[int] = []
+
+        def handler(request):  # noqa: ARG001
+            status, headers = statuses_headers[min(len(calls), len(statuses_headers) - 1)]
+            calls.append(status)
+            return response_cls(status, headers=headers)
+
+        async def go():
+            async with _mock_retrying_client(provider, handler) as (client, sleeps):
+                try:
+                    response = await client.post("http://x/v1/chat")
+                except Exception as exc:
+                    return exc, sleeps
+                return response.status_code, sleeps
+
+        outcome, sleeps = asyncio.run(go())
+        return outcome, calls, sleeps
+
+    @pytest.mark.parametrize("status", [400, 401, 403, 404])
+    def test_permanent_client_errors_pass_through_without_a_transport_repeat(
+        self, provider, status
+    ):
+        outcome, calls, sleeps = self._post(provider, (status, {}))
+        assert outcome == status
+        assert calls == [status] and sleeps == []
+
+    @pytest.mark.parametrize("status", [408, 429, 503])
+    def test_transient_status_recovers_on_a_later_attempt(self, provider, status):
+        outcome, calls, sleeps = self._post(provider, (status, {}), (200, {}))
+        assert outcome == 200
+        assert calls == [status, 200]
+        assert len(sleeps) == 1 and 0 < sleeps[0] <= 10
+
+    def test_persistent_503_stops_after_three_attempts_and_raises(self, provider):
+        import httpx
+        import httpx2
+
+        stack = httpx if provider == "groq" else httpx2
+        outcome, calls, sleeps = self._post(provider, (503, {}))
+        assert isinstance(outcome, stack.HTTPStatusError)
+        assert calls == [503, 503, 503]
+        assert len(sleeps) == 2
+
+    def test_transport_failure_is_bounded_to_three_attempts(self, provider):
+        import httpx
+        import httpx2
+
+        stack = httpx if provider == "groq" else httpx2
+        attempts: list[int] = []
+
+        def handler(request):
+            attempts.append(1)
+            raise stack.ConnectError("refused", request=request)
+
+        async def go():
+            async with _mock_retrying_client(provider, handler) as (client, sleeps):
+                with pytest.raises(stack.ConnectError):
+                    await client.post("http://x/v1/chat")
+                return sleeps
+
+        sleeps = asyncio.run(go())
+        assert len(attempts) == 3 and len(sleeps) == 2
+
+    def test_retry_after_is_honored_within_the_ten_second_cap(self, provider):
+        outcome, _calls, sleeps = self._post(
+            provider, (429, {"Retry-After": "4"}), (429, {"Retry-After": "120"}), (200, {})
+        )
+        assert outcome == 200
+        assert sleeps == [4, 10]

@@ -16,7 +16,7 @@ def test_vector_db_dimension_check_is_cached(tmp_path, monkeypatch):
     from grc_agent.adapter.rag import _ensure_db_built
 
     tmp_vectors = tmp_path / "vectors"
-    tmp_vectors.mkdir()
+    tmp_vectors.mkdir(exist_ok=True)
     monkeypatch.setenv("GRC_AGENT_VECTORS_DIR", str(tmp_vectors))
     monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
     # Isolate the module-level embedding-dimension cache so a prior test's
@@ -418,7 +418,7 @@ def test_former_both_engine_misses_now_rank(tmp_path, monkeypatch):
     packet-framing reference: each must now hit rank <= 5 (all rank 1 at
     authoring time)."""
     tmp_vectors = tmp_path / "vectors"
-    tmp_vectors.mkdir()
+    tmp_vectors.mkdir(exist_ok=True)
     monkeypatch.setenv("GRC_AGENT_VECTORS_DIR", str(tmp_vectors))
     monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
     from grc_agent.settings import save_settings
@@ -457,7 +457,7 @@ def test_new_corpus_pages_rank_top1_for_unique_phrases(tmp_path, monkeypatch):
     packet-framing concepts) are retrievable top-1 for phrases unique to them
     (uniqueness grep-verified against the whole corpus at authoring time)."""
     tmp_vectors = tmp_path / "vectors"
-    tmp_vectors.mkdir()
+    tmp_vectors.mkdir(exist_ok=True)
     monkeypatch.setenv("GRC_AGENT_VECTORS_DIR", str(tmp_vectors))
     monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
     from grc_agent.settings import save_settings
@@ -498,7 +498,7 @@ def test_lexical_catalog_rows_carry_no_distance_key(tmp_path, monkeypatch):
     from grc_agent.adapter.rag import _FRESHNESS_CACHE
 
     tmp_vectors = tmp_path / "vectors"
-    tmp_vectors.mkdir()
+    tmp_vectors.mkdir(exist_ok=True)
     monkeypatch.setenv("GRC_AGENT_VECTORS_DIR", str(tmp_vectors))
     monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
     from grc_agent.settings import save_settings

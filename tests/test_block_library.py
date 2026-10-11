@@ -86,6 +86,9 @@ def test_save_block_generated_codegen_imports_the_saved_module_correctly(
     fg2 = platform.make_flow_graph()
     fg2.grc_file_path = ""
     fg2.options_block.params["id"].set_value("codegen_reuse_fg")
+    fg2.options_block.params["output_language"].set_value("python")
+    fg2.options_block.params["generate_options"].set_value("no_gui")
+    fg2.rewrite()
     res2 = change_graph(
         fg2,
         add_blocks=[

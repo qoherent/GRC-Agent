@@ -8,7 +8,7 @@ from typing import Annotated, Any, Literal
 from pydantic import AliasChoices, BaseModel, BeforeValidator, Field
 from pydantic_ai import (
     ApprovalRequired,
-    ModelRequestNode,
+    ModelRequestContext,
     ModelRetry,
     RunContext,
     Tool,
@@ -16,19 +16,15 @@ from pydantic_ai import (
 )
 from pydantic_ai.capabilities import (
     AbstractCapability,
-    AgentNode,
-    NodeResult,
     RawToolArgs,
     WebFetch,
     WebSearch,
-    WrapNodeRunHandler,
 )
 from pydantic_ai.common_tools.duckduckgo import duckduckgo_search_tool
-from pydantic_ai.messages import ToolCallPart
-from pydantic_ai.result import FinalResult
+from pydantic_ai.exceptions import UsageLimitExceeded
+from pydantic_ai.messages import ToolCallPart, UserPromptPart
 from pydantic_ai.tools import ToolDefinition
 from pydantic_ai_harness import PromptInjectionDefender
-from pydantic_graph import End
 
 # Local imports
 from grc_agent.adapter import (
@@ -107,11 +103,15 @@ class StateUpdate(BaseModel):
 
 @dataclass
 class StopGracefully(AbstractCapability[Any]):
-    """Ends the run with a clear message instead of letting a stuck local
-    model's request count blow past the ceiling as a raw UsageLimitExceeded
-    traceback — pydantic_ai's own documented capability pattern
-    (wrap_node_run + End(FinalResult(...))), not a hand-rolled loop
-    detector."""
+    """Bounds a turn with the framework's own usage-limit error.
+
+    A stuck model's request count and a tool that keeps failing terminally
+    would otherwise run to the ceiling. Raising ``UsageLimitExceeded`` from
+    ``before_model_request`` ends the run through the normal failure path, so
+    the stop is recorded and shown to the user rather than disguised as a
+    completed answer. Both bounds are read from the run's own usage and
+    message history, so the capability holds no state.
+    """
 
     max_requests: int = 40
     # ToolFailed reports a terminal failure and deliberately consumes no retry
@@ -121,75 +121,53 @@ class StopGracefully(AbstractCapability[Any]):
     # level, which is what AGENTS.md section 3's do-not-retry prose used to
     # approximate in words.
     max_repeated_failures: int = 3
-    count: int = 0
-
-    async def for_run(self, ctx: RunContext[FlowgraphDeps]) -> "StopGracefully":  # noqa: ARG002
-        return StopGracefully(
-            max_requests=self.max_requests,
-            max_repeated_failures=self.max_repeated_failures,
-        )
 
     def _repeatedly_failing_tool(self, ctx: RunContext[FlowgraphDeps]) -> str | None:
-        """The tool that has just failed terminally too many times, if any.
+        """The tool that has failed terminally too many times this turn, if any.
 
-        Counts the trailing run of failed returns rather than a total, so a
-        tool that fails once, succeeds, then fails again is not penalised.
+        Walks parts newest-first back to the latest user prompt, counting
+        failed returns per tool; any other settled return breaks the streak,
+        so a tool that fails, succeeds, then fails again is not penalised.
         """
         streak: dict[str, int] = {}
-        for msg in reversed(list(ctx.messages)):
-            parts = getattr(msg, "parts", ())
-            settled = [p for p in parts if getattr(p, "outcome", None) is not None]
-            if not settled:
-                continue
-            for part in settled:
+        for msg in reversed(ctx.messages):
+            for part in reversed(getattr(msg, "parts", ())):
+                if isinstance(part, UserPromptPart):
+                    return None
+                if getattr(part, "outcome", None) is None:
+                    continue
                 if part.outcome != "failed":
                     return None
-                name = getattr(part, "tool_name", "") or ""
-                streak[name] = streak.get(name, 0) + 1
-                if streak[name] >= self.max_repeated_failures:
-                    return name
+                streak[part.tool_name] = streak.get(part.tool_name, 0) + 1
+                if streak[part.tool_name] >= self.max_repeated_failures:
+                    return part.tool_name
         return None
 
-    async def wrap_node_run(
+    async def before_model_request(
         self,
         ctx: RunContext[FlowgraphDeps],
-        *,
-        node: AgentNode,
-        handler: WrapNodeRunHandler,
-    ) -> NodeResult:
-        if isinstance(node, ModelRequestNode):
-            failing = self._repeatedly_failing_tool(ctx)
-            if failing:
-                _log.warning(
-                    "StopGracefully: %r failed terminally %d times in a row — ending run",
-                    failing,
-                    self.max_repeated_failures,
-                )
-                return End(
-                    FinalResult(
-                        output=(
-                            f"`{failing}` is not available in this environment and kept "
-                            "failing, so I'm stopping rather than retrying it further. "
-                            "The rest of the session is unaffected."
-                        )
-                    )
-                )
-            self.count += 1
-            if self.count > self.max_requests:
-                _log.warning(
-                    "StopGracefully: hit max_requests=%d ceiling — ending run to avoid a stuck loop",
-                    self.max_requests,
-                )
-                return End(
-                    FinalResult(
-                        output=(
-                            "I've made a lot of tool calls without finishing, so I'm stopping here "
-                            "rather than looping further. Please check what's changed so far and "
-                            "try a more specific follow-up."
-                        )
-                    )
-                )
-        return await handler(node)
+        request_context: ModelRequestContext,
+    ) -> ModelRequestContext:
+        if ctx.usage.requests >= self.max_requests:
+            _log.warning("StopGracefully: hit max_requests=%d — ending turn", self.max_requests)
+            raise UsageLimitExceeded(
+                f"The agent reached the {self.max_requests}-request limit for this turn. "
+                "Stopping rather than continuing the tool loop; completed actions may remain. "
+                "You can send a follow-up to continue."
+            )
+        failing = self._repeatedly_failing_tool(ctx)
+        if failing:
+            _log.warning(
+                "StopGracefully: %r failed terminally %d times — ending turn",
+                failing,
+                self.max_repeated_failures,
+            )
+            raise UsageLimitExceeded(
+                f"`{failing}` failed terminally {self.max_repeated_failures} times this turn. "
+                "Stopping rather than retrying it further; completed actions may remain. "
+                "You can send a follow-up to continue."
+            )
+        return request_context
 
 
 @dataclass

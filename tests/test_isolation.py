@@ -290,7 +290,7 @@ def test_rag_building_flag_set_during_ensure_db_built(tmp_path, monkeypatch):
     from grc_agent.adapter.rag import _ensure_db_built
 
     tmp_vectors = tmp_path / "vectors"
-    tmp_vectors.mkdir()
+    tmp_vectors.mkdir(exist_ok=True)
     monkeypatch.setenv("GRC_AGENT_VECTORS_DIR", str(tmp_vectors))
     monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
 
@@ -507,7 +507,7 @@ def test_lexical_only_db_does_not_rehammer_embedding_backend(tmp_path, monkeypat
     from grc_agent.adapter.rag import _FRESHNESS_CACHE, _ensure_db_built
 
     tmp_vectors = tmp_path / "vectors"
-    tmp_vectors.mkdir()
+    tmp_vectors.mkdir(exist_ok=True)
     monkeypatch.setenv("GRC_AGENT_VECTORS_DIR", str(tmp_vectors))
     monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
     save_settings("ollama_local", "qwen3.6:35b-a3b-q4_K_M")
@@ -555,7 +555,7 @@ def test_query_catalog_falls_back_to_lexical_when_embedding_unreachable(tmp_path
     from grc_agent.adapter.rag import _FRESHNESS_CACHE
 
     tmp_vectors = tmp_path / "vectors"
-    tmp_vectors.mkdir()
+    tmp_vectors.mkdir(exist_ok=True)
     monkeypatch.setenv("GRC_AGENT_VECTORS_DIR", str(tmp_vectors))
     monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
     save_settings("ollama_local", "qwen3.6:35b-a3b-q4_K_M", embed_backend="llamacpp")
@@ -596,7 +596,7 @@ def test_query_catalog_native_lexical_mode_has_no_fallback_message(tmp_path, mon
     from grc_agent.adapter.rag import _FRESHNESS_CACHE
 
     tmp_vectors = tmp_path / "vectors"
-    tmp_vectors.mkdir()
+    tmp_vectors.mkdir(exist_ok=True)
     monkeypatch.setenv("GRC_AGENT_VECTORS_DIR", str(tmp_vectors))
     monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
     save_settings("ollama_local", "qwen3.6:35b-a3b-q4_K_M", embed_backend="lexical")
@@ -627,7 +627,7 @@ def test_query_catalog_lexical_message_present_even_when_embed_succeeds(tmp_path
     from grc_agent.adapter.rag import _FRESHNESS_CACHE
 
     tmp_vectors = tmp_path / "vectors"
-    tmp_vectors.mkdir()
+    tmp_vectors.mkdir(exist_ok=True)
     monkeypatch.setenv("GRC_AGENT_VECTORS_DIR", str(tmp_vectors))
     monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
     save_settings("ollama_local", "qwen3.6:35b-a3b-q4_K_M", embed_backend="llamacpp")
@@ -668,7 +668,7 @@ def test_query_docs_falls_back_to_lexical_when_embedding_unreachable(tmp_path, m
     from grc_agent.adapter.rag import _FRESHNESS_CACHE
 
     tmp_vectors = tmp_path / "vectors"
-    tmp_vectors.mkdir()
+    tmp_vectors.mkdir(exist_ok=True)
     monkeypatch.setenv("GRC_AGENT_VECTORS_DIR", str(tmp_vectors))
     monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
     save_settings("ollama_local", "qwen3.6:35b-a3b-q4_K_M", embed_backend="llamacpp")
@@ -717,7 +717,7 @@ def test_ensure_db_built_rebuilds_when_fts_table_missing(tmp_path, monkeypatch):
     from grc_agent.adapter.rag import _corpus_version, _ensure_db_built
 
     tmp_vectors = tmp_path / "vectors"
-    tmp_vectors.mkdir()
+    tmp_vectors.mkdir(exist_ok=True)
     monkeypatch.setenv("GRC_AGENT_VECTORS_DIR", str(tmp_vectors))
     monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
     save_settings("ollama_local", "qwen3.6:35b-a3b-q4_K_M")
@@ -2098,7 +2098,7 @@ def _isolated_vectors(tmp_path, monkeypatch):
     """The documented isolation idiom (tests/test_adapter_rag.py:19-20):
     redirect the lazy DB build and the settings file into tmp."""
     tmp_vectors = tmp_path / "vectors"
-    tmp_vectors.mkdir()
+    tmp_vectors.mkdir(exist_ok=True)
     monkeypatch.setenv("GRC_AGENT_VECTORS_DIR", str(tmp_vectors))
     monkeypatch.setenv("GRC_AGENT_ENV", str(tmp_path / ".env"))
     return tmp_vectors
@@ -2549,3 +2549,83 @@ def test_ollama_cloud_has_dedicated_model_slot(tmp_path, monkeypatch):
     cfg = load_settings()
     assert cfg["model"] == "qwen3.6:35b-a3b-q4_K_M"
     assert cfg["ollama_cloud_model"] == "deepseek-v4-flash:0731"  # preserved
+
+
+def test_default_test_environment_is_isolated_without_requesting_it(tmp_path):
+    from grc_agent.db import get_db_path
+
+    assert env_path() == tmp_path / ".env"
+    assert get_db_path() == tmp_path / ".grc_agent" / "chat_sessions.db"
+    assert os.environ["GRC_AGENT_VECTORS_DIR"] == str(tmp_path / "vectors")
+
+
+@pytest.mark.asyncio
+async def test_default_test_environment_rejects_real_model_requests_before_network():
+    import httpx
+    from pydantic_ai import Agent
+    from pydantic_ai import models as ai_models
+    from pydantic_ai.models.function import FunctionModel
+    from pydantic_ai.models.openai import OpenAIChatModel
+    from pydantic_ai.models.test import TestModel
+    from pydantic_ai.providers.openai import OpenAIProvider
+
+    assert ai_models.ALLOW_MODEL_REQUESTS is False
+
+    def no_network(request: httpx.Request) -> httpx.Response:
+        raise AssertionError(f"outbound request reached the transport: {request.url}")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(no_network)) as http_client:
+        real = OpenAIChatModel(
+            "m",
+            provider=OpenAIProvider(
+                base_url="http://127.0.0.1:1/v1", api_key="k", http_client=http_client
+            ),
+        )
+        with pytest.raises(RuntimeError, match="Model requests are not allowed"):
+            await Agent(real).run("hi")
+
+    assert (await Agent(TestModel()).run("hi")).output
+    from pydantic_ai.messages import ModelResponse, TextPart
+
+    function_model = FunctionModel(lambda _m, _i: ModelResponse(parts=[TextPart("ok")]))
+    assert (await Agent(function_model).run("hi")).output == "ok"
+
+
+def test_integration_marked_tests_keep_the_real_environment_and_model_flag(tmp_path):
+    """The autouse hermetic default must not touch an @integration test:
+    a subprocess runs one synthetic marked test under the real conftest and
+    reports the env var and flag it saw. No model request is made."""
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    conftest = Path(__file__).resolve().parent / "conftest.py"
+    work = tmp_path / "synthetic"
+    work.mkdir()
+    (work / "conftest.py").write_text(
+        f"import runpy\nglobals().update(runpy.run_path({str(conftest)!r}))\n"
+    )
+    (work / "test_synthetic.py").write_text(
+        "import os\nimport pytest\nfrom pydantic_ai import models\n\n"
+        "@pytest.mark.integration\n"
+        "def test_sees_outer_environment():\n"
+        "    assert os.environ['GRC_AGENT_ENV'] == os.environ['OUTER_ENV']\n"
+        "    assert models.ALLOW_MODEL_REQUESTS is True\n"
+    )
+    outer = tmp_path / "outer" / ".env"
+    env = {
+        **os.environ,
+        "GRC_AGENT_ENV": str(outer),
+        "OUTER_ENV": str(outer),
+        "GRC_AGENT_VECTORS_DIR": str(tmp_path / "outer_vectors"),
+    }
+    result = subprocess.run(
+        [
+            sys.executable, "-m", "pytest", str(work), "--rootdir", str(work),
+            "-o", "addopts=", "--import-mode=importlib", "-m", "integration",
+            "-p", "no:cacheprovider", "-q",
+        ],
+        env=env, capture_output=True, text=True, timeout=300,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "1 passed" in result.stdout

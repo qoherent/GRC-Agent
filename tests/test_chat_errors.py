@@ -72,13 +72,22 @@ def test_friendly_exhaustion_message():
             "Tool 'change_graph' exceeded max retries count of 3. Consider raising the max retry limit."
         )
     )
-    assert tool_msg is not None
-    assert "change_graph" in tool_msg and "safe" in tool_msg and "Continue" in tool_msg
+    assert tool_msg == (
+        "The agent ran out of fix attempts for 'change_graph' this turn. Earlier completed "
+        "edits may remain; inspect the current flowgraph before continuing. Send Continue "
+        "or rephrase the request to retry with a fresh budget."
+    )
+    assert "unchanged" not in tool_msg and "safe" not in tool_msg
 
     out_msg = _friendly_exhaustion_message(
         UnexpectedModelBehavior("Exceeded maximum output retries (3).")
     )
-    assert out_msg is not None and "validation" in out_msg
+    assert out_msg == (
+        "The agent could not complete because the flowgraph still has validation errors. "
+        "Earlier edits may remain; inspect the current flowgraph before continuing. "
+        "Send Continue to retry with the previous errors still in context."
+    )
+    assert "unchanged" not in out_msg and "safe" not in out_msg
 
     assert _friendly_exhaustion_message(UnexpectedModelBehavior("other")) is None
     assert _friendly_exhaustion_message(ValueError("other")) is None
@@ -106,7 +115,7 @@ def test_extract_message_helpers():
 
         text = "raw text body that is quite long " * 20
 
-    assert _extract_httpx_message(BadResp())[:10] == BadResp.text[:10]
+    assert _extract_httpx_message(BadResp()) == BadResp.text
 
     assert _extract_body_message({"error": {"message": "m"}}) == "m"
     assert _extract_body_message({"message": "top-level"}) == "top-level"

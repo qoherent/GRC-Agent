@@ -256,6 +256,21 @@ def isolated_env(tmp_path, monkeypatch):
     return env_path
 
 
+@pytest.fixture(autouse=True)
+def _hermetic_default(request, monkeypatch):
+    """Every non-integration test gets the isolated env and no live model.
+
+    Per-test setenv/ALLOW_MODEL_REQUESTS overrides still win: they run after
+    this fixture. Integration tests opt out and keep the real environment.
+    """
+    if request.node.get_closest_marker("integration"):
+        return
+    request.getfixturevalue("isolated_env")
+    from pydantic_ai import models
+
+    monkeypatch.setattr(models, "ALLOW_MODEL_REQUESTS", False)
+
+
 @pytest.fixture
 def sidebar(isolated_env):  # noqa: ARG001
     """A ChatSidebar that actually gets torn down.

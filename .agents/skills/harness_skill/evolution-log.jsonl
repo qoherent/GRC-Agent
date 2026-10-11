@@ -1,0 +1,1 @@
+{"round":0,"candidate_id":"example","component":"context_mgmt","hypothesis":"Elide stale bulky tool output before summarizing to reduce context pressure.","failure_pattern_targeted":"context_overflow","source_diff":"...","score_delta":null,"cost_delta":null,"behavior_delta":{"context_overflow_rate":null},"accepted":null,"rejection_reason":null}

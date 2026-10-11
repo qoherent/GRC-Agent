@@ -117,3 +117,6 @@ xvfb-run -a uv run pytest tests/test_chat_sidebar.py tests/test_chat_sidebar_gol
 - The fast gate is hermetic: no test in it makes an LLM call or reaches an external network endpoint. Live-backend tests carry `@pytest.mark.integration` and are deselected by `addopts`.
 - All non-integration unit tests and linter checks must pass with zero errors.
 - Never disable or skip tests without explicit rationale and evidence.
+- Pin native verification to the existing system-bridged interpreter with `UV_PYTHON=.venv/bin/python` or `uv run --python .venv/bin/python`. Verify `gi` and `gnuradio.gr` imports before running gates; an ABI mismatch requires approval before rebuilding `.venv`, not a `dist-packages` shim from another Python version.
+- Non-integration tests automatically use `isolated_env` and `pydantic_ai.models.ALLOW_MODEL_REQUESTS=False`. Explicit integration tests retain their opt-in behavior.
+- Live LLM verification uses Ollama Cloud with the model and credentials configured in `.env` (`GRC_TEST_BACKEND=ollama_cloud`). Keep test settings, session databases, and edited graphs temporary; never print credentials or mutate the real settings/database.

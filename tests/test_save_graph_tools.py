@@ -266,7 +266,7 @@ def test_save_untitled_happy_path_atomic_write_and_surface_tail(tmp_path, monkey
     assert replaces[0][1] == str(tmp_rendered) and replaces[0][2] == str(target)
     assert not tmp_rendered.exists()
     leftovers = [
-        p.name for p in tmp_path.iterdir() if p.name not in ("untitled.grc", ".grc_agent")
+        p.name for p in tmp_path.iterdir() if p.name not in ("untitled.grc", ".grc_agent", "vectors")
     ]
     assert not leftovers, f"stray files after save: {leftovers}"
     # KTD1: SAVE_AS-parity id rename happened, before serialization.

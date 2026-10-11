@@ -25,10 +25,10 @@ from pydantic_ai.retries import (
     AsyncHTTPX2TenacityTransport,
     AsyncTenacityTransport,
     RetryConfig,
+    wait_retry_after,
 )
 from pydantic_ai.tools import DeferredToolRequests, ToolDefinition
 from pydantic_ai_harness.compaction import (
-    ClampOversizedMessages,
     ClearToolResults,
     CompactionStrategy,
     SlidingWindowCompaction,
@@ -269,10 +269,21 @@ _HTTP_TIMEOUT = {"connect": 15.0, "read": 120.0, "write": 60.0, "pool": 30.0}
 def _retry_config(transport_error: type[Exception], status_error: type[Exception]) -> RetryConfig:
     return RetryConfig(
         retry=retry_if_exception_type((transport_error, status_error)),
-        wait=wait_exponential(multiplier=1, max=10),
+        wait=wait_retry_after(fallback_strategy=wait_exponential(multiplier=1, max=10), max_wait=10),
         stop=stop_after_attempt(3),
         reraise=True,
     )
+
+
+def _raise_for_transient_status(response: httpx.Response | httpx2.Response) -> None:
+    """Raise only for statuses a repeat can fix: 408, 429 and 5xx.
+
+    Every other response, permanent 4xx included, passes through to the
+    provider SDK's own error taxonomy instead of being repeated here.
+    """
+    status = response.status_code
+    if status in (408, 429) or 500 <= status < 600:
+        response.raise_for_status()
 
 
 def _retrying_http_client(provider: str = "") -> httpx.AsyncClient | httpx2.AsyncClient:
@@ -282,14 +293,14 @@ def _retrying_http_client(provider: str = "") -> httpx.AsyncClient | httpx2.Asyn
             timeout=httpx.Timeout(**_HTTP_TIMEOUT),
             transport=AsyncTenacityTransport(
                 config=_retry_config(httpx.TransportError, httpx.HTTPStatusError),
-                validate_response=lambda r: r.raise_for_status(),
+                validate_response=_raise_for_transient_status,
             ),
         )
     return httpx2.AsyncClient(
         timeout=httpx2.Timeout(**_HTTP_TIMEOUT),
         transport=AsyncHTTPX2TenacityTransport(
             config=_retry_config(httpx2.TransportError, httpx2.HTTPStatusError),
-            validate_response=lambda r: r.raise_for_status(),
+            validate_response=_raise_for_transient_status,
         ),
     )
 
@@ -794,15 +805,7 @@ def _build_compaction_capability(
     # overflow its context.
     is_local = base_url.startswith("http://")
 
-    # Tier 0: clamp a single runaway part (giant tool result or response)
-    # before anything else — the only strategy that can reach the NEWEST
-    # oversized part, which ClearToolResults (old results only) and
-    # SlidingWindowCompaction (oldest messages only) cannot. Zero-LLM.
-    # Threshold mirrors the window pins: half the assumed window, so one
-    # part can never alone overflow it.
-    clamp_tokens = 16_000 if is_local else 64_000
     tiers: list[CompactionStrategy[Any]] = [
-        ClampOversizedMessages(max_part_tokens=clamp_tokens),
         # TieredCompaction drives the tiers itself (each tier's own trigger is
         # bypassed), so the knobs that matter here are keep_pairs and
         # min_clear_tokens — NOT max_tokens. Verified live (session-14 run,
