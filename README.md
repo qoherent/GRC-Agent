@@ -50,8 +50,9 @@ flowchart LR
   validated, rolled-back-on-failure edit. **Every edit requires your approval
   first** (the default "Manual" mode) — you see the agent's one-line reason and
   a structured summary of the proposed change before it applies (Approve / Deny
-  / Always accept). The composer's **Mode toggle** switches to "Auto" to apply
-  changes without asking, and back any time. The canvas redraws immediately,
+  / Always accept). The composer's **Mode toggle** switches to "Auto"
+  (flowgraph changes apply without asking; the shell still asks) or "YOLO"
+  (nothing asks), and back to Manual any time. The canvas redraws immediately,
   GRC's native undo/redo keeps working — what it changed is what you see.
   Topology changes re-arrange the whole graph into a clean layered layout
   (each independent chain gets its own row band, wires stay untangled), so

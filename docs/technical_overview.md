@@ -44,14 +44,15 @@ The application merges the GNU Radio Companion desktop canvas with the AI sideba
 
 ## Tool Surface
 
-The agent interacts with the user's project through nineteen tools — seven
+The agent interacts with the user's project through twenty tools — eight
 flowgraph-domain tools (`inspect_graph`, `query_knowledge`, `generate_python`,
-`change_graph`, `run_flowgraph`, `get_run_log`, `save_block`),
+`change_graph`, `run_flowgraph`, `get_run_log`, `save_graph`, `save_block`),
 eight sandboxed filesystem tools, and four shell tools (`run_command`,
-`start_command`, `check_command`, `stop_command`). The separate planner role holds `write_plan`/`read_plan` only; the
-executor deliberately has no planning tools (the durable plan arrives via a
-read-only system reminder). Web search and fetch capabilities complete the
-surface.
+`start_command`, `check_command`, `stop_command`). The separate planner role holds
+`write_plan` plus a read-only subset of the above (`read_plan` was removed when
+plan injection replaced it); the executor deliberately has no planning tools
+(the durable plan arrives via a read-only system reminder). Web search and
+fetch capabilities complete the surface.
 
 ### 1. Context-Efficient Graph Inspection (`inspect_graph`)
 
@@ -165,7 +166,7 @@ This replaces the old Yes/No "fix it?" bubble — the agent now reads the log as
 
 ## Integration Scenarios Benchmark
 
-The integration test suite executes 14 distinct scenarios mapping real-world editing workflows. The first 13 pass across both local and cloud LLM backends; `25_save_epy_block_to_library` is Ollama Cloud-only so far (this project's standard live-test backend — see the Test Gate in `AGENTS.md`):
+The integration test suite defines 15 scenarios mapping real-world editing workflows. 13 run in the generic sweep and pass across both local and cloud LLM backends; `23_lexical_conjugate_insert` and `25_save_epy_block_to_library` are Ollama Cloud-only so far (this project's standard live-test backend — see the Test Gate in `AGENTS.md`):
 
 | Scenario Name | qwen3.6:35b (Ollama Local) | glm-5.3-flash:cloud (Ollama Cloud) | Verification Objective |
 | :--- | :---: | :---: | :--- |
@@ -181,5 +182,6 @@ The integration test suite executes 14 distinct scenarios mapping real-world edi
 | `14_build_chain_from_scratch` | Pass | Pass | Constructs a signal source -> throttle -> sink chain on an empty flowgraph. |
 | `21_type_conversion_and_conjugate` | Pass | Pass | Converts signal types and applies conjugate operations across connected blocks. |
 | `22_fm_rx_filter_squelch` | Pass | Pass | Inserts a low-pass filter and simple squelch block inline inside an FM receiver chain. |
+| `23_lexical_conjugate_insert` | — | — | Dedicated lexical-fallback test: under a broken embedding backend, the full agent loop completes a real edit using only lexically retrieved catalog lookups. |
 | `24_generate_python_preview` | Pass | Pass | Previews the generated Python source of the active flowgraph via `generate_python`. |
 | `25_save_epy_block_to_library` | Not yet run | Pass | Writes a new Embedded Python Block, wires it in, then exports it via `save_block` into an isolated hier-block library dir. |
