@@ -45,9 +45,12 @@ chat_sessions.db
 src/grc_agent/vectors/
 
 
-# experiments/*/ eval pipelines — generated artifacts only, scripts stay tracked
+# experiments/*/ eval & dataset pipelines — generated artifacts only, scripts/fixtures stay tracked
 experiments/*/raw_outputs/
 experiments/*/reports/
+experiments/*/output/
+experiments/*/runs/
+experiments/*/runs_oneshot/
 experiments/*/final_findings_and_causes.md
 
 # ---- Local agent/tool working dirs (not shared) ----
