@@ -1,21 +1,23 @@
 """Real GRC Agent harness driver for one-shot trajectory collection.
 
 Drives single-user-prompt tasks through the production executor agent
-(`build_agents_from_cfg(cfg).executor`) without ad-hoc prompt overrides or
-hand-rolled OpenAI message converters.
+(`build_agents_from_cfg(cfg).executor`) using Ollama Cloud (`OllamaModel` +
+`OllamaProvider` with `deepseek-v4.1-flash` by default) without ad-hoc prompt
+overrides or hand-rolled OpenAI message converters.
 
 Key guarantees:
-- Uses `RecordingOpenAIChatModel` (subclassing `OpenAIChatModel`) so the exact
+- Uses the production `OllamaModel` (subclass of `OpenAIChatModel`) built by
+  `build_agents_from_cfg` together with `RequestParametersRecorder` so the exact
   `ModelRequestParameters` and `ModelSettings` assembled by all 13 harness
   capabilities and output validators are captured on the wire.
 - Produces wire-accurate OpenAI `messages` and `tools` via Pydantic AI's own
-  `OpenAIChatModel._map_messages` and `OpenAIChatModel._get_tool_choice`.
+  `_map_messages` and `_get_tool_choice`.
 - Preserves lossless canonical Pydantic AI `ModelMessage` history via
   `serialize_messages` (`ModelMessagesTypeAdapter.dump_json`).
 - Captures all intermediate tool calls (`inspect_graph`, `query_knowledge`,
-  `change_graph`, `generate_python`, etc.), reasoning traces (`ThinkingPart` /
-  `reasoning_content`), and guardrail errors (`RetryPromptPart` from schema
-  validation, tool `ModelRetry`, or `validate_flowgraph_state`, plus
+  `change_graph`, `generate_python`, etc.), reasoning traces (`ThinkingPart`),
+  and guardrail errors (`RetryPromptPart` from schema validation, tool
+  `ModelRetry`, or `validate_flowgraph_state`, plus
   `ToolReturnPart(outcome='failed')` from `ToolFailed`).
 """
 
@@ -32,7 +34,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import httpx2
 from pydantic_ai import ModelRequestContext, ModelSettings, RunContext
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.messages import (
@@ -47,7 +48,7 @@ from pydantic_ai.messages import (
 )
 from pydantic_ai.models import ModelProfile, ModelRequestParameters
 from pydantic_ai.models.openai import OpenAIChatModel
-from pydantic_ai.providers.openai import OpenAIProvider
+from pydantic_ai.profiles import merge_profile
 from pydantic_ai.tools import DeferredToolRequests, DeferredToolResults, ToolApproved
 from pydantic_ai.usage import RunUsage
 
@@ -55,6 +56,11 @@ from grc_agent.adapter import get_platform, inspect_graph, load_flow_graph
 from grc_agent.agent_factory import build_agents_from_cfg
 from grc_agent.db import serialize_messages
 from grc_agent.fs_tools import set_active_graph_providers
+from grc_agent.settings import get_env_value
+
+DEFAULT_PROVIDER = "ollama_cloud"
+DEFAULT_MODEL = "deepseek-v4.1-flash"
+DEFAULT_ENDPOINT = "https://ollama.com/v1"
 
 
 @dataclass
@@ -72,23 +78,6 @@ class RequestParametersRecorder(AbstractCapability[Any]):
         self.last_request_parameters = request_context.model_request_parameters
         self.last_model_settings = request_context.model_settings
         return request_context
-
-
-class RecordingOpenAIChatModel(OpenAIChatModel):
-    """OpenAIChatModel subclass that records the prepared request parameters and settings."""
-
-    last_request_parameters: ModelRequestParameters | None = None
-    last_model_settings: ModelSettings | None = None
-
-    def prepare_request(
-        self,
-        model_settings: ModelSettings | None,
-        model_request_parameters: ModelRequestParameters,
-    ) -> tuple[ModelSettings | None, ModelRequestParameters]:
-        settings, params = super().prepare_request(model_settings, model_request_parameters)
-        self.last_model_settings = settings
-        self.last_request_parameters = params
-        return settings, params
 
 
 def sum_usage(messages: Sequence[ModelMessage]) -> dict[str, int]:
@@ -294,15 +283,21 @@ def _strip_post_run_final_result_mock(messages: Sequence[ModelMessage]) -> list[
 
 async def map_to_openai_wire_format(
     messages: Sequence[ModelMessage],
-    recording_model: RecordingOpenAIChatModel,
+    chat_model: OpenAIChatModel,
+    recorder: RequestParametersRecorder,
+    fallback_settings: ModelSettings,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], str]:
     """Map Pydantic AI messages and tools to wire-accurate OpenAI format via OpenAIChatModel."""
-    params = recording_model.last_request_parameters or ModelRequestParameters()
-    settings = recording_model.last_model_settings or ModelSettings()
+    raw_settings = recorder.last_model_settings or fallback_settings
+    raw_params = recorder.last_request_parameters or ModelRequestParameters()
+    settings, params = chat_model.prepare_request(raw_settings, raw_params)
+    effective_settings = settings or fallback_settings
 
-    tools_raw, _ = recording_model._get_tool_choice(settings, params)
+    tools_raw, _ = chat_model._get_tool_choice(effective_settings, params)
     wire_msgs = _strip_post_run_final_result_mock(messages)
-    mapped_raw = await recording_model._map_messages(wire_msgs, params, model_settings=settings)
+    mapped_raw = await chat_model._map_messages(
+        wire_msgs, params, model_settings=effective_settings
+    )
 
     openai_messages: list[dict[str, Any]] = json.loads(json.dumps(mapped_raw, default=str))
     openai_tools: list[dict[str, Any]] = json.loads(json.dumps(tools_raw, default=str))
@@ -327,12 +322,24 @@ def _resolve_fixture_path(fixture_path: str | Path) -> Path:
     raise FileNotFoundError(f"Could not locate .grc fixture: {fixture_path}")
 
 
+def _resolve_ollama_cloud_key() -> str:
+    """Resolve the Ollama Cloud API key from the user's .env or environment."""
+    return (
+        get_env_value("OLLAMA_API_KEY")
+        or get_env_value("OLLAMA_CLOUD_API_KEY")
+        or os.environ.get("OLLAMA_API_KEY")
+        or os.environ.get("OLLAMA_CLOUD_API_KEY")
+        or ""
+    )
+
+
 async def run_harness_turn_async(
     *,
     scenario_id: str,
     prompt: str,
-    endpoint: str = "http://192.168.0.234:9000/v1",
-    model_name: str = "qwen3.8-27b",
+    provider: str = DEFAULT_PROVIDER,
+    model_name: str = DEFAULT_MODEL,
+    endpoint: str = DEFAULT_ENDPOINT,
     fixture_path: str | Path | None = "tests/data/dial_tone.grc",
     max_tokens: int = 8192,
     override_model: Any | None = None,
@@ -342,17 +349,32 @@ async def run_harness_turn_async(
     Runs in an isolated temporary directory with its own `.env` (`GRC_AGENT_ENV`) and
     SQLite `chat_sessions.db` so production state is never touched.
     """
+    ollama_key = _resolve_ollama_cloud_key()
+    if provider == "ollama_cloud" and override_model is None and not ollama_key:
+        raise ValueError(
+            "An API key (OLLAMA_API_KEY or OLLAMA_CLOUD_API_KEY) is required in .env "
+            "or environment for Ollama Cloud."
+        )
+
     prev_env = os.environ.get("GRC_AGENT_ENV")
     tmp_dir = Path(tempfile.mkdtemp(prefix=f"grc_atomic_{scenario_id}_"))
     try:
+        env_lines = [
+            f"GRC_PROVIDER={provider}",
+            "GRC_EMBED_BACKEND=lexical",
+        ]
+        if provider == "ollama_cloud":
+            env_lines.append(f"OLLAMA_CLOUD_MODEL={model_name}")
+            if ollama_key:
+                env_lines.append(f"OLLAMA_API_KEY={ollama_key}")
+            else:
+                env_lines.append("OLLAMA_API_KEY=test-placeholder-key")
+        else:
+            env_lines.append(f"OPENAI_COMPATIBLE_BASE_URL={endpoint}")
+            env_lines.append(f"OPENAI_COMPATIBLE_MODEL={model_name}")
+
         env_file = tmp_dir / ".env"
-        env_file.write_text(
-            f"GRC_PROVIDER=openai_compatible\n"
-            f"OPENAI_COMPATIBLE_BASE_URL={endpoint}\n"
-            f"OPENAI_COMPATIBLE_MODEL={model_name}\n"
-            f"GRC_EMBED_BACKEND=lexical\n",
-            encoding="utf-8",
-        )
+        env_file.write_text("\n".join(env_lines) + "\n", encoding="utf-8")
         os.environ["GRC_AGENT_ENV"] = str(env_file)
 
         project_dir = tmp_dir / "project"
@@ -374,35 +396,33 @@ async def run_harness_turn_async(
 
         initial_snap = inspect_graph(fg).get("graph", {})
 
-        cfg = {
-            "provider": "openai_compatible",
+        cfg: dict[str, Any] = {
+            "provider": provider,
             "model": model_name,
-            "openai_compatible_base_url": endpoint,
         }
+        if provider != "ollama_cloud":
+            cfg["openai_compatible_base_url"] = endpoint
+
         bundle = build_agents_from_cfg(cfg)
         executor = bundle.executor
         recorder = RequestParametersRecorder()
         executor._root_capability.capabilities.append(recorder)
 
-        http_client = httpx2.AsyncClient(
-            timeout=httpx2.Timeout(connect=15.0, read=180.0, write=60.0, pool=30.0)
-        )
-        recording_model = RecordingOpenAIChatModel(
-            model_name,
-            provider=OpenAIProvider(
-                base_url=endpoint,
-                api_key="not-needed",
-                http_client=http_client,
-            ),
-            profile=ModelProfile(
-                openai_supports_strict_tool_definition=False,
-                openai_chat_supports_multiple_system_messages=False,
-                openai_chat_thinking_field="reasoning_content",
-                openai_chat_send_back_thinking_parts="field",
-            ),
-        )
+        # Ensure the built OpenAIChatModel/OllamaModel merges leading system instructions into messages[0]
+        # and emits ThinkingPart in its parallel thinking field on every assistant message.
+        built_model = executor.model
+        if isinstance(built_model, OpenAIChatModel):
+            built_model._profile = merge_profile(
+                built_model.profile,
+                ModelProfile(
+                    openai_supports_strict_tool_definition=False,
+                    openai_chat_supports_multiple_system_messages=False,
+                    openai_chat_send_back_thinking_parts="field",
+                ),
+            )
+            built_model.__dict__.pop("profile", None)
 
-        active_model = override_model if override_model is not None else recording_model
+        active_model = override_model if override_model is not None else built_model
         model_settings = ModelSettings(max_tokens=max_tokens)
 
         approvals_granted: list[dict[str, Any]] = []
@@ -437,15 +457,9 @@ async def run_harness_turn_async(
 
         all_messages = res.all_messages()
 
-        # Ensure recording_model has the active request parameters even when override_model was used in tests
-        if recording_model.last_request_parameters is None and recorder.last_request_parameters is not None:
-            recording_model.prepare_request(
-                recorder.last_model_settings or model_settings,
-                recorder.last_request_parameters,
-            )
-
+        assert isinstance(built_model, OpenAIChatModel)
         openai_messages, openai_tools, system_text = await map_to_openai_wire_format(
-            all_messages, recording_model
+            all_messages, built_model, recorder, model_settings
         )
         canonical_json_str = serialize_messages(all_messages)
         canonical_messages = json.loads(canonical_json_str)
@@ -466,7 +480,8 @@ async def run_harness_turn_async(
         return {
             "scenario_id": scenario_id,
             "prompt": prompt,
-            "endpoint": endpoint,
+            "provider": provider,
+            "endpoint": endpoint if provider != "ollama_cloud" else DEFAULT_ENDPOINT,
             "model": model_name,
             "elapsed_seconds": round(elapsed_seconds, 3),
             "flowgraph_valid": validation.get("status") == "valid",

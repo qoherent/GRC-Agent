@@ -54,7 +54,7 @@ def _check_wire_messages(messages: list[dict[str, Any]]) -> tuple[list[str], int
         role = msg.get("role")
         if role == "assistant":
             assistant_turns += 1
-            if str(msg.get("reasoning_content") or "").strip():
+            if str(msg.get("reasoning") or msg.get("reasoning_content") or "").strip():
                 assistant_with_reasoning += 1
             is_final_msg = idx == len(messages) - 1
             for tc in msg.get("tool_calls") or []:

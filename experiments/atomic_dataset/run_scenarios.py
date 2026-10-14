@@ -19,7 +19,12 @@ import json
 from pathlib import Path
 from typing import Any
 
-from experiments.atomic_dataset.harness_driver import run_harness_turn
+from experiments.atomic_dataset.harness_driver import (
+    DEFAULT_ENDPOINT,
+    DEFAULT_MODEL,
+    DEFAULT_PROVIDER,
+    run_harness_turn,
+)
 from experiments.atomic_dataset.scenarios import BENCHMARK_SCENARIOS, ScenarioSpec
 from experiments.atomic_dataset.verify_traces import verify_trace_record
 
@@ -123,8 +128,18 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description="Run harness-driven one-shot GRC Agent scenarios and export SFT dataset."
     )
-    parser.add_argument("--endpoint", default="http://192.168.0.234:9000/v1", help="OpenAI base URL")
-    parser.add_argument("--model", default="qwen3.8-27b", help="Model ID")
+    parser.add_argument(
+        "--provider",
+        default=DEFAULT_PROVIDER,
+        choices=["ollama_cloud", "openai_compatible"],
+        help="LLM provider (default: ollama_cloud)",
+    )
+    parser.add_argument("--endpoint", default=DEFAULT_ENDPOINT, help="Base URL")
+    parser.add_argument(
+        "--model",
+        default=DEFAULT_MODEL,
+        help="Model ID (default: deepseek-v4.1-flash)",
+    )
     parser.add_argument("--max-tokens", type=int, default=8192, help="Max token budget per request")
     parser.add_argument(
         "--out-dir",
@@ -135,7 +150,7 @@ def main() -> int:
     parser.add_argument(
         "--scenario",
         default="all",
-        help="Scenario ID to run (or 'all' for all 5 benchmark scenarios)",
+        help="Scenario ID(s) to run, comma-separated (or 'all' for all 5 benchmark scenarios)",
     )
     args = parser.parse_args()
 
@@ -154,6 +169,7 @@ def main() -> int:
     print("==========================================================================")
     print(" GRC Agent Harness-Driven One-Shot Trajectory Collector")
     print("==========================================================================")
+    print(f"Provider:   {args.provider}")
     print(f"Endpoint:   {args.endpoint}")
     print(f"Model:      {args.model}")
     print(f"Max Tokens: {args.max_tokens}")
@@ -171,6 +187,7 @@ def main() -> int:
         rec = run_harness_turn(
             scenario_id=spec.id,
             prompt=spec.prompt,
+            provider=args.provider,
             endpoint=args.endpoint,
             model_name=args.model,
             fixture_path=spec.fixture,
