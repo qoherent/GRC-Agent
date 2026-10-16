@@ -1,0 +1,75 @@
+options:
+    parameters:
+        author: ''
+        catch_exceptions: 'True'
+        category: '[GRC Hier Blocks]'
+        cmake_opt: ''
+        comment: ''
+        copyright: ''
+        description: ''
+        gen_cmake: 'On'
+        gen_linking: dynamic
+        generate_options: qt_gui
+        hier_block_src_path: '.:'
+        id: zeromq_rep_sink_0_options
+        max_nouts: '0'
+        output_language: python
+        placement: (0,0)
+        qt_qss_theme: ''
+        realtime_scheduling: ''
+        run: 'True'
+        run_command: '{python} -u {filename}'
+        run_options: prompt
+        sizing_mode: fixed
+        thread_safe_setters: ''
+        title: 'Tier1 scaffold: zeromq_rep_sink'
+        window_size: (1000,1000)
+    states:
+        bus_sink: false
+        bus_source: false
+        bus_structure: null
+        state: enabled
+blocks:
+-   name: src_0_0
+    id: blocks_null_source
+    parameters:
+        affinity: ''
+        alias: ''
+        bus_structure_source: '[[0,],]'
+        comment: ''
+        maxoutbuf: '0'
+        minoutbuf: '0'
+        num_outputs: '1'
+        type: complex
+        vlen: '1'
+    states:
+        bus_sink: false
+        bus_source: false
+        bus_structure: null
+        state: enabled
+-   name: zeromq_rep_sink_0
+    id: zeromq_rep_sink
+    parameters:
+        address: ''
+        affinity: ''
+        alias: ''
+        bind: 'True'
+        comment: ''
+        hwm: '-1'
+        pass_tags: 'False'
+        timeout: '100'
+        type: complex
+        vlen: '1'
+    states:
+        bus_sink: false
+        bus_source: false
+        bus_structure: null
+        state: enabled
+connections:
+-   - src_0_0
+    - '0'
+    - zeromq_rep_sink_0
+    - '0'
+metadata:
+    file_format: 1
+    grc_version: 3.10.9.2

@@ -1,0 +1,68 @@
+options:
+    parameters:
+        author: ''
+        catch_exceptions: 'True'
+        category: '[GRC Hier Blocks]'
+        cmake_opt: ''
+        comment: ''
+        copyright: ''
+        description: ''
+        gen_cmake: 'On'
+        gen_linking: dynamic
+        generate_options: qt_gui
+        hier_block_src_path: '.:'
+        id: qtgui_tab_widget_0_options
+        max_nouts: '0'
+        output_language: python
+        placement: (0,0)
+        qt_qss_theme: ''
+        realtime_scheduling: ''
+        run: 'True'
+        run_command: '{python} -u {filename}'
+        run_options: prompt
+        sizing_mode: fixed
+        thread_safe_setters: ''
+        title: 'Tier1 scaffold: qtgui_tab_widget'
+        window_size: (1000,1000)
+    states:
+        bus_sink: false
+        bus_source: false
+        bus_structure: null
+        state: enabled
+blocks:
+-   name: qtgui_tab_widget_0
+    id: qtgui_tab_widget
+    parameters:
+        alias: ''
+        comment: ''
+        gui_hint: ''
+        label0: Tab 0
+        label1: Tab 1
+        label10: Tab 10
+        label11: Tab 11
+        label12: Tab 12
+        label13: Tab 13
+        label14: Tab 14
+        label15: Tab 15
+        label16: Tab 16
+        label17: Tab 17
+        label18: Tab 18
+        label19: Tab 19
+        label2: Tab 2
+        label3: Tab 3
+        label4: Tab 4
+        label5: Tab 5
+        label6: Tab 6
+        label7: Tab 7
+        label8: Tab 8
+        label9: Tab 9
+        num_tabs: '1'
+    states:
+        bus_sink: false
+        bus_source: false
+        bus_structure: null
+        state: enabled
+connections: []
+metadata:
+    file_format: 1
+    grc_version: 3.10.9.2

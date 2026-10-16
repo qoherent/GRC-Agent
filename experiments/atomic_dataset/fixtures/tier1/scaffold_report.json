@@ -1,0 +1,379 @@
+{
+  "total": 567,
+  "eligible": 474,
+  "ineligible": 93,
+  "ineligible_details": [
+    {
+      "block_id": "blocks_ctrlport_probe2_c",
+      "reason": "invalid scaffold: ['Param - Display Mask(disp_mask):\\n\\tValue \"gr.DISPTIME\" cannot be evaluated:\\n\\tmodule \\'gnuradio.gr\\' has no attribute \\'DISPTIME\\'']"
+    },
+    {
+      "block_id": "blocks_ctrlport_probe2_x",
+      "reason": "invalid scaffold: ['Param - Display Mask(disp_mask):\\n\\tValue \"gr.DISPTIME\" cannot be evaluated:\\n\\tmodule \\'gnuradio.gr\\' has no attribute \\'DISPTIME\\'']"
+    },
+    {
+      "block_id": "blocks_msg_meta_to_pair",
+      "reason": "invalid scaffold: ['Source - outpair(outpair):\\n\\tPort is not connected.', 'Sink - inmeta(inmeta):\\n\\tPort is not connected.']"
+    },
+    {
+      "block_id": "blocks_msgpair_to_var",
+      "reason": "invalid scaffold: ['Sink - inpair(inpair):\\n\\tPort is not connected.']"
+    },
+    {
+      "block_id": "blocks_sigmf_sink_minimal",
+      "reason": "invalid scaffold: ['Block - blocks_sigmf_sink_minimal_0 - SigMF Sink (Minimal)(blocks_sigmf_sink_minimal):\\n\\tAssertion \"len(filename) > 0\" failed.']"
+    },
+    {
+      "block_id": "blocks_swapiq",
+      "reason": "input port '0' dtype '<unresolved>' not wireable with null blocks"
+    },
+    {
+      "block_id": "blocks_var_to_msg",
+      "reason": "invalid scaffold: ['Source - msgout(msgout):\\n\\tPort is not connected.']"
+    },
+    {
+      "block_id": "digital_crc_append",
+      "reason": "invalid scaffold: ['Source - out(out):\\n\\tPort is not connected.', 'Sink - in(in):\\n\\tPort is not connected.']"
+    },
+    {
+      "block_id": "digital_crc_check",
+      "reason": "invalid scaffold: ['Sink - in(in):\\n\\tPort is not connected.']"
+    },
+    {
+      "block_id": "digital_hdlc_deframer_bp",
+      "reason": "invalid scaffold: ['Source - out(out):\\n\\tPort is not connected.']"
+    },
+    {
+      "block_id": "digital_hdlc_framer_pb",
+      "reason": "invalid scaffold: ['Sink - in(in):\\n\\tPort is not connected.']"
+    },
+    {
+      "block_id": "digital_header_payload_demux",
+      "reason": "invalid scaffold: ['Param - Special Tag Keys(special_tags):\\n\\tValue \"(,)\" cannot be evaluated:\\n\\tinvalid syntax (<string>, line 1)', 'Sink - header_data(header_data):\\n\\tPort is not connected.']"
+    },
+    {
+      "block_id": "digital_ofdm_chanest_vcvc",
+      "reason": "invalid scaffold: ['Block - digital_ofdm_chanest_vcvc_0 - OFDM Channel Estimation(digital_ofdm_chanest_vcvc):\\n\\tAssertion \"len(sync_symbol1)\" failed.']"
+    },
+    {
+      "block_id": "digital_ofdm_frame_equalizer_vcvc",
+      "reason": "invalid scaffold: [\"Param - CP length(cp_len):\\n\\tExpression 0.25 is invalid for type 'int'.\"]"
+    },
+    {
+      "block_id": "digital_packet_headerparser_b",
+      "reason": "invalid scaffold: ['Source - header_data(header_data):\\n\\tPort is not connected.']"
+    },
+    {
+      "block_id": "digital_packet_headerparser_b_default",
+      "reason": "invalid scaffold: ['Source - header_data(header_data):\\n\\tPort is not connected.']"
+    },
+    {
+      "block_id": "filterbank_vcvcf",
+      "reason": "invalid scaffold: [\"Source - out(0):\\n\\tFailed to eval 'len(taps)': (<class 'TypeError'>) object of type 'NoneType' has no len()\", \"Sink - in(0):\\n\\tFailed to eval 'len(taps)': (<class 'TypeError'>) object of type 'NoneType' has no len()\"]"
+    },
+    {
+      "block_id": "iio_attr_sink",
+      "reason": "invalid scaffold: ['Sink - attr(attr):\\n\\tPort is not connected.']"
+    },
+    {
+      "block_id": "iio_attr_source",
+      "reason": "output port '0' dtype 'f64' not wireable with null blocks"
+    },
+    {
+      "block_id": "iio_attr_updater",
+      "reason": "invalid scaffold: ['Source - out(out):\\n\\tPort is not connected.']"
+    },
+    {
+      "block_id": "iio_device_sink",
+      "reason": "invalid scaffold: ['Block - iio_device_sink_0 - IIO Device Sink(iio_device_sink):\\n\\tAssertion \"len(channels) > 0\" failed.']"
+    },
+    {
+      "block_id": "iio_fmcomms2_sink",
+      "reason": "input port '0' dtype 'fc32' not wireable with null blocks"
+    },
+    {
+      "block_id": "iio_fmcomms2_source",
+      "reason": "output port '0' dtype 'fc32' not wireable with null blocks"
+    },
+    {
+      "block_id": "iio_pluto_sink",
+      "reason": "input port '0' dtype 'fc32' not wireable with null blocks"
+    },
+    {
+      "block_id": "iio_pluto_source",
+      "reason": "output port '0' dtype 'fc32' not wireable with null blocks"
+    },
+    {
+      "block_id": "ival_decimator",
+      "reason": "input port '0' dtype '<unresolved>' not wireable with null blocks"
+    },
+    {
+      "block_id": "json_config",
+      "reason": "invalid scaffold: ['Block - json_config_0 - JSON Config(json_config):\\n\\tValue \"json.load(open(config_file))\" cannot be evaluated:\\n\\t[Errno 2] No such file or directory: \\'\\'']"
+    },
+    {
+      "block_id": "pdu_pdu_split",
+      "reason": "invalid scaffold: ['Sink - pdu(pdu):\\n\\tPort is not connected.']"
+    },
+    {
+      "block_id": "pdu_pdu_to_stream_x",
+      "reason": "invalid scaffold: ['Sink - pdus(pdus):\\n\\tPort is not connected.']"
+    },
+    {
+      "block_id": "pdu_pdu_to_tagged_stream",
+      "reason": "invalid scaffold: ['Sink - pdus(pdus):\\n\\tPort is not connected.']"
+    },
+    {
+      "block_id": "qtgui_bercurve_sink",
+      "reason": "invalid scaffold: ['Param - Bus_Structure_Sink(bus_structure_sink):\\n\\tValue \"list(map(lambda b:list(map(lambda a:b * len(esno) * 2 + a, range(len(esno)*2))), range(num_curves)))\" cannot be evaluated:\\n\\tobject of type \\'int\\' has no len()']"
+    },
+    {
+      "block_id": "qtgui_edit_box_msg",
+      "reason": "invalid scaffold: ['Block - qtgui_edit_box_msg_0 - QT GUI Message Edit Box(qtgui_edit_box_msg):\\n\\tAssertion \"(len(key) > 0) or not ((is_pair == \\'True\\') and (is_static == \\'True\\'))\" failed.']"
+    },
+    {
+      "block_id": "qtgui_graphicoverlay",
+      "reason": "invalid scaffold: ['Source - overlay(overlay):\\n\\tPort is not connected.']"
+    },
+    {
+      "block_id": "soapy_airspyhf_source",
+      "reason": "output port '0' dtype 'fc32' not wireable with null blocks"
+    },
+    {
+      "block_id": "soapy_bladerf_sink",
+      "reason": "input port '0' dtype 'fc32' not wireable with null blocks"
+    },
+    {
+      "block_id": "soapy_bladerf_source",
+      "reason": "output port '0' dtype 'fc32' not wireable with null blocks"
+    },
+    {
+      "block_id": "soapy_custom_sink",
+      "reason": "input port '0' dtype 'fc32' not wireable with null blocks"
+    },
+    {
+      "block_id": "soapy_custom_source",
+      "reason": "output port '0' dtype 'fc32' not wireable with null blocks"
+    },
+    {
+      "block_id": "soapy_hackrf_sink",
+      "reason": "input port '0' dtype 'fc32' not wireable with null blocks"
+    },
+    {
+      "block_id": "soapy_hackrf_source",
+      "reason": "output port '0' dtype 'fc32' not wireable with null blocks"
+    },
+    {
+      "block_id": "soapy_limesdr_sink",
+      "reason": "input port '0' dtype 'fc32' not wireable with null blocks"
+    },
+    {
+      "block_id": "soapy_limesdr_source",
+      "reason": "output port '0' dtype 'fc32' not wireable with null blocks"
+    },
+    {
+      "block_id": "soapy_plutosdr_sink",
+      "reason": "input port '0' dtype 'fc32' not wireable with null blocks"
+    },
+    {
+      "block_id": "soapy_plutosdr_source",
+      "reason": "output port '0' dtype 'fc32' not wireable with null blocks"
+    },
+    {
+      "block_id": "soapy_rtlsdr_source",
+      "reason": "output port '0' dtype 'fc32' not wireable with null blocks"
+    },
+    {
+      "block_id": "soapy_sdrplay_source",
+      "reason": "output port '0' dtype 'fc32' not wireable with null blocks"
+    },
+    {
+      "block_id": "soapy_sink",
+      "reason": "input port '0' dtype 'fc32' not wireable with null blocks"
+    },
+    {
+      "block_id": "soapy_source",
+      "reason": "output port '0' dtype 'fc32' not wireable with null blocks"
+    },
+    {
+      "block_id": "uhd_amsg_source",
+      "reason": "invalid scaffold: ['Source - msg(msg):\\n\\tPort is not connected.']"
+    },
+    {
+      "block_id": "uhd_fpga_ddc",
+      "reason": "invalid scaffold: ['Source - port(port):\\n\\tPort is not connected.', 'Sink - ddc(ddc):\\n\\tPort is not connected.', 'Sink - port(port):\\n\\tPort is not connected.']"
+    },
+    {
+      "block_id": "uhd_fpga_duc",
+      "reason": "invalid scaffold: ['Source - port0(port0):\\n\\tPort is not connected.', 'Source - port1(port1):\\n\\tPort is not connected.', 'Sink - duc(duc):\\n\\tPort is not connected.']"
+    },
+    {
+      "block_id": "uhd_fpga_fft",
+      "reason": "input port 'port0' dtype '<unresolved>' not wireable with null blocks"
+    },
+    {
+      "block_id": "uhd_fpga_radio",
+      "reason": "invalid scaffold: ['Source - ctrl_port(ctrl_port):\\n\\tPort is not connected.', 'Source - port0(port0):\\n\\tPort is not connected.', 'Source - port1(port1):\\n\\tPort is not connected.']"
+    },
+    {
+      "block_id": "uhd_fpga_sep",
+      "reason": "invalid scaffold: ['Source - out0(out0):\\n\\tPort is not connected.', 'Sink - in0(in0):\\n\\tPort is not connected.']"
+    },
+    {
+      "block_id": "uhd_fpga_x310",
+      "reason": "invalid scaffold: ['Source - radio(radio):\\n\\tPort is not connected.', 'Source - ce(ce):\\n\\tPort is not connected.', 'Source - time_keeper(time_keeper):\\n\\tPort is not connected.']"
+    },
+    {
+      "block_id": "uhd_msg_push_button",
+      "reason": "invalid scaffold: ['Source - pressed(pressed):\\n\\tPort is not connected.']"
+    },
+    {
+      "block_id": "uhd_rfnoc_addsub",
+      "reason": "invalid scaffold: ['Source - sum(0):\\n\\tPort is not connected.', 'Source - diff(1):\\n\\tPort is not connected.', 'Sink - in0(0):\\n\\tPort is not connected.']"
+    },
+    {
+      "block_id": "uhd_rfnoc_ddc",
+      "reason": "invalid scaffold: ['Source - out(0):\\n\\tPort is not connected.', 'Sink - in(0):\\n\\tPort is not connected.']"
+    },
+    {
+      "block_id": "uhd_rfnoc_duc",
+      "reason": "invalid scaffold: ['Source - out(0):\\n\\tPort is not connected.', 'Sink - in(0):\\n\\tPort is not connected.']"
+    },
+    {
+      "block_id": "uhd_rfnoc_fft",
+      "reason": "invalid scaffold: ['Source - out(0):\\n\\tPort is not connected.', 'Sink - in(0):\\n\\tPort is not connected.']"
+    },
+    {
+      "block_id": "uhd_rfnoc_fir_filter",
+      "reason": "invalid scaffold: ['Source - out(0):\\n\\tPort is not connected.', 'Sink - in(0):\\n\\tPort is not connected.']"
+    },
+    {
+      "block_id": "uhd_rfnoc_fosphor",
+      "reason": "invalid scaffold: ['Source - histo_out(0):\\n\\tPort is not connected.', 'Sink - in(0):\\n\\tPort is not connected.']"
+    },
+    {
+      "block_id": "uhd_rfnoc_keep_one_in_n",
+      "reason": "invalid scaffold: ['Source - out(0):\\n\\tPort is not connected.', 'Sink - in(0):\\n\\tPort is not connected.']"
+    },
+    {
+      "block_id": "uhd_rfnoc_logpwr",
+      "reason": "invalid scaffold: ['Source - out(0):\\n\\tPort is not connected.', 'Sink - in(0):\\n\\tPort is not connected.']"
+    },
+    {
+      "block_id": "uhd_rfnoc_moving_avg",
+      "reason": "invalid scaffold: ['Source - out(0):\\n\\tPort is not connected.', 'Sink - in(0):\\n\\tPort is not connected.']"
+    },
+    {
+      "block_id": "uhd_rfnoc_null_src_sink",
+      "reason": "invalid scaffold: ['Sink - in(0):\\n\\tPort is not connected.']"
+    },
+    {
+      "block_id": "uhd_rfnoc_replay",
+      "reason": "invalid scaffold: ['Source - out0(0):\\n\\tPort is not connected.', 'Sink - in0(0):\\n\\tPort is not connected.']"
+    },
+    {
+      "block_id": "uhd_rfnoc_rx_radio",
+      "reason": "invalid scaffold: ['Source - out(0):\\n\\tPort is not connected.']"
+    },
+    {
+      "block_id": "uhd_rfnoc_rx_streamer",
+      "reason": "input port '0' dtype '<unresolved>' not wireable with null blocks"
+    },
+    {
+      "block_id": "uhd_rfnoc_siggen",
+      "reason": "invalid scaffold: ['Source - out(0):\\n\\tPort is not connected.']"
+    },
+    {
+      "block_id": "uhd_rfnoc_split_stream",
+      "reason": "invalid scaffold: ['Source - out0(0):\\n\\tPort is not connected.', 'Source - out1(1):\\n\\tPort is not connected.', 'Sink - in(0):\\n\\tPort is not connected.']"
+    },
+    {
+      "block_id": "uhd_rfnoc_switchboard",
+      "reason": "invalid scaffold: ['Source - out0(0):\\n\\tPort is not connected.', 'Source - out1(1):\\n\\tPort is not connected.', 'Sink - in(0):\\n\\tPort is not connected.']"
+    },
+    {
+      "block_id": "uhd_rfnoc_tx_radio",
+      "reason": "invalid scaffold: ['Sink - in(0):\\n\\tPort is not connected.']"
+    },
+    {
+      "block_id": "uhd_rfnoc_tx_streamer",
+      "reason": "input port '0' dtype 'fc32' not wireable with null blocks"
+    },
+    {
+      "block_id": "uhd_rfnoc_vector_iir",
+      "reason": "invalid scaffold: ['Source - out(0):\\n\\tPort is not connected.', 'Sink - in(0):\\n\\tPort is not connected.']"
+    },
+    {
+      "block_id": "uhd_rfnoc_window",
+      "reason": "invalid scaffold: ['Source - out(0):\\n\\tPort is not connected.', 'Sink - in(0):\\n\\tPort is not connected.']"
+    },
+    {
+      "block_id": "uhd_usrp_sink",
+      "reason": "input port '0' dtype 'fc32' not wireable with null blocks"
+    },
+    {
+      "block_id": "uhd_usrp_source",
+      "reason": "output port '0' dtype 'fc32' not wireable with null blocks"
+    },
+    {
+      "block_id": "variable_adaptive_algorithm",
+      "reason": "invalid scaffold: ['Block - variable_adaptive_algorithm_0 - Adaptive Algorithm(variable_adaptive_algorithm):\\n\\tValue \"(digital.adaptive_algorithm_lms(cons.base(), step_size))\" cannot be evaluated:\\n\\t\\'NoneType\\' object has no attribute \\'base\\'']"
+    },
+    {
+      "block_id": "variable_file_filter_taps",
+      "reason": "invalid scaffold: ['Block - variable_file_filter_taps_0 - Filter Taps Loader(variable_file_filter_taps):\\n\\tValue \"filter.file_taps_loader(file, verbose).get_taps()\" cannot be evaluated:\\n\\tfile_taps_loader: Can not open \"\".']"
+    },
+    {
+      "block_id": "variable_ldpc_encoder_def",
+      "reason": "invalid scaffold: ['Block - variable_ldpc_encoder_def_0 - LDPC Encoder Definition(variable_ldpc_encoder_def):\\n\\tValue \"fec.ldpc_encoder_make(file)\" cannot be evaluated:\\n\\tBad AList file name!']"
+    },
+    {
+      "block_id": "variable_modulate_vector",
+      "reason": "invalid scaffold: ['Block - variable_modulate_vector_0 - Modulate Vector(variable_modulate_vector):\\n\\tValue \"digital.modulate_vector_bc(mod.to_basic_block(), data, taps)\" cannot be evaluated:\\n\\t\\'NoneType\\' object has no attribute \\'to_basic_block\\'']"
+    },
+    {
+      "block_id": "variable_polar_decoder_sc_def",
+      "reason": "invalid scaffold: ['Block - variable_polar_decoder_sc_def_0 - POLAR Decoder SC Definition(variable_polar_decoder_sc_def):\\n\\tValue \"fec.polar_decoder_sc.make(block_size, num_info_bits, frozen_bit_positions, frozen_bit_values)\" cannot be evaluated:\\n\\tvector::_M_range_check: __n (which is 0) >= this->size() (which is 0)']"
+    },
+    {
+      "block_id": "variable_polar_decoder_sc_list_def",
+      "reason": "invalid scaffold: ['Block - variable_polar_decoder_sc_list_def_0 - POLAR Decoder SC List Definition(variable_polar_decoder_sc_list_def):\\n\\tValue \"fec.polar_decoder_sc_list.make(max_list_size, block_size, num_info_bits, frozen_bit_positions, frozen_bit_values)\" cannot be evaluated:\\n\\tvector::_M_range_check: __n (which is 0) >= this->size() (which is 0)']"
+    },
+    {
+      "block_id": "variable_polar_decoder_sc_systematic_def",
+      "reason": "invalid scaffold: ['Block - variable_polar_decoder_sc_systematic_def_0 - systematic POLAR Decoder SC Definition(variable_polar_decoder_sc_systematic_def):\\n\\tValue \"fec.polar_decoder_sc_systematic.make(block_size, num_info_bits, frozen_bit_positions)\" cannot be evaluated:\\n\\tvector::_M_range_check: __n (which is 0) >= this->size() (which is 0)']"
+    },
+    {
+      "block_id": "variable_polar_encoder_def",
+      "reason": "invalid scaffold: ['Block - variable_polar_encoder_def_0 - POLAR Encoder Definition(variable_polar_encoder_def):\\n\\tValue \"fec.polar_encoder.make(block_size, num_info_bits, frozen_bit_positions, frozen_bit_values, is_packed)\" cannot be evaluated:\\n\\tvector::_M_range_check: __n (which is 0) >= this->size() (which is 0)']"
+    },
+    {
+      "block_id": "variable_polar_encoder_systematic_def",
+      "reason": "invalid scaffold: ['Block - variable_polar_encoder_systematic_def_0 - systematic POLAR Encoder Definition(variable_polar_encoder_systematic_def):\\n\\tValue \"fec.polar_encoder_systematic.make(block_size, num_info_bits, frozen_bit_positions)\" cannot be evaluated:\\n\\tvector::_M_range_check: __n (which is 0) >= this->size() (which is 0)']"
+    },
+    {
+      "block_id": "variable_qtgui_azelplot",
+      "reason": "invalid scaffold: ['Sink - azel(azel):\\n\\tPort is not connected.']"
+    },
+    {
+      "block_id": "variable_qtgui_distanceradar",
+      "reason": "invalid scaffold: ['Sink - radius(radius):\\n\\tPort is not connected.']"
+    },
+    {
+      "block_id": "variable_qtgui_msg_push_button",
+      "reason": "invalid scaffold: ['Source - pressed(pressed):\\n\\tPort is not connected.']"
+    },
+    {
+      "block_id": "virtual_sink",
+      "reason": "input port '0' dtype '<unresolved>' not wireable with null blocks"
+    },
+    {
+      "block_id": "virtual_source",
+      "reason": "output port '0' dtype '<unresolved>' not wireable with null blocks"
+    },
+    {
+      "block_id": "yaml_config",
+      "reason": "invalid scaffold: ['Block - yaml_config_0 - YAML Config(yaml_config):\\n\\tValue \"yaml.safe_load(open(config_file))\" cannot be evaluated:\\n\\t[Errno 2] No such file or directory: \\'\\'']"
+    }
+  ]
+}

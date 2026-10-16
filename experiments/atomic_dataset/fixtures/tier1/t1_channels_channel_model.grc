@@ -1,0 +1,95 @@
+options:
+    parameters:
+        author: ''
+        catch_exceptions: 'True'
+        category: '[GRC Hier Blocks]'
+        cmake_opt: ''
+        comment: ''
+        copyright: ''
+        description: ''
+        gen_cmake: 'On'
+        gen_linking: dynamic
+        generate_options: qt_gui
+        hier_block_src_path: '.:'
+        id: channels_channel_model_0_options
+        max_nouts: '0'
+        output_language: python
+        placement: (0,0)
+        qt_qss_theme: ''
+        realtime_scheduling: ''
+        run: 'True'
+        run_command: '{python} -u {filename}'
+        run_options: prompt
+        sizing_mode: fixed
+        thread_safe_setters: ''
+        title: 'Tier1 scaffold: channels_channel_model'
+        window_size: (1000,1000)
+    states:
+        bus_sink: false
+        bus_source: false
+        bus_structure: null
+        state: enabled
+blocks:
+-   name: channels_channel_model_0
+    id: channels_channel_model
+    parameters:
+        affinity: ''
+        alias: ''
+        block_tags: 'False'
+        comment: ''
+        epsilon: '1.0'
+        freq_offset: '0.0'
+        maxoutbuf: '0'
+        minoutbuf: '0'
+        noise_voltage: '0.0'
+        seed: '0'
+        taps: '1.0'
+    states:
+        bus_sink: false
+        bus_source: false
+        bus_structure: null
+        state: enabled
+-   name: snk_0_0
+    id: blocks_null_sink
+    parameters:
+        affinity: ''
+        alias: ''
+        bus_structure_sink: '[[0,],]'
+        comment: ''
+        num_inputs: '1'
+        type: complex
+        vlen: '1'
+    states:
+        bus_sink: false
+        bus_source: false
+        bus_structure: null
+        state: enabled
+-   name: src_0_0
+    id: blocks_null_source
+    parameters:
+        affinity: ''
+        alias: ''
+        bus_structure_source: '[[0,],]'
+        comment: ''
+        maxoutbuf: '0'
+        minoutbuf: '0'
+        num_outputs: '1'
+        type: complex
+        vlen: '1'
+    states:
+        bus_sink: false
+        bus_source: false
+        bus_structure: null
+        state: enabled
+connections:
+-   - channels_channel_model_0
+    - '0'
+    - snk_0_0
+    - '0'
+-   - src_0_0
+    - '0'
+    - channels_channel_model_0
+    - '0'
+metadata:
+    file_format: 1
+    grc_version: 3.10.9.2

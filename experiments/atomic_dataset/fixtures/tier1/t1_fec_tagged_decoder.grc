@@ -1,0 +1,104 @@
+options:
+    parameters:
+        author: ''
+        catch_exceptions: 'True'
+        category: '[GRC Hier Blocks]'
+        cmake_opt: ''
+        comment: ''
+        copyright: ''
+        description: ''
+        gen_cmake: 'On'
+        gen_linking: dynamic
+        generate_options: qt_gui
+        hier_block_src_path: '.:'
+        id: fec_tagged_decoder_0_options
+        max_nouts: '0'
+        output_language: python
+        placement: (0,0)
+        qt_qss_theme: ''
+        realtime_scheduling: ''
+        run: 'True'
+        run_command: '{python} -u {filename}'
+        run_options: prompt
+        sizing_mode: fixed
+        thread_safe_setters: ''
+        title: 'Tier1 scaffold: fec_tagged_decoder'
+        window_size: (1000,1000)
+    states:
+        bus_sink: false
+        bus_source: false
+        bus_structure: null
+        state: enabled
+blocks:
+-   name: decoder_variable
+    id: variable
+    parameters:
+        comment: ''
+        value: '1'
+    states:
+        bus_sink: false
+        bus_source: false
+        bus_structure: null
+        state: enabled
+-   name: fec_tagged_decoder_0
+    id: fec_tagged_decoder
+    parameters:
+        affinity: ''
+        alias: ''
+        comment: ''
+        decoder: decoder_variable
+        itype: byte
+        lentagname: '"pkt_len"'
+        maxoutbuf: '0'
+        minoutbuf: '0'
+        mtu: '1500'
+        otype: byte
+    states:
+        bus_sink: false
+        bus_source: false
+        bus_structure: null
+        state: enabled
+-   name: snk_0_0
+    id: blocks_null_sink
+    parameters:
+        affinity: ''
+        alias: ''
+        bus_structure_sink: '[[0,],]'
+        comment: ''
+        num_inputs: '1'
+        type: byte
+        vlen: '1'
+    states:
+        bus_sink: false
+        bus_source: false
+        bus_structure: null
+        state: enabled
+-   name: src_0_0
+    id: blocks_null_source
+    parameters:
+        affinity: ''
+        alias: ''
+        bus_structure_source: '[[0,],]'
+        comment: ''
+        maxoutbuf: '0'
+        minoutbuf: '0'
+        num_outputs: '1'
+        type: byte
+        vlen: '1'
+    states:
+        bus_sink: false
+        bus_source: false
+        bus_structure: null
+        state: enabled
+connections:
+-   - fec_tagged_decoder_0
+    - '0'
+    - snk_0_0
+    - '0'
+-   - src_0_0
+    - '0'
+    - fec_tagged_decoder_0
+    - '0'
+metadata:
+    file_format: 1
+    grc_version: 3.10.9.2

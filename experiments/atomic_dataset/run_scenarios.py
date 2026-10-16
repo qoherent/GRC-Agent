@@ -16,6 +16,9 @@ from __future__ import annotations
 import argparse
 import datetime
 import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -25,7 +28,11 @@ from experiments.atomic_dataset.harness_driver import (
     DEFAULT_PROVIDER,
     run_harness_turn,
 )
-from experiments.atomic_dataset.scenarios import BENCHMARK_SCENARIOS, ScenarioSpec
+from experiments.atomic_dataset.scenarios import (
+    BENCHMARK_SCENARIOS,
+    ScenarioSpec,
+    build_tier1_scenarios,
+)
 from experiments.atomic_dataset.verify_traces import verify_trace_record
 
 
@@ -124,9 +131,200 @@ def render_markdown_inspection_report(
     return "\n".join(lines)
 
 
+def _load_checkpoint(out_dir: Path, scenario_id: str) -> dict[str, Any] | None:
+    """Load a previously written scenario record (checkpoint) if present."""
+    p = out_dir / f"{scenario_id}.json"
+    if not p.is_file():
+        return None
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return None
+
+
+def _checkpoint_done(rec: dict[str, Any] | None) -> bool:
+    """A checkpoint counts as done when its verifier passed and the flowgraph is valid."""
+    if rec is None:
+        return False
+    ver = rec.get("verification") or {}
+    return bool(ver.get("ok")) and bool(rec.get("flowgraph_valid"))
+
+
+def _write_crash_checkpoint(
+    spec: ScenarioSpec,
+    args: argparse.Namespace,
+    exit_code: int,
+    detail: str,
+) -> dict[str, Any]:
+    """Record a native child-process crash as a checkpoint.
+
+    Crashes are RETRYABLE (not terminal): a C++ crash in the GRC layer depends on
+    which actions the model takes, so a retry may well pass. The watchdog's
+    stall-guard stops the campaign if a scenario crashes on every attempt.
+    """
+    rec: dict[str, Any] = {
+        "scenario_id": spec.id,
+        "prompt": spec.prompt,
+        "category": spec.category,
+        "name": spec.name,
+        "provider": args.provider,
+        "endpoint": args.endpoint,
+        "model": args.model,
+        "crash": True,
+        "exit_code": exit_code,
+        "crash_detail": detail[-2000:],
+        "elapsed_seconds": 0.0,
+        "flowgraph_valid": False,
+        "flowgraph_validation": {"status": "unknown", "errors": [f"native crash (exit {exit_code})"]},
+        "flowgraph_diff": {},
+        "usage": {"input_tokens": 0, "output_tokens": 0, "reasoning_tokens": 0, "requests": 0},
+        "approvals_granted": [],
+        "guardrail_events": [],
+        "tool_trajectory": [],
+        "final_output": None,
+        "verification": {"ok": False, "crash": True, "assistant_turns": 0, "reasoning_coverage": 0.0},
+    }
+    (args.out_dir / f"{spec.id}.json").write_text(json.dumps(rec, indent=2, default=str), encoding="utf-8")
+    return rec
+
+
+def _export_jsonl(out_dir: Path, specs: list[ScenarioSpec], jsonl_name: str) -> int:
+    """Rebuild the SFT JSONL from all completed checkpoint records, in suite order."""
+    jsonl_path = out_dir / jsonl_name
+    n = 0
+    with open(jsonl_path, "w", encoding="utf-8") as f:
+        for spec in specs:
+            rec = _load_checkpoint(out_dir, spec.id)
+            if not _checkpoint_done(rec):
+                continue
+            sft_row = {
+                "scenario_id": rec["scenario_id"],
+                "category": rec.get("category", spec.category),
+                "model": rec["model"],
+                "flowgraph_valid": rec["flowgraph_valid"],
+                "guardrail_events": rec["guardrail_events"],
+                "usage": rec["usage"],
+                "system": rec["system"],
+                "tools": rec["tools"],
+                "messages": rec["messages"],
+                "canonical_messages": rec["canonical_messages"],
+            }
+            f.write(json.dumps(sft_row, default=str) + "\n")
+            n += 1
+    return n
+
+
+def process_scenario(spec: ScenarioSpec, args: argparse.Namespace) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Execute one scenario through the real harness, verify, and write its checkpoint.
+
+    Runs identically in-process (benchmark suite) or in a child process (tier1 suite,
+    via --run-one) so a native C++ crash in the GRC layer kills only the child.
+    """
+    write_md = spec.family == "benchmark"  # benchmark: always; tier1: fail-only
+    rec = run_harness_turn(
+        scenario_id=spec.id,
+        prompt=spec.prompt,
+        provider=args.provider,
+        endpoint=args.endpoint,
+        model_name=args.model,
+        fixture_path=spec.fixture,
+        max_tokens=args.max_tokens,
+    )
+    rec["category"] = spec.category
+    rec["name"] = spec.name
+
+    ver = verify_trace_record(rec)
+    rec["verification"] = ver
+
+    tool_seq = [
+        f"{s['tool_name']}({s['outcome']})"
+        for s in rec["tool_trajectory"]
+        if s.get("tool_name")
+    ]
+    print(f"     Completed in {rec['elapsed_seconds']:.2f}s | Requests: {rec['usage']['requests']}")
+    print(f"     Tool Trajectory: {' -> '.join(tool_seq)}")
+    print(f"     Guardrail Events: {len(rec['guardrail_events'])}")
+    print(f"     Flowgraph Valid: {rec['flowgraph_valid']} | Verifier: {'PASS' if ver['ok'] else 'FAIL'}\n")
+
+    # Write full JSON record (checkpoint) & Markdown inspection report
+    (args.out_dir / f"{spec.id}.json").write_text(
+        json.dumps(rec, indent=2, default=str), encoding="utf-8"
+    )
+    if write_md or not (ver["ok"] and rec["flowgraph_valid"]):
+        (args.out_dir / f"{spec.id}.md").write_text(
+            render_markdown_inspection_report(rec, ver), encoding="utf-8"
+        )
+    return rec, ver
+
+
+def _run_one_child(spec: ScenarioSpec, args: argparse.Namespace, timeout_s: int = 1800) -> int:
+    """Run one scenario in a child process; returns the child's exit code.
+
+    0 = PASS, 1 = completed but failed verification (checkpoint written),
+    other = killed/crashed (SIGSEGV=139, SIGABRT=134, SIGKILL=137, timeout=124).
+    """
+    repo_root = Path(__file__).resolve().parents[2]
+    env = dict(os.environ, PYTHONPATH=f"{repo_root}{os.pathsep}{os.environ.get('PYTHONPATH', '')}")
+    cmd = [
+        sys.executable,
+        "-m",
+        "experiments.atomic_dataset.run_scenarios",
+        "--run-one-id", spec.id,
+        "--run-one-prompt", spec.prompt,
+        "--run-one-fixture", spec.fixture or "",
+        "--run-one-category", spec.category,
+        "--run-one-name", spec.name,
+        "--run-one-family", spec.family,
+        "--run-one-subcat", spec.subcategory,
+        "--run-one-tools", ",".join(spec.expected_tools),
+        "--run-one-expects-guardrail" if spec.expects_guardrail else "--run-one-no-expects-guardrail",
+        "--provider", args.provider,
+        "--endpoint", args.endpoint,
+        "--model", args.model,
+        "--max-tokens", str(args.max_tokens),
+        "--out-dir", str(args.out_dir),
+    ]
+    try:
+        proc = subprocess.run(cmd, cwd=repo_root, env=env, timeout=timeout_s)
+        return proc.returncode
+    except subprocess.TimeoutExpired:
+        return 124
+
+
+def _run_one(args: argparse.Namespace) -> int:
+    """Child-process mode: execute exactly one scenario (launched by _run_one_child)."""
+    spec = ScenarioSpec(
+        id=args.run_one_id,
+        category=args.run_one_category,
+        name=args.run_one_name,
+        fixture=args.run_one_fixture or None,
+        prompt=args.run_one_prompt,
+        expected_tools=tuple(t for t in args.run_one_tools.split(",") if t),
+        expects_guardrail=args.run_one_expects_guardrail,
+        family=args.run_one_family,
+        subcategory=args.run_one_subcat,
+    )
+    args.out_dir.mkdir(parents=True, exist_ok=True)
+    if not (spec.fixture is None or Path(spec.fixture).is_file()):
+        print(f"     [ERROR] fixture missing: {spec.fixture}")
+        return 1
+    try:
+        rec, ver = process_scenario(spec, args)
+    except Exception as e:  # noqa: BLE001
+        print(f"     [ERROR] scenario raised: {e!r}")
+        return 1
+    return 0 if (ver["ok"] and rec["flowgraph_valid"]) else 1
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Run harness-driven one-shot GRC Agent scenarios and export SFT dataset."
+    )
+    parser.add_argument(
+        "--suite",
+        default="benchmark",
+        choices=["benchmark", "tier1"],
+        help="Scenario suite (default: benchmark = the 5 smoke scenarios)",
     )
     parser.add_argument(
         "--provider",
@@ -150,111 +348,156 @@ def main() -> int:
     parser.add_argument(
         "--scenario",
         default="all",
-        help="Scenario ID(s) to run, comma-separated (or 'all' for all 5 benchmark scenarios)",
+        help="Scenario ID(s) to run, comma-separated (or 'all')",
     )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Skip scenarios whose checkpoint JSON already passed verification",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=0,
+        help="Cap on the number of NEWLY executed scenarios this run (0 = no cap)",
+    )
+    parser.add_argument(
+        "--export-only",
+        action="store_true",
+        help="Do not run anything; rebuild the SFT JSONL from existing checkpoints",
+    )
+    # Hidden child-process mode (launched by _run_one_child; not for manual use):
+    parser.add_argument("--run-one-id", default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--run-one-prompt", default="", help=argparse.SUPPRESS)
+    parser.add_argument("--run-one-fixture", default="", help=argparse.SUPPRESS)
+    parser.add_argument("--run-one-category", default="", help=argparse.SUPPRESS)
+    parser.add_argument("--run-one-name", default="", help=argparse.SUPPRESS)
+    parser.add_argument("--run-one-family", default="benchmark", help=argparse.SUPPRESS)
+    parser.add_argument("--run-one-subcat", default="", help=argparse.SUPPRESS)
+    parser.add_argument("--run-one-tools", default="", help=argparse.SUPPRESS)
+    parser.add_argument("--run-one-expects-guardrail", dest="run_one_expects_guardrail", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--run-one-no-expects-guardrail", dest="run_one_expects_guardrail", action="store_false", help=argparse.SUPPRESS)
     args = parser.parse_args()
+
+    if args.run_one_id:
+        return _run_one(args)
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
+    if args.suite == "benchmark":
+        all_specs: list[ScenarioSpec] = list(BENCHMARK_SCENARIOS)
+        jsonl_name = "sft_trajectories.jsonl"
+        manifest: dict[str, Any] | None = None
+    else:
+        all_specs, manifest = build_tier1_scenarios()
+        jsonl_name = "tier1_sft_trajectories.jsonl"
+
     if args.scenario == "all":
-        selected: list[ScenarioSpec] = list(BENCHMARK_SCENARIOS)
+        selected: list[ScenarioSpec] = list(all_specs)
     else:
         wanted = {s.strip() for s in args.scenario.split(",") if s.strip()}
-        selected = [s for s in BENCHMARK_SCENARIOS if s.id in wanted]
+        selected = [s for s in all_specs if s.id in wanted]
         if len(selected) != len(wanted):
-            avail = [s.id for s in BENCHMARK_SCENARIOS]
-            print(f"[ERROR] Unknown scenario(s) in {args.scenario!r}. Available: {avail}")
+            unknown = wanted - {s.id for s in all_specs}
+            print(f"[ERROR] Unknown scenario(s): {sorted(unknown)}")
             return 1
+
+    if manifest is not None:
+        manifest.update({
+            "provider": args.provider,
+            "endpoint": args.endpoint,
+            "model": args.model,
+            "max_tokens": args.max_tokens,
+            "out_dir": str(args.out_dir),
+            "jsonl": jsonl_name,
+            "run_started_at": datetime.datetime.now().isoformat(),
+        })
+        (args.out_dir / "tier1_manifest.json").write_text(
+            json.dumps(manifest, indent=2, default=str), encoding="utf-8"
+        )
 
     print("==========================================================================")
     print(" GRC Agent Harness-Driven One-Shot Trajectory Collector")
     print("==========================================================================")
+    print(f"Suite:      {args.suite}")
     print(f"Provider:   {args.provider}")
     print(f"Endpoint:   {args.endpoint}")
     print(f"Model:      {args.model}")
     print(f"Max Tokens: {args.max_tokens}")
     print(f"Scenarios:  {len(selected)}")
     print(f"Output Dir: {args.out_dir}")
+    print(f"SFT JSONL:  {args.out_dir / jsonl_name}")
     print("==========================================================================\n")
+
+    if args.export_only:
+        n = _export_jsonl(args.out_dir, selected, jsonl_name)
+        print(f"Export-only: {n}/{len(selected)} completed checkpoints -> {args.out_dir / jsonl_name}")
+        return 0
 
     records: list[dict[str, Any]] = []
     verifications: list[dict[str, Any]] = []
     all_passed = True
+    new_runs = 0
 
     for spec in selected:
+        if args.resume:
+            rec = _load_checkpoint(args.out_dir, spec.id)
+            if _checkpoint_done(rec):
+                print(f"---> [{spec.id}] checkpoint PASS (resumed, not re-run)")
+                records.append(rec)
+                verifications.append({"scenario_id": spec.id, **rec["verification"]})
+                continue
+
         print(f"---> Running [{spec.id}] {spec.name}")
         print(f"     Prompt: {spec.prompt}")
-        rec = run_harness_turn(
-            scenario_id=spec.id,
-            prompt=spec.prompt,
-            provider=args.provider,
-            endpoint=args.endpoint,
-            model_name=args.model,
-            fixture_path=spec.fixture,
-            max_tokens=args.max_tokens,
-        )
-        rec["category"] = spec.category
-        rec["name"] = spec.name
-
-        ver = verify_trace_record(rec)
-        rec["verification"] = ver
-        if not ver["ok"] or not rec["flowgraph_valid"]:
+        # Each scenario runs in an isolated child process: a native C++ crash in the
+        # GRC layer (e.g. an uncatchable pybind exception) kills only the child, and
+        # the parent records a terminal crash checkpoint instead of dying with it.
+        rc = _run_one_child(spec, args)
+        if rc in (0, 1):
+            rec = _load_checkpoint(args.out_dir, spec.id)
+            if rec is None:
+                # Child failed before writing its checkpoint (exception before the
+                # run); count as failure — the watchdog retries it on the next attempt.
+                all_passed = False
+                continue
+            ver = rec["verification"]
+            if not ver["ok"] or not rec["flowgraph_valid"]:
+                all_passed = False
+            records.append(rec)
+            verifications.append({"scenario_id": spec.id, **ver})
+        else:
             all_passed = False
+            rec = _write_crash_checkpoint(spec, args, rc, f"child exit code {rc}")
+            ver = rec["verification"]
+            print(f"     [CRASH] child exited {rc}; crash checkpoint recorded, moving on\n")
+            records.append(rec)
+            verifications.append({"scenario_id": spec.id, **ver})
+        new_runs += 1
+        if args.limit and new_runs >= args.limit:
+            print("\n---> --limit reached; stopping before suite completion.")
+            break
 
-        tool_seq = [
-            f"{s['tool_name']}({s['outcome']})"
-            for s in rec["tool_trajectory"]
-            if s.get("tool_name")
-        ]
-        print(f"     Completed in {rec['elapsed_seconds']:.2f}s | Requests: {rec['usage']['requests']}")
-        print(f"     Tool Trajectory: {' -> '.join(tool_seq)}")
-        print(f"     Guardrail Events: {len(rec['guardrail_events'])}")
-        print(f"     Flowgraph Valid: {rec['flowgraph_valid']} | Verifier: {'PASS' if ver['ok'] else 'FAIL'}\n")
-
-        # Write full JSON record & Markdown inspection report
-        (args.out_dir / f"{spec.id}.json").write_text(
-            json.dumps(rec, indent=2, default=str), encoding="utf-8"
-        )
-        md_report = render_markdown_inspection_report(rec, ver)
-        (args.out_dir / f"{spec.id}.md").write_text(md_report, encoding="utf-8")
-
-        records.append(rec)
-        verifications.append({"scenario_id": spec.id, **ver})
-
-    # Export Unsloth-ready SFT JSONL
-    jsonl_path = args.out_dir / "sft_trajectories.jsonl"
-    with open(jsonl_path, "w", encoding="utf-8") as f:
-        for rec in records:
-            sft_row = {
-                "scenario_id": rec["scenario_id"],
-                "category": rec["category"],
-                "model": rec["model"],
-                "flowgraph_valid": rec["flowgraph_valid"],
-                "guardrail_events": rec["guardrail_events"],
-                "usage": rec["usage"],
-                "system": rec["system"],
-                "tools": rec["tools"],
-                "messages": rec["messages"],
-                "canonical_messages": rec["canonical_messages"],
-            }
-            f.write(json.dumps(sft_row, default=str) + "\n")
+    # Export Unsloth-ready SFT JSONL from all completed checkpoints (in suite order)
+    n_exported = _export_jsonl(args.out_dir, selected, jsonl_name)
 
     print("==========================================================================")
     print(" Summary of Collected One-Shot Harness Trajectories")
     print("==========================================================================")
-    print(f"{'Scenario ID':<30} {'Time':<8} {'Reqs':<6} {'Guardrails':<12} {'FG Valid':<10} {'Audit'}")
-    print("-" * 80)
+    print(f"{'Scenario ID':<40} {'Time':<8} {'Reqs':<6} {'Guardrails':<12} {'FG Valid':<10} {'Audit'}")
+    print("-" * 90)
     for rec, ver in zip(records, verifications, strict=True):
         print(
-            f"{rec['scenario_id']:<30} "
+            f"{rec['scenario_id']:<40} "
             f"{rec['elapsed_seconds']:<7.2f}s "
             f"{rec['usage']['requests']:<6} "
             f"{len(rec['guardrail_events']):<12} "
             f"{str(rec['flowgraph_valid']):<10} "
             f"{'PASS' if ver['ok'] else 'FAIL'}"
         )
-    print("-" * 80)
-    print(f"Exported SFT JSONL: {jsonl_path}")
+    print("-" * 90)
+    print(f"Newly executed: {new_runs} | Exported rows: {n_exported}")
+    print(f"Exported SFT JSONL: {args.out_dir / jsonl_name}")
     print("==========================================================================")
     return 0 if all_passed else 1
 

@@ -1,0 +1,73 @@
+options:
+    parameters:
+        author: ''
+        catch_exceptions: 'True'
+        category: '[GRC Hier Blocks]'
+        cmake_opt: ''
+        comment: ''
+        copyright: ''
+        description: ''
+        gen_cmake: 'On'
+        gen_linking: dynamic
+        generate_options: qt_gui
+        hier_block_src_path: '.:'
+        id: iio_dds_control_0_options
+        max_nouts: '0'
+        output_language: python
+        placement: (0,0)
+        qt_qss_theme: ''
+        realtime_scheduling: ''
+        run: 'True'
+        run_command: '{python} -u {filename}'
+        run_options: prompt
+        sizing_mode: fixed
+        thread_safe_setters: ''
+        title: 'Tier1 scaffold: iio_dds_control'
+        window_size: (1000,1000)
+    states:
+        bus_sink: false
+        bus_source: false
+        bus_structure: null
+        state: enabled
+blocks:
+-   name: iio_dds_control_0
+    id: iio_dds_control
+    parameters:
+        alias: ''
+        comment: ''
+        enabled_dds1: 'False'
+        enabled_dds2: 'False'
+        freq_t1: '100000'
+        freq_t1_b: '100000'
+        freq_t1_b_q: '100000'
+        freq_t1_q: '100000'
+        freq_t2: '100000'
+        freq_t2_b: '100000'
+        freq_t2_b_q: '100000'
+        freq_t2_q: '100000'
+        phase_t1: '0'
+        phase_t1_b: '0'
+        phase_t1_b_q: '0'
+        phase_t1_q: '0'
+        phase_t2: '0'
+        phase_t2_b: '0'
+        phase_t2_b_q: '0'
+        phase_t2_q: '0'
+        scale_t1: '0'
+        scale_t1_b: '0'
+        scale_t1_b_q: '0'
+        scale_t1_q: '0'
+        scale_t2: '0'
+        scale_t2_b: '0'
+        scale_t2_b_q: '0'
+        scale_t2_q: '0'
+        uri: ip:analog
+    states:
+        bus_sink: false
+        bus_source: false
+        bus_structure: null
+        state: enabled
+connections: []
+metadata:
+    file_format: 1
+    grc_version: 3.10.9.2

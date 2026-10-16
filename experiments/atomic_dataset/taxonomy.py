@@ -14,6 +14,57 @@ from typing import Any
 
 from grc_agent.adapter import get_platform
 
+#: Structural block that exists exactly once per flowgraph; never a scenario seed.
+NON_SEED_BLOCKS = {"options"}
+
+
+def subcategory_of(category: str) -> str:
+    """Uniform subcategory key: last two levels of the GRC category path.
+
+    'Core/Filters' -> 'Core/Filters'; 'Soapy' -> 'Soapy'; 'Uncategorized' -> 'Uncategorized'.
+    """
+    parts = [p.strip() for p in category.split(" > ") if p.strip() and p.strip() != "Uncategorized"]
+    if not parts:
+        return "Uncategorized"
+    return "/".join(parts[-2:]) if len(parts) >= 2 else parts[0]
+
+
+def build_subcategory_index(taxonomy: list[dict[str, Any]] | None = None) -> dict[str, list[dict[str, Any]]]:
+    """Group catalog records by subcategory, sorted by block_id within each group."""
+    if taxonomy is None:
+        taxonomy = extract_catalog_taxonomy()
+    index: dict[str, list[dict[str, Any]]] = {}
+    for record in taxonomy:
+        if record["block_id"] in NON_SEED_BLOCKS:
+            continue
+        index.setdefault(subcategory_of(record["category"]), []).append(record)
+    for rows in index.values():
+        rows.sort(key=lambda r: r["block_id"])
+    return dict(sorted(index.items()))
+
+
+def largest_remainder_alloc(target: int, weights: dict[str, float]) -> dict[str, int]:
+    """Deterministic proportional allocation of `target` items across weighted keys.
+
+    Uses the highest-averages (D'Hondt) rule: repeatedly give one item to the key
+    maximizing weight[k] / (already[k] + 1), ties broken by key name. Allocation is
+    capped at each key's integer weight, so no key ever receives more seeds than it
+    actually has. Every key with positive weight receives >= 1 while items remain
+    and caps allow.
+    """
+    keys = sorted(weights)
+    alloc = {k: 0 for k in keys}
+    caps = {k: int(weights[k]) for k in keys}
+    remaining = target
+    while remaining > 0:
+        candidates = [k for k in keys if weights[k] > 0 and alloc[k] < caps[k]]
+        if not candidates:
+            break
+        best = sorted(candidates, key=lambda k: (-weights[k] / (alloc[k] + 1), k))[0]
+        alloc[best] += 1
+        remaining -= 1
+    return alloc
+
 
 def extract_catalog_taxonomy() -> list[dict[str, Any]]:
     """Introspect all non-private GNU Radio Companion catalog blocks."""

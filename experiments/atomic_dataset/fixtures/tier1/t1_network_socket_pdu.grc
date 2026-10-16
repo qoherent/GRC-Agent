@@ -1,0 +1,54 @@
+options:
+    parameters:
+        author: ''
+        catch_exceptions: 'True'
+        category: '[GRC Hier Blocks]'
+        cmake_opt: ''
+        comment: ''
+        copyright: ''
+        description: ''
+        gen_cmake: 'On'
+        gen_linking: dynamic
+        generate_options: qt_gui
+        hier_block_src_path: '.:'
+        id: network_socket_pdu_0_options
+        max_nouts: '0'
+        output_language: python
+        placement: (0,0)
+        qt_qss_theme: ''
+        realtime_scheduling: ''
+        run: 'True'
+        run_command: '{python} -u {filename}'
+        run_options: prompt
+        sizing_mode: fixed
+        thread_safe_setters: ''
+        title: 'Tier1 scaffold: network_socket_pdu'
+        window_size: (1000,1000)
+    states:
+        bus_sink: false
+        bus_source: false
+        bus_structure: null
+        state: enabled
+blocks:
+-   name: network_socket_pdu_0
+    id: network_socket_pdu
+    parameters:
+        affinity: ''
+        alias: ''
+        comment: ''
+        host: ''
+        maxoutbuf: '0'
+        minoutbuf: '0'
+        mtu: '10000'
+        port: '52001'
+        tcp_no_delay: 'False'
+        type: TCP_SERVER
+    states:
+        bus_sink: false
+        bus_source: false
+        bus_structure: null
+        state: enabled
+connections: []
+metadata:
+    file_format: 1
+    grc_version: 3.10.9.2

@@ -1,0 +1,71 @@
+options:
+    parameters:
+        author: ''
+        catch_exceptions: 'True'
+        category: '[GRC Hier Blocks]'
+        cmake_opt: ''
+        comment: ''
+        copyright: ''
+        description: ''
+        gen_cmake: 'On'
+        gen_linking: dynamic
+        generate_options: qt_gui
+        hier_block_src_path: '.:'
+        id: variable_rrc_filter_taps_0_options
+        max_nouts: '0'
+        output_language: python
+        placement: (0,0)
+        qt_qss_theme: ''
+        realtime_scheduling: ''
+        run: 'True'
+        run_command: '{python} -u {filename}'
+        run_options: prompt
+        sizing_mode: fixed
+        thread_safe_setters: ''
+        title: 'Tier1 scaffold: variable_rrc_filter_taps'
+        window_size: (1000,1000)
+    states:
+        bus_sink: false
+        bus_source: false
+        bus_structure: null
+        state: enabled
+blocks:
+-   name: samp_rate
+    id: variable
+    parameters:
+        comment: ''
+        value: '32000'
+    states:
+        bus_sink: false
+        bus_source: false
+        bus_structure: null
+        state: enabled
+-   name: sps
+    id: variable
+    parameters:
+        comment: ''
+        value: '1'
+    states:
+        bus_sink: false
+        bus_source: false
+        bus_structure: null
+        state: enabled
+-   name: variable_rrc_filter_taps_0
+    id: variable_rrc_filter_taps
+    parameters:
+        alpha: '0.35'
+        comment: ''
+        gain: '1.0'
+        ntaps: 11*sps
+        samp_rate: samp_rate
+        sym_rate: '1'
+        value: ''
+    states:
+        bus_sink: false
+        bus_source: false
+        bus_structure: null
+        state: enabled
+connections: []
+metadata:
+    file_format: 1
+    grc_version: 3.10.9.2

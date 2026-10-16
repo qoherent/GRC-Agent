@@ -1,0 +1,360 @@
+options:
+    parameters:
+        author: ''
+        catch_exceptions: 'True'
+        category: '[GRC Hier Blocks]'
+        cmake_opt: ''
+        comment: ''
+        copyright: ''
+        description: ''
+        gen_cmake: 'On'
+        gen_linking: dynamic
+        generate_options: qt_gui
+        hier_block_src_path: '.:'
+        id: fec_bercurve_generator_0_options
+        max_nouts: '0'
+        output_language: python
+        placement: (0,0)
+        qt_qss_theme: ''
+        realtime_scheduling: ''
+        run: 'True'
+        run_command: '{python} -u {filename}'
+        run_options: prompt
+        sizing_mode: fixed
+        thread_safe_setters: ''
+        title: 'Tier1 scaffold: fec_bercurve_generator'
+        window_size: (1000,1000)
+    states:
+        bus_sink: false
+        bus_source: false
+        bus_structure: null
+        state: enabled
+blocks:
+-   name: fec_bercurve_generator_0
+    id: fec_bercurve_generator
+    parameters:
+        affinity: ''
+        alias: ''
+        comment: ''
+        decoder_list: '0'
+        encoder_list: '0'
+        esno: numpy.arange(0.0, 4.0, .5)
+        maxoutbuf: '0'
+        minoutbuf: '0'
+        puncpat: '''11'''
+        samp_rate: '3200000'
+        seed: '0'
+        threadtype: '"capillary"'
+    states:
+        bus_sink: false
+        bus_source: false
+        bus_structure: null
+        state: enabled
+-   name: snk_0_0
+    id: blocks_null_sink
+    parameters:
+        affinity: ''
+        alias: ''
+        bus_structure_sink: '[[0,],]'
+        comment: ''
+        num_inputs: '1'
+        type: byte
+        vlen: '1'
+    states:
+        bus_sink: false
+        bus_source: false
+        bus_structure: null
+        state: enabled
+-   name: snk_10_10
+    id: blocks_null_sink
+    parameters:
+        affinity: ''
+        alias: ''
+        bus_structure_sink: '[[0,],]'
+        comment: ''
+        num_inputs: '1'
+        type: byte
+        vlen: '1'
+    states:
+        bus_sink: false
+        bus_source: false
+        bus_structure: null
+        state: enabled
+-   name: snk_11_11
+    id: blocks_null_sink
+    parameters:
+        affinity: ''
+        alias: ''
+        bus_structure_sink: '[[0,],]'
+        comment: ''
+        num_inputs: '1'
+        type: byte
+        vlen: '1'
+    states:
+        bus_sink: false
+        bus_source: false
+        bus_structure: null
+        state: enabled
+-   name: snk_12_12
+    id: blocks_null_sink
+    parameters:
+        affinity: ''
+        alias: ''
+        bus_structure_sink: '[[0,],]'
+        comment: ''
+        num_inputs: '1'
+        type: byte
+        vlen: '1'
+    states:
+        bus_sink: false
+        bus_source: false
+        bus_structure: null
+        state: enabled
+-   name: snk_13_13
+    id: blocks_null_sink
+    parameters:
+        affinity: ''
+        alias: ''
+        bus_structure_sink: '[[0,],]'
+        comment: ''
+        num_inputs: '1'
+        type: byte
+        vlen: '1'
+    states:
+        bus_sink: false
+        bus_source: false
+        bus_structure: null
+        state: enabled
+-   name: snk_14_14
+    id: blocks_null_sink
+    parameters:
+        affinity: ''
+        alias: ''
+        bus_structure_sink: '[[0,],]'
+        comment: ''
+        num_inputs: '1'
+        type: byte
+        vlen: '1'
+    states:
+        bus_sink: false
+        bus_source: false
+        bus_structure: null
+        state: enabled
+-   name: snk_15_15
+    id: blocks_null_sink
+    parameters:
+        affinity: ''
+        alias: ''
+        bus_structure_sink: '[[0,],]'
+        comment: ''
+        num_inputs: '1'
+        type: byte
+        vlen: '1'
+    states:
+        bus_sink: false
+        bus_source: false
+        bus_structure: null
+        state: enabled
+-   name: snk_1_1
+    id: blocks_null_sink
+    parameters:
+        affinity: ''
+        alias: ''
+        bus_structure_sink: '[[0,],]'
+        comment: ''
+        num_inputs: '1'
+        type: byte
+        vlen: '1'
+    states:
+        bus_sink: false
+        bus_source: false
+        bus_structure: null
+        state: enabled
+-   name: snk_2_2
+    id: blocks_null_sink
+    parameters:
+        affinity: ''
+        alias: ''
+        bus_structure_sink: '[[0,],]'
+        comment: ''
+        num_inputs: '1'
+        type: byte
+        vlen: '1'
+    states:
+        bus_sink: false
+        bus_source: false
+        bus_structure: null
+        state: enabled
+-   name: snk_3_3
+    id: blocks_null_sink
+    parameters:
+        affinity: ''
+        alias: ''
+        bus_structure_sink: '[[0,],]'
+        comment: ''
+        num_inputs: '1'
+        type: byte
+        vlen: '1'
+    states:
+        bus_sink: false
+        bus_source: false
+        bus_structure: null
+        state: enabled
+-   name: snk_4_4
+    id: blocks_null_sink
+    parameters:
+        affinity: ''
+        alias: ''
+        bus_structure_sink: '[[0,],]'
+        comment: ''
+        num_inputs: '1'
+        type: byte
+        vlen: '1'
+    states:
+        bus_sink: false
+        bus_source: false
+        bus_structure: null
+        state: enabled
+-   name: snk_5_5
+    id: blocks_null_sink
+    parameters:
+        affinity: ''
+        alias: ''
+        bus_structure_sink: '[[0,],]'
+        comment: ''
+        num_inputs: '1'
+        type: byte
+        vlen: '1'
+    states:
+        bus_sink: false
+        bus_source: false
+        bus_structure: null
+        state: enabled
+-   name: snk_6_6
+    id: blocks_null_sink
+    parameters:
+        affinity: ''
+        alias: ''
+        bus_structure_sink: '[[0,],]'
+        comment: ''
+        num_inputs: '1'
+        type: byte
+        vlen: '1'
+    states:
+        bus_sink: false
+        bus_source: false
+        bus_structure: null
+        state: enabled
+-   name: snk_7_7
+    id: blocks_null_sink
+    parameters:
+        affinity: ''
+        alias: ''
+        bus_structure_sink: '[[0,],]'
+        comment: ''
+        num_inputs: '1'
+        type: byte
+        vlen: '1'
+    states:
+        bus_sink: false
+        bus_source: false
+        bus_structure: null
+        state: enabled
+-   name: snk_8_8
+    id: blocks_null_sink
+    parameters:
+        affinity: ''
+        alias: ''
+        bus_structure_sink: '[[0,],]'
+        comment: ''
+        num_inputs: '1'
+        type: byte
+        vlen: '1'
+    states:
+        bus_sink: false
+        bus_source: false
+        bus_structure: null
+        state: enabled
+-   name: snk_9_9
+    id: blocks_null_sink
+    parameters:
+        affinity: ''
+        alias: ''
+        bus_structure_sink: '[[0,],]'
+        comment: ''
+        num_inputs: '1'
+        type: byte
+        vlen: '1'
+    states:
+        bus_sink: false
+        bus_source: false
+        bus_structure: null
+        state: enabled
+connections:
+-   - fec_bercurve_generator_0
+    - '0'
+    - snk_0_0
+    - '0'
+-   - fec_bercurve_generator_0
+    - '1'
+    - snk_1_1
+    - '0'
+-   - fec_bercurve_generator_0
+    - '10'
+    - snk_10_10
+    - '0'
+-   - fec_bercurve_generator_0
+    - '11'
+    - snk_11_11
+    - '0'
+-   - fec_bercurve_generator_0
+    - '12'
+    - snk_12_12
+    - '0'
+-   - fec_bercurve_generator_0
+    - '13'
+    - snk_13_13
+    - '0'
+-   - fec_bercurve_generator_0
+    - '14'
+    - snk_14_14
+    - '0'
+-   - fec_bercurve_generator_0
+    - '15'
+    - snk_15_15
+    - '0'
+-   - fec_bercurve_generator_0
+    - '2'
+    - snk_2_2
+    - '0'
+-   - fec_bercurve_generator_0
+    - '3'
+    - snk_3_3
+    - '0'
+-   - fec_bercurve_generator_0
+    - '4'
+    - snk_4_4
+    - '0'
+-   - fec_bercurve_generator_0
+    - '5'
+    - snk_5_5
+    - '0'
+-   - fec_bercurve_generator_0
+    - '6'
+    - snk_6_6
+    - '0'
+-   - fec_bercurve_generator_0
+    - '7'
+    - snk_7_7
+    - '0'
+-   - fec_bercurve_generator_0
+    - '8'
+    - snk_8_8
+    - '0'
+-   - fec_bercurve_generator_0
+    - '9'
+    - snk_9_9
+    - '0'
+metadata:
+    file_format: 1
+    grc_version: 3.10.9.2

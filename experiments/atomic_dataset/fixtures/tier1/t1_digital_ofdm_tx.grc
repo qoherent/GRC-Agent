@@ -1,0 +1,102 @@
+options:
+    parameters:
+        author: ''
+        catch_exceptions: 'True'
+        category: '[GRC Hier Blocks]'
+        cmake_opt: ''
+        comment: ''
+        copyright: ''
+        description: ''
+        gen_cmake: 'On'
+        gen_linking: dynamic
+        generate_options: qt_gui
+        hier_block_src_path: '.:'
+        id: digital_ofdm_tx_0_options
+        max_nouts: '0'
+        output_language: python
+        placement: (0,0)
+        qt_qss_theme: ''
+        realtime_scheduling: ''
+        run: 'True'
+        run_command: '{python} -u {filename}'
+        run_options: prompt
+        sizing_mode: fixed
+        thread_safe_setters: ''
+        title: 'Tier1 scaffold: digital_ofdm_tx'
+        window_size: (1000,1000)
+    states:
+        bus_sink: false
+        bus_source: false
+        bus_structure: null
+        state: enabled
+blocks:
+-   name: digital_ofdm_tx_0
+    id: digital_ofdm_tx
+    parameters:
+        affinity: ''
+        alias: ''
+        comment: ''
+        cp_len: '16'
+        fft_len: '64'
+        header_mod: '"BPSK"'
+        log: 'False'
+        maxoutbuf: '0'
+        minoutbuf: '0'
+        occupied_carriers: ()
+        packet_len_key: length
+        payload_mod: '"BPSK"'
+        pilot_carriers: ()
+        pilot_symbols: ()
+        rolloff: '0'
+        scramble_bits: 'False'
+        sync_word1: ()
+        sync_word2: ()
+    states:
+        bus_sink: false
+        bus_source: false
+        bus_structure: null
+        state: enabled
+-   name: snk_0_0
+    id: blocks_null_sink
+    parameters:
+        affinity: ''
+        alias: ''
+        bus_structure_sink: '[[0,],]'
+        comment: ''
+        num_inputs: '1'
+        type: complex
+        vlen: '1'
+    states:
+        bus_sink: false
+        bus_source: false
+        bus_structure: null
+        state: enabled
+-   name: src_0_0
+    id: blocks_null_source
+    parameters:
+        affinity: ''
+        alias: ''
+        bus_structure_source: '[[0,],]'
+        comment: ''
+        maxoutbuf: '0'
+        minoutbuf: '0'
+        num_outputs: '1'
+        type: byte
+        vlen: '1'
+    states:
+        bus_sink: false
+        bus_source: false
+        bus_structure: null
+        state: enabled
+connections:
+-   - digital_ofdm_tx_0
+    - '0'
+    - snk_0_0
+    - '0'
+-   - src_0_0
+    - '0'
+    - digital_ofdm_tx_0
+    - '0'
+metadata:
+    file_format: 1
+    grc_version: 3.10.9.2

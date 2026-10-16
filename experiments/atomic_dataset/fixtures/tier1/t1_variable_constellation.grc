@@ -1,0 +1,54 @@
+options:
+    parameters:
+        author: ''
+        catch_exceptions: 'True'
+        category: '[GRC Hier Blocks]'
+        cmake_opt: ''
+        comment: ''
+        copyright: ''
+        description: ''
+        gen_cmake: 'On'
+        gen_linking: dynamic
+        generate_options: qt_gui
+        hier_block_src_path: '.:'
+        id: variable_constellation_0_options
+        max_nouts: '0'
+        output_language: python
+        placement: (0,0)
+        qt_qss_theme: ''
+        realtime_scheduling: ''
+        run: 'True'
+        run_command: '{python} -u {filename}'
+        run_options: prompt
+        sizing_mode: fixed
+        thread_safe_setters: ''
+        title: 'Tier1 scaffold: variable_constellation'
+        window_size: (1000,1000)
+    states:
+        bus_sink: false
+        bus_source: false
+        bus_structure: null
+        state: enabled
+blocks:
+-   name: variable_constellation_0
+    id: variable_constellation
+    parameters:
+        comment: ''
+        const_points: '[-1-1j, -1+1j, 1+1j, 1-1j]'
+        dims: '1'
+        normalization: digital.constellation.AMPLITUDE_NORMALIZATION
+        npwr: '1.0'
+        precision: '8'
+        rot_sym: '4'
+        soft_dec_lut: None
+        sym_map: '[0, 1, 3, 2]'
+        type: calcdist
+    states:
+        bus_sink: false
+        bus_source: false
+        bus_structure: null
+        state: enabled
+connections: []
+metadata:
+    file_format: 1
+    grc_version: 3.10.9.2
