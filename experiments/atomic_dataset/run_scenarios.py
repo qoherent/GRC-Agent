@@ -26,12 +26,14 @@ from experiments.atomic_dataset.harness_driver import (
     DEFAULT_ENDPOINT,
     DEFAULT_MODEL,
     DEFAULT_PROVIDER,
+    run_harness_session,
     run_harness_turn,
 )
 from experiments.atomic_dataset.scenarios import (
     BENCHMARK_SCENARIOS,
     ScenarioSpec,
     build_tier1_scenarios,
+    build_tier2_scenarios,
 )
 from experiments.atomic_dataset.verify_traces import verify_trace_record
 
@@ -209,6 +211,8 @@ def _export_jsonl(out_dir: Path, specs: list[ScenarioSpec], jsonl_name: str) -> 
                 "messages": rec["messages"],
                 "canonical_messages": rec["canonical_messages"],
             }
+            if "turns" in rec:
+                sft_row["turns"] = rec["turns"]
             f.write(json.dumps(sft_row, default=str) + "\n")
             n += 1
     return n
@@ -220,16 +224,27 @@ def process_scenario(spec: ScenarioSpec, args: argparse.Namespace) -> tuple[dict
     Runs identically in-process (benchmark suite) or in a child process (tier1 suite,
     via --run-one) so a native C++ crash in the GRC layer kills only the child.
     """
-    write_md = spec.family == "benchmark"  # benchmark: always; tier1: fail-only
-    rec = run_harness_turn(
-        scenario_id=spec.id,
-        prompt=spec.prompt,
-        provider=args.provider,
-        endpoint=args.endpoint,
-        model_name=args.model,
-        fixture_path=spec.fixture,
-        max_tokens=args.max_tokens,
-    )
+    write_md = spec.family == "benchmark"  # benchmark: always; tier1/tier2: fail-only
+    if spec.turns:
+        rec = run_harness_session(
+            scenario_id=spec.id,
+            prompts=list(spec.turns),
+            provider=args.provider,
+            endpoint=args.endpoint,
+            model_name=args.model,
+            fixture_path=spec.fixture,
+            max_tokens=args.max_tokens,
+        )
+    else:
+        rec = run_harness_turn(
+            scenario_id=spec.id,
+            prompt=spec.prompt,
+            provider=args.provider,
+            endpoint=args.endpoint,
+            model_name=args.model,
+            fixture_path=spec.fixture,
+            max_tokens=args.max_tokens,
+        )
     rec["category"] = spec.category
     rec["name"] = spec.name
 
@@ -277,6 +292,7 @@ def _run_one_child(spec: ScenarioSpec, args: argparse.Namespace, timeout_s: int 
         "--run-one-family", spec.family,
         "--run-one-subcat", spec.subcategory,
         "--run-one-tools", ",".join(spec.expected_tools),
+        "--run-one-turns", json.dumps(list(spec.turns)),
         "--run-one-expects-guardrail" if spec.expects_guardrail else "--run-one-no-expects-guardrail",
         "--provider", args.provider,
         "--endpoint", args.endpoint,
@@ -284,6 +300,9 @@ def _run_one_child(spec: ScenarioSpec, args: argparse.Namespace, timeout_s: int 
         "--max-tokens", str(args.max_tokens),
         "--out-dir", str(args.out_dir),
     ]
+    # Multi-turn scenarios run 2-3x longer: give the child a bigger budget.
+    if spec.turns:
+        timeout_s = max(timeout_s, 3600)
     try:
         proc = subprocess.run(cmd, cwd=repo_root, env=env, timeout=timeout_s)
         return proc.returncode
@@ -293,6 +312,7 @@ def _run_one_child(spec: ScenarioSpec, args: argparse.Namespace, timeout_s: int 
 
 def _run_one(args: argparse.Namespace) -> int:
     """Child-process mode: execute exactly one scenario (launched by _run_one_child)."""
+    turns = tuple(json.loads(args.run_one_turns)) if args.run_one_turns else ()
     spec = ScenarioSpec(
         id=args.run_one_id,
         category=args.run_one_category,
@@ -303,6 +323,7 @@ def _run_one(args: argparse.Namespace) -> int:
         expects_guardrail=args.run_one_expects_guardrail,
         family=args.run_one_family,
         subcategory=args.run_one_subcat,
+        turns=turns,
     )
     args.out_dir.mkdir(parents=True, exist_ok=True)
     if not (spec.fixture is None or Path(spec.fixture).is_file()):
@@ -316,6 +337,30 @@ def _run_one(args: argparse.Namespace) -> int:
     return 0 if (ver["ok"] and rec["flowgraph_valid"]) else 1
 
 
+def _select_scenarios(all_specs: list[ScenarioSpec], wanted: str) -> list[ScenarioSpec] | None:
+    """Resolve the --scenario filter; None if any requested id is unknown."""
+    if wanted == "all":
+        return list(all_specs)
+    wanted_ids = {s.strip() for s in wanted.split(",") if s.strip()}
+    selected = [s for s in all_specs if s.id in wanted_ids]
+    if len(selected) != len(wanted_ids):
+        unknown = wanted_ids - {s.id for s in all_specs}
+        print(f"[ERROR] Unknown scenario(s): {sorted(unknown)}")
+        return None
+    return selected
+
+
+def _select_suite(args: argparse.Namespace) -> tuple[list[ScenarioSpec], str, dict[str, Any] | None]:
+    """Build the scenario suite selected by --suite and its SFT JSONL name."""
+    if args.suite == "benchmark":
+        return list(BENCHMARK_SCENARIOS), "sft_trajectories.jsonl", None
+    if args.suite == "tier2":
+        specs, manifest = build_tier2_scenarios()
+        return specs, "tier2_sft_trajectories.jsonl", manifest
+    specs, manifest = build_tier1_scenarios()
+    return specs, "tier1_sft_trajectories.jsonl", manifest
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Run harness-driven one-shot GRC Agent scenarios and export SFT dataset."
@@ -323,7 +368,7 @@ def main() -> int:
     parser.add_argument(
         "--suite",
         default="benchmark",
-        choices=["benchmark", "tier1"],
+        choices=["benchmark", "tier1", "tier2"],
         help="Scenario suite (default: benchmark = the 5 smoke scenarios)",
     )
     parser.add_argument(
@@ -375,6 +420,7 @@ def main() -> int:
     parser.add_argument("--run-one-family", default="benchmark", help=argparse.SUPPRESS)
     parser.add_argument("--run-one-subcat", default="", help=argparse.SUPPRESS)
     parser.add_argument("--run-one-tools", default="", help=argparse.SUPPRESS)
+    parser.add_argument("--run-one-turns", default="", help=argparse.SUPPRESS)
     parser.add_argument("--run-one-expects-guardrail", dest="run_one_expects_guardrail", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--run-one-no-expects-guardrail", dest="run_one_expects_guardrail", action="store_false", help=argparse.SUPPRESS)
     args = parser.parse_args()
@@ -384,23 +430,11 @@ def main() -> int:
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
-    if args.suite == "benchmark":
-        all_specs: list[ScenarioSpec] = list(BENCHMARK_SCENARIOS)
-        jsonl_name = "sft_trajectories.jsonl"
-        manifest: dict[str, Any] | None = None
-    else:
-        all_specs, manifest = build_tier1_scenarios()
-        jsonl_name = "tier1_sft_trajectories.jsonl"
+    all_specs, jsonl_name, manifest = _select_suite(args)
 
-    if args.scenario == "all":
-        selected: list[ScenarioSpec] = list(all_specs)
-    else:
-        wanted = {s.strip() for s in args.scenario.split(",") if s.strip()}
-        selected = [s for s in all_specs if s.id in wanted]
-        if len(selected) != len(wanted):
-            unknown = wanted - {s.id for s in all_specs}
-            print(f"[ERROR] Unknown scenario(s): {sorted(unknown)}")
-            return 1
+    selected = _select_scenarios(all_specs, args.scenario)
+    if selected is None:
+        return 1
 
     if manifest is not None:
         manifest.update({
@@ -412,7 +446,7 @@ def main() -> int:
             "jsonl": jsonl_name,
             "run_started_at": datetime.datetime.now().isoformat(),
         })
-        (args.out_dir / "tier1_manifest.json").write_text(
+        (args.out_dir / f"{args.suite}_manifest.json").write_text(
             json.dumps(manifest, indent=2, default=str), encoding="utf-8"
         )
 
@@ -449,7 +483,11 @@ def main() -> int:
                 continue
 
         print(f"---> Running [{spec.id}] {spec.name}")
-        print(f"     Prompt: {spec.prompt}")
+        if spec.turns:
+            for i, p in enumerate(spec.turns, 1):
+                print(f"     Turn {i}: {p}")
+        else:
+            print(f"     Prompt: {spec.prompt}")
         # Each scenario runs in an isolated child process: a native C++ crash in the
         # GRC layer (e.g. an uncatchable pybind exception) kills only the child, and
         # the parent records a terminal crash checkpoint instead of dying with it.

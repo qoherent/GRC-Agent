@@ -12,14 +12,18 @@ its ``content`` wrapped in think open/close tags (Qwen3 chat template).
 """
 from __future__ import annotations
 
+import argparse
 import json
 from datetime import UTC, datetime
 from pathlib import Path
 
 OUT = Path(__file__).resolve().parent / "output"
-SRC = OUT / "tier1_sft_trajectories.jsonl"
-DST = OUT / "tier1_unsloth.jsonl"
-REPORT = OUT / "tier1_unsloth_report.json"
+
+#: Suite -> (source JSONL, destination JSONL, report JSON).
+SUITES: dict[str, tuple[str, str, str]] = {
+    "tier1": ("tier1_sft_trajectories.jsonl", "tier1_unsloth.jsonl", "tier1_unsloth_report.json"),
+    "tier2": ("tier2_sft_trajectories.jsonl", "tier2_unsloth.jsonl", "tier2_unsloth_report.json"),
+}
 
 # Built at runtime so the tag literals never appear in this source file.
 _THINK_OPEN = chr(60) + "think" + chr(62)
@@ -83,37 +87,46 @@ def convert_messages(row: dict) -> list[dict]:
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description="Convert a tier SFT trajectory JSONL to Unsloth-ready chat JSONL.")
+    parser.add_argument("--suite", default="tier1", choices=sorted(SUITES), help="Source suite (default: tier1)")
+    args = parser.parse_args()
+    src_name, dst_name, report_name = SUITES[args.suite]
+    src, dst, report = OUT / src_name, OUT / dst_name, OUT / report_name
+    if not src.is_file():
+        raise SystemExit(f"missing {src} — run the collector first")
+
     dropped: list[dict] = []
     kept = 0
-    with SRC.open() as src, DST.open("w") as dst:
-        for i, line in enumerate(src, 1):
+    with src.open() as f, dst.open("w") as dstf:
+        for i, line in enumerate(f, 1):
             row = json.loads(line)
             errs = audit_row(row)
             if errs:
                 dropped.append({"row": i, "scenario_id": row["scenario_id"], "reasons": errs})
                 continue
-            dst.write(json.dumps(
-                {
-                    "scenario_id": row["scenario_id"],
-                    "category": row["category"],
-                    "messages": convert_messages(row),
-                },
-                ensure_ascii=False,
-            ) + "\n")
+            out_row = {
+                "scenario_id": row["scenario_id"],
+                "category": row["category"],
+                "messages": convert_messages(row),
+            }
+            if "turns" in row:
+                out_row["turns"] = row["turns"]
+            dstf.write(json.dumps(out_row, ensure_ascii=False) + "\n")
             kept += 1
 
-    report = {
-        "source": str(SRC.name),
+    report_doc = {
+        "suite": args.suite,
+        "source": src.name,
         "generated_at": datetime.now(UTC).isoformat(timespec="seconds"),
         "source_rows": kept + len(dropped),
         "converted": kept,
         "dropped": dropped,
         "reasoning_merge": "assistant reasoning field merged into content wrapped in "
         "think open/close tags (Qwen3 chat template); tool_calls/tool_call_id kept verbatim",
-        "format": "OpenAI chat JSONL ({'scenario_id','category','messages'}) for Unsloth SFTDataset",
+        "format": "OpenAI chat JSONL ({'scenario_id','category','messages'}[, 'turns']) for Unsloth SFTDataset",
     }
-    REPORT.write_text(json.dumps(report, indent=2, ensure_ascii=False))
-    print(f"converted: {kept} | dropped: {len(dropped)} -> {DST.name}, {REPORT.name}")
+    report.write_text(json.dumps(report_doc, indent=2, ensure_ascii=False))
+    print(f"[{args.suite}] converted: {kept} | dropped: {len(dropped)} -> {dst.name}, {report.name}")
     for d in dropped:
         print(f"  dropped row {d['row']} {d['scenario_id']}: {d['reasons']}")
 

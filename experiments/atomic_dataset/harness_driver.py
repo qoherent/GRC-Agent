@@ -30,6 +30,7 @@ import shutil
 import tempfile
 import time
 from collections.abc import Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -333,21 +334,38 @@ def _resolve_ollama_cloud_key() -> str:
     )
 
 
-async def run_harness_turn_async(
-    *,
-    scenario_id: str,
-    prompt: str,
-    provider: str = DEFAULT_PROVIDER,
-    model_name: str = DEFAULT_MODEL,
-    endpoint: str = DEFAULT_ENDPOINT,
-    fixture_path: str | Path | None = "tests/data/dial_tone.grc",
-    max_tokens: int = 8192,
-    override_model: Any | None = None,
-) -> dict[str, Any]:
-    """Execute one user prompt through the full production GRC Agent executor harness.
+@dataclass
+class _SessionState:
+    """Everything a scenario session needs to execute turns and finalize its record."""
 
-    Runs in an isolated temporary directory with its own `.env` (`GRC_AGENT_ENV`) and
-    SQLite `chat_sessions.db` so production state is never touched.
+    scenario_id: str
+    provider: str
+    endpoint: str
+    model_name: str
+    tmp_dir: Path
+    fg: Any
+    initial_snap: dict[str, Any]
+    executor: Any
+    built_model: Any
+    active_model: Any
+    model_settings: ModelSettings
+    recorder: Any
+    conversation_id: str
+
+
+@contextmanager
+def _isolated_session(
+    scenario_id: str,
+    fixture_path: str | Path | None,
+    provider: str,
+    model_name: str,
+    endpoint: str,
+    max_tokens: int,
+    override_model: Any | None,
+):
+    """Isolated temp dir (``GRC_AGENT_ENV`` + SQLite), flowgraph, and production executor.
+
+    Yields a :class:`_SessionState`; always tears providers/env/tmp dir down on exit.
     """
     ollama_key = _resolve_ollama_cloud_key()
     if provider == "ollama_cloud" and override_model is None and not ollama_key:
@@ -425,78 +443,21 @@ async def run_harness_turn_async(
         active_model = override_model if override_model is not None else built_model
         model_settings = ModelSettings(max_tokens=max_tokens)
 
-        approvals_granted: list[dict[str, Any]] = []
-        turn_usage = RunUsage()
-        conversation_id = f"session-{scenario_id}"
-
-        start_t = time.monotonic()
-        with executor.override(model=active_model, model_settings=model_settings):
-            res = await executor.run(
-                prompt,
-                deps=fg,
-                usage=turn_usage,
-                conversation_id=conversation_id,
-            )
-            while isinstance(res.output, DeferredToolRequests):
-                approval_map = {}
-                for call in res.output.approvals:
-                    approval_map[call.tool_call_id] = ToolApproved()
-                    approvals_granted.append({
-                        "tool_name": call.tool_name,
-                        "tool_call_id": call.tool_call_id,
-                        "decision": "approved",
-                    })
-                res = await executor.run(
-                    message_history=res.all_messages(),
-                    deferred_tool_results=DeferredToolResults(approvals=approval_map),
-                    deps=fg,
-                    usage=turn_usage,
-                    conversation_id=conversation_id,
-                )
-        elapsed_seconds = time.monotonic() - start_t
-
-        all_messages = res.all_messages()
-
-        assert isinstance(built_model, OpenAIChatModel)
-        openai_messages, openai_tools, system_text = await map_to_openai_wire_format(
-            all_messages, built_model, recorder, model_settings
+        yield _SessionState(
+            scenario_id=scenario_id,
+            provider=provider,
+            endpoint=endpoint,
+            model_name=model_name,
+            tmp_dir=tmp_dir,
+            fg=fg,
+            initial_snap=initial_snap,
+            executor=executor,
+            built_model=built_model,
+            active_model=active_model,
+            model_settings=model_settings,
+            recorder=recorder,
+            conversation_id=f"session-{scenario_id}",
         )
-        canonical_json_str = serialize_messages(all_messages)
-        canonical_messages = json.loads(canonical_json_str)
-
-        final_snap = inspect_graph(fg).get("graph", {})
-        validation = final_snap.get("validation", {"status": "unknown", "errors": []})
-        flowgraph_diff = compute_flowgraph_diff(initial_snap, final_snap)
-        guardrail_events = extract_guardrail_events(all_messages)
-        tool_trajectory = extract_tool_trajectory(all_messages)
-        usage_summary = sum_usage(all_messages)
-
-        final_output_data = (
-            res.output.model_dump()
-            if hasattr(res.output, "model_dump")
-            else str(res.output)
-        )
-
-        return {
-            "scenario_id": scenario_id,
-            "prompt": prompt,
-            "provider": provider,
-            "endpoint": endpoint if provider != "ollama_cloud" else DEFAULT_ENDPOINT,
-            "model": model_name,
-            "elapsed_seconds": round(elapsed_seconds, 3),
-            "flowgraph_valid": validation.get("status") == "valid",
-            "flowgraph_validation": validation,
-            "flowgraph_diff": flowgraph_diff,
-            "usage": usage_summary,
-            "approvals_granted": approvals_granted,
-            "guardrail_events": guardrail_events,
-            "tool_trajectory": tool_trajectory,
-            "final_output": final_output_data,
-            "system": system_text,
-            "tools": openai_tools,
-            "messages": openai_messages,
-            "canonical_messages": canonical_messages,
-        }
     finally:
         set_active_graph_providers(lambda: None, lambda: None, lambda: None)
         if prev_env is None:
@@ -506,6 +467,164 @@ async def run_harness_turn_async(
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
+async def _execute_turns(state: _SessionState, prompts: list[str]) -> tuple[Any, list[dict[str, Any]], float]:
+    """Run every user prompt in order against the shared flowgraph + conversation.
+
+    Each turn resolves its ``DeferredToolRequests`` approval loop independently;
+    the same ``conversation_id`` lets StepPersistence carry history across turns.
+    Returns (final RunResult, approvals granted across all turns, elapsed seconds).
+    """
+    approvals_granted: list[dict[str, Any]] = []
+    turn_usage = RunUsage()
+    history: list[ModelMessage] | None = None
+
+    start_t = time.monotonic()
+    with state.executor.override(model=state.active_model, model_settings=state.model_settings):
+        for i, prompt in enumerate(prompts):
+            if i == 0:
+                res = await state.executor.run(
+                    prompt,
+                    deps=state.fg,
+                    usage=turn_usage,
+                    conversation_id=state.conversation_id,
+                )
+            else:
+                # Production pattern (chat/turn_driver.py): history is passed
+                # explicitly every turn; conversation_id only groups runs.
+                res = await state.executor.run(
+                    prompt,
+                    message_history=history,
+                    deps=state.fg,
+                    usage=turn_usage,
+                    conversation_id=state.conversation_id,
+                )
+            while isinstance(res.output, DeferredToolRequests):
+                approval_map = {}
+                for call in res.output.approvals:
+                    approval_map[call.tool_call_id] = ToolApproved()
+                    approvals_granted.append({
+                        "tool_name": call.tool_name,
+                        "tool_call_id": call.tool_call_id,
+                        "decision": "approved",
+                    })
+                res = await state.executor.run(
+                    message_history=res.all_messages(),
+                    deferred_tool_results=DeferredToolResults(approvals=approval_map),
+                    deps=state.fg,
+                    usage=turn_usage,
+                    conversation_id=state.conversation_id,
+                )
+            history = res.all_messages()
+    elapsed_seconds = time.monotonic() - start_t
+    return res, approvals_granted, elapsed_seconds
+
+
+async def _finalize_record(
+    state: _SessionState,
+    res: Any,
+    prompts: list[str],
+    approvals_granted: list[dict[str, Any]],
+    elapsed_seconds: float,
+) -> dict[str, Any]:
+    """Post-process the completed session into the full telemetry record."""
+    all_messages = res.all_messages()
+
+    assert isinstance(state.built_model, OpenAIChatModel)
+    openai_messages, openai_tools, system_text = await map_to_openai_wire_format(
+        all_messages, state.built_model, state.recorder, state.model_settings
+    )
+    canonical_json_str = serialize_messages(all_messages)
+    canonical_messages = json.loads(canonical_json_str)
+
+    final_snap = inspect_graph(state.fg).get("graph", {})
+    validation = final_snap.get("validation", {"status": "unknown", "errors": []})
+    flowgraph_diff = compute_flowgraph_diff(state.initial_snap, final_snap)
+    guardrail_events = extract_guardrail_events(all_messages)
+    tool_trajectory = extract_tool_trajectory(all_messages)
+    usage_summary = sum_usage(all_messages)
+
+    final_output_data = (
+        res.output.model_dump()
+        if hasattr(res.output, "model_dump")
+        else str(res.output)
+    )
+
+    return {
+        "scenario_id": state.scenario_id,
+        "prompt": prompts[0],
+        "turns": list(prompts),
+        "turns_completed": len(prompts),
+        "provider": state.provider,
+        "endpoint": state.endpoint if state.provider != "ollama_cloud" else DEFAULT_ENDPOINT,
+        "model": state.model_name,
+        "elapsed_seconds": round(elapsed_seconds, 3),
+        "flowgraph_valid": validation.get("status") == "valid",
+        "flowgraph_validation": validation,
+        "flowgraph_diff": flowgraph_diff,
+        "usage": usage_summary,
+        "approvals_granted": approvals_granted,
+        "guardrail_events": guardrail_events,
+        "tool_trajectory": tool_trajectory,
+        "final_output": final_output_data,
+        "system": system_text,
+        "tools": openai_tools,
+        "messages": openai_messages,
+        "canonical_messages": canonical_messages,
+    }
+
+
+async def run_harness_turn_async(
+    *,
+    scenario_id: str,
+    prompt: str,
+    provider: str = DEFAULT_PROVIDER,
+    model_name: str = DEFAULT_MODEL,
+    endpoint: str = DEFAULT_ENDPOINT,
+    fixture_path: str | Path | None = "tests/data/dial_tone.grc",
+    max_tokens: int = 8192,
+    override_model: Any | None = None,
+) -> dict[str, Any]:
+    """Execute one user prompt through the full production GRC Agent executor harness.
+
+    Runs in an isolated temporary directory with its own `.env` (`GRC_AGENT_ENV`) and
+    SQLite `chat_sessions.db` so production state is never touched.
+    """
+    with _isolated_session(scenario_id, fixture_path, provider, model_name, endpoint, max_tokens, override_model) as state:
+        res, approvals_granted, elapsed_seconds = await _execute_turns(state, [prompt])
+        return await _finalize_record(state, res, [prompt], approvals_granted, elapsed_seconds)
+
+
+async def run_harness_session_async(
+    *,
+    scenario_id: str,
+    prompts: list[str],
+    provider: str = DEFAULT_PROVIDER,
+    model_name: str = DEFAULT_MODEL,
+    endpoint: str = DEFAULT_ENDPOINT,
+    fixture_path: str | Path | None = "tests/data/dial_tone.grc",
+    max_tokens: int = 8192,
+    override_model: Any | None = None,
+) -> dict[str, Any]:
+    """Execute a multi-turn conversation through the production GRC Agent executor harness.
+
+    Every user prompt runs in sequence against the SAME flowgraph and the SAME
+    ``conversation_id`` (StepPersistence carries the history), so later turns can
+    reference blocks, renames, and parameter edits made in earlier turns. All
+    intermediate tool calls, reasoning traces, and guardrail retries of every turn
+    are captured losslessly into one trajectory.
+    """
+    if not prompts:
+        raise ValueError("prompts must be non-empty")
+    with _isolated_session(scenario_id, fixture_path, provider, model_name, endpoint, max_tokens, override_model) as state:
+        res, approvals_granted, elapsed_seconds = await _execute_turns(state, list(prompts))
+        return await _finalize_record(state, res, list(prompts), approvals_granted, elapsed_seconds)
+
+
 def run_harness_turn(**kwargs: Any) -> dict[str, Any]:
     """Synchronous wrapper around `run_harness_turn_async`."""
     return asyncio.run(run_harness_turn_async(**kwargs))
+
+
+def run_harness_session(**kwargs: Any) -> dict[str, Any]:
+    """Synchronous wrapper around `run_harness_session_async`."""
+    return asyncio.run(run_harness_session_async(**kwargs))

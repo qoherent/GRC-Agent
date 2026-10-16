@@ -37,6 +37,10 @@ class ScenarioSpec:
     expects_guardrail: bool = False
     family: str = "benchmark"
     subcategory: str = ""
+    #: Tier 2 multi-turn sessions: the ordered user prompts. When non-empty the
+    #: runner drives them in sequence through ONE shared flowgraph + conversation;
+    #: `prompt` holds the first turn.
+    turns: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -49,6 +53,7 @@ class ScenarioSpec:
             "expects_guardrail": self.expects_guardrail,
             "family": self.family,
             "subcategory": self.subcategory,
+            "turns": list(self.turns),
         }
 
 
@@ -440,5 +445,316 @@ def build_tier1_scenarios(
         "blocks_eligible": len(scaffolds),
         "blocks_total": len(block_ids),
         "blocks_ineligible": sorted(set(block_ids) - set(scaffolds)),
+    }
+    return all_specs, manifest
+
+
+# ==============================================================================
+# Tier 2 multi-turn interactive suite
+# ==============================================================================
+# Headless multi-turn conversations through the SAME real harness: 2 user turns
+# per scenario sharing one live flowgraph + one conversation, so the model must
+# carry state across turns (blocks added earlier, renames, parameter edits).
+#
+# Families:
+#   mt_build   - incremental build: add block A (turn 1), then add B and wire
+#                A->B (turn 2). Tests cross-turn object references + rewiring.
+#   mt_refine  - iterative refinement: change param p1 (turn 1), then p2 or a
+#                further p1 value (turn 2).
+#   mt_correct - user correction: add block with value A (turn 1), "actually,
+#                set it to B instead" (turn 2).
+#   mt_query   - knowledge lookup (turn 1, no mutation) then acting on the
+#                answer by adding the looked-up block (turn 2).
+#   mt_rewire  - state continuity: rename block (turn 1), then tune "the block
+#                you just renamed" (turn 2). Forces tracking the new name.
+#: Tier 2 suite targets. Actual counts are data-driven (a seed exists only when
+#: its prerequisites are satisfiable from the verified scaffold set).
+TIER2_TARGETS: dict[str, int] = {
+    "mt_build": 150,
+    "mt_refine": 150,
+    "mt_correct": 100,
+    "mt_query": 100,
+    "mt_rewire": 100,
+}
+
+TIER2_FAMILY_ORDER = ("mt_build", "mt_refine", "mt_correct", "mt_query", "mt_rewire")
+
+
+def _numeric_params(record: dict[str, Any]) -> list[dict[str, Any]]:
+    return [p for p in record["params"] if p["dtype"] in ("float", "int")]
+
+
+def _add_wire_prompt(label: str, inst: str, scf: Any) -> str:
+    """Tier-1-style precise add-and-wire instruction for one block (turn 1 of a build)."""
+    ins = sorted(scf.input_ports, key=lambda p: _port_number(p["port"]))
+    outs = sorted(scf.output_ports, key=lambda p: _port_number(p["port"]))
+    if ins:
+        return (
+            f"Add a {label} block named `{inst}` to the graph. Connect input port "
+            f"`{ins[0]['port']}` to a fresh {ins[0]['dtype']} null source, wire every other input "
+            f"port to its own null source of matching type, and connect every output port to a "
+            f"null sink of matching type, so the flowgraph stays valid."
+        )
+    p = outs[0]
+    return (
+        f"Add a {label} block named `{inst}` to the graph and connect its output port "
+        f"`{p['port']}` to a fresh {p['dtype']} null sink (and any remaining output ports to null "
+        f"sinks of matching type), so the flowgraph stays valid."
+    )
+
+
+def _mt_build_specs(
+    eligible: list[tuple[str, Any, dict[str, Any]]],
+    row_by_block: dict[str, dict[str, Any]],
+) -> list[ScenarioSpec]:
+    """mt_build: dtype-compatible (A -> B) pairs on the empty canvas, 2 turns."""
+    specs: list[ScenarioSpec] = []
+    pairs: list[tuple[Any, dict, Any, dict]] = []
+    for a_bid, a, _a_row in eligible:
+        a_outs = [p for p in a.output_ports if p["dtype"] in NULL_WIREABLE_DTYPES]
+        if not a_outs:
+            continue
+        a_out_dt = {p["dtype"] for p in a_outs}
+        for b_bid, b, _b_row in eligible:
+            if b_bid == a_bid:
+                continue
+            b_ins = [p for p in b.input_ports if p["dtype"] in a_out_dt]
+            if b_ins:
+                pairs.append((a, a_outs[0], b, b_ins[0]))
+                break
+    for a, a_port, b, b_port in pairs[: TIER2_TARGETS["mt_build"]]:
+        a_row = row_by_block[a.block_id]
+        b_row = row_by_block[b.block_id]
+        a_inst, b_inst = a.target_instance, b.target_instance
+        turns = (
+            _add_wire_prompt(a_row["label"], a_inst, a),
+            (
+                f"Now add a {b_row['label']} block named `{b_inst}` to the graph "
+                f"and connect output port `{a_port['port']}` of `{a_inst}` to input port "
+                f"`{b_port['port']}` of `{b_inst}`, replacing the null sink currently wired to that "
+                f"output. Wire every other input port of `{b_inst}` to a fresh null source of matching "
+                f"type and every other output port to a null sink of matching type, so the flowgraph "
+                f"stays valid."
+            ),
+        )
+        specs.append(ScenarioSpec(
+            id=f"t2_build_{_slug(a.block_id)}_to_{_slug(b.block_id)}",
+            category=a_row.get("subcategory", ""),
+            name=f"Multi-turn build: {a_row['label']} -> {b_row['label']}",
+            fixture=_EMPTY_FIXTURE,
+            prompt=turns[0],
+            turns=turns,
+            expected_tools=("inspect_graph", "change_graph"),
+            family="mt_build",
+            subcategory=a_row.get("subcategory", ""),
+        ))
+    return specs
+
+
+def _mt_refine_specs(
+    param_rows: list[tuple[str, Any, dict[str, Any]]],
+) -> list[ScenarioSpec]:
+    """mt_refine: change param p1 (turn 1), then p2 or a further p1 value (turn 2)."""
+    specs: list[ScenarioSpec] = []
+    for bid, scf, row in param_rows[: TIER2_TARGETS["mt_refine"]]:
+        params = _numeric_params(row)
+        inst = scf.target_instance or _inst_name(bid)
+        p1 = params[0]
+        v1 = _retune_value(p1["default"])
+        t1 = (
+            f"Change the {p1['label']} parameter (`{p1['id']}`) of the {row['label']} block `{inst}` "
+            f"to `{v1}`."
+        )
+        if len(params) >= 2:
+            p2 = params[1]
+            t2 = f"Now also change the {p2['label']} parameter (`{p2['id']}`) of `{inst}` to `{_retune_value(p2['default'])}`."
+        else:
+            t2 = f"That value was a bit off — set the {p1['label']} parameter (`{p1['id']}`) of `{inst}` to `{_retune_value(v1)}` instead."
+        specs.append(ScenarioSpec(
+            id=f"t2_refine_{_slug(bid)}",
+            category=row.get("subcategory", ""),
+            name=f"Multi-turn refine: {p1['label']} of {row['label']}",
+            fixture=scf.fixture_path,
+            prompt=t1,
+            turns=(t1, t2),
+            expected_tools=("inspect_graph", "change_graph"),
+            family="mt_refine",
+            subcategory=row.get("subcategory", ""),
+        ))
+    return specs
+
+
+def _mt_correct_specs(
+    param_rows: list[tuple[str, Any, dict[str, Any]]],
+) -> list[ScenarioSpec]:
+    """mt_correct: add block with value A (turn 1), 'actually set B' (turn 2)."""
+    specs: list[ScenarioSpec] = []
+    for bid, _scf, row in param_rows[: TIER2_TARGETS["mt_correct"]]:
+        p = _numeric_params(row)[0]
+        inst = _inst_name(bid)
+        v1 = _retune_value(p["default"])
+        v2 = _retune_value(v1)
+        t1 = (
+            f"Add a {row['label']} block named `{inst}` to the graph with the {p['label']} parameter "
+            f"(`{p['id']}`) set to `{v1}`. Wire every input port to a fresh null source of matching "
+            f"type and every output port to a null sink of matching type, so the flowgraph stays valid."
+        )
+        t2 = (
+            f"Actually, that {p['label']} value was wrong. Change `{p['id']}` on `{inst}` to `{v2}` "
+            f"instead, keeping everything else unchanged."
+        )
+        specs.append(ScenarioSpec(
+            id=f"t2_correct_{_slug(bid)}",
+            category=row.get("subcategory", ""),
+            name=f"Multi-turn correction: {row['label']} {p['label']}",
+            fixture=_EMPTY_FIXTURE,
+            prompt=t1,
+            turns=(t1, t2),
+            expected_tools=("inspect_graph", "change_graph"),
+            family="mt_correct",
+            subcategory=row.get("subcategory", ""),
+        ))
+    return specs
+
+
+def _mt_query_specs(
+    eligible: list[tuple[str, Any, dict[str, Any]]],
+) -> list[ScenarioSpec]:
+    """mt_query: knowledge lookup (turn 1, no mutation), then add the looked-up block (turn 2)."""
+    specs: list[ScenarioSpec] = []
+    for bid, _scf, row in eligible[: TIER2_TARGETS["mt_query"]]:
+        inst = _inst_name(bid)
+        t1 = (
+            f"Look up `{bid}` in the block knowledge base and report its human-readable name, every "
+            f"parameter key with its type and default value, and its input and output ports. Do not "
+            f"modify the flowgraph."
+        )
+        t2 = (
+            f"Based on what you just found, add a {row['label']} block named `{inst}` to the graph, "
+            f"wiring every input port to a fresh null source of matching type and every output port to "
+            f"a null sink of matching type, so the flowgraph stays valid."
+        )
+        specs.append(ScenarioSpec(
+            id=f"t2_query_{_slug(bid)}",
+            category=row.get("subcategory", ""),
+            name=f"Multi-turn query-then-add: {row['label']}",
+            fixture=_EMPTY_FIXTURE,
+            prompt=t1,
+            turns=(t1, t2),
+            expected_tools=("query_knowledge", "change_graph"),
+            family="mt_query",
+            subcategory=row.get("subcategory", ""),
+        ))
+    return specs
+
+
+def _mt_rewire_specs(
+    param_rows: list[tuple[str, Any, dict[str, Any]]],
+) -> list[ScenarioSpec]:
+    """mt_rewire: rename (turn 1), then tune 'the block you just renamed' (turn 2)."""
+    specs: list[ScenarioSpec] = []
+    for bid, scf, row in param_rows[: TIER2_TARGETS["mt_rewire"]]:
+        p = _numeric_params(row)[0]
+        inst = scf.target_instance or _inst_name(bid)
+        new_name = f"{inst}_v2"
+        t1 = f"Rename the {row['label']} block `{inst}` to `{new_name}`, keeping its parameters and connections intact."
+        t2 = (
+            f"Now change the {p['label']} parameter (`{p['id']}`) of that block — the one you just "
+            f"renamed — to `{_retune_value(p['default'])}`."
+        )
+        specs.append(ScenarioSpec(
+            id=f"t2_rewire_{_slug(bid)}",
+            category=row.get("subcategory", ""),
+            name=f"Multi-turn state continuity: rename + retune {row['label']}",
+            fixture=scf.fixture_path,
+            prompt=t1,
+            turns=(t1, t2),
+            expected_tools=("inspect_graph", "change_graph"),
+            family="mt_rewire",
+            subcategory=row.get("subcategory", ""),
+        ))
+    return specs
+
+
+def _build_tier2_specs(
+    index: dict[str, list[dict[str, Any]]],
+    scaffolds: dict[str, Any],
+) -> list[ScenarioSpec]:
+    """Assemble the deterministic Tier 2 multi-turn suite from the verified scaffold set."""
+    row_by_block: dict[str, dict[str, Any]] = {}
+    for rows in index.values():
+        for r in rows:
+            row_by_block[r["block_id"]] = r
+
+    eligible: list[tuple[str, Any, dict[str, Any]]] = sorted(
+        ((bid, scf, row_by_block[bid]) for bid, scf in scaffolds.items() if bid in row_by_block),
+        key=lambda t: t[0],
+    )
+    param_rows = [t for t in eligible if _numeric_params(t[2])]
+
+    specs: list[ScenarioSpec] = []
+    seen: set[str] = set()
+    for candidate in (
+        _mt_build_specs(eligible, row_by_block)
+        + _mt_refine_specs(param_rows)
+        + _mt_correct_specs(param_rows)
+        + _mt_query_specs(eligible)
+        + _mt_rewire_specs(param_rows)
+    ):
+        if candidate.id not in seen:
+            seen.add(candidate.id)
+            specs.append(candidate)
+    return specs
+
+
+def build_tier2_scenarios(
+    scaffold_dir: str | Path | None = None,
+    taxonomy: list[dict[str, Any]] | None = None,
+) -> tuple[list[ScenarioSpec], dict[str, Any]]:
+    """Generate the deterministic Tier 2 multi-turn suite and a manifest.
+
+    Uniform data-driven rules: seeds are built only from blocks whose scaffolds
+    already validate headless (Tier 1 cache), so every starting graph is known-good
+    and each turn's prerequisites exist. Shortfalls vs targets are reported, not faked.
+    """
+    from experiments.atomic_dataset.scaffolds import (
+        ScaffoldResult,
+        build_all_scaffolds,
+        build_empty_scaffold,
+    )
+
+    out_dir = Path(scaffold_dir) if scaffold_dir else Path(_TIER1_SCAFFOLD_DIR_DEFAULT)
+    tax = taxonomy if taxonomy is not None else extract_catalog_taxonomy()
+    index = build_subcategory_index(tax)
+
+    block_ids = sorted(r["block_id"] for rows in index.values() for r in rows)
+    built = build_all_scaffolds(block_ids, out_dir)
+    scaffolds = {
+        bid: res
+        for bid, res in built.items()
+        if isinstance(res, ScaffoldResult) and res.eligible and res.fixture_path
+    }
+    empty = build_empty_scaffold(out_dir)
+    if not empty.eligible:
+        raise RuntimeError(f"empty canvas scaffold failed: {empty.reason}")
+
+    all_specs = _build_tier2_specs(index, scaffolds)
+    per_family: dict[str, int] = {f: 0 for f in TIER2_FAMILY_ORDER}
+    subcat_covered: set[str] = set()
+    for s in all_specs:
+        per_family[s.family] += 1
+        subcat_covered.add(s.subcategory)
+
+    manifest = {
+        "generated_at": datetime.datetime.now().isoformat(),
+        "tier": 2,
+        "mode": "multi-turn (2 user turns per scenario, shared flowgraph + conversation)",
+        "targets": TIER2_TARGETS,
+        "actuals": per_family,
+        "total": len(all_specs),
+        "subcategories_total": len(index),
+        "subcategories_covered": len(subcat_covered),
+        "scaffold_dir": str(out_dir),
+        "blocks_eligible": len(scaffolds),
     }
     return all_specs, manifest
