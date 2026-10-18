@@ -682,9 +682,11 @@ def _build_tier2_specs(
 ) -> list[ScenarioSpec]:
     """Assemble the deterministic Tier 2 multi-turn suite from the verified scaffold set."""
     row_by_block: dict[str, dict[str, Any]] = {}
-    for rows in index.values():
+    for subcat, rows in index.items():
         for r in rows:
-            row_by_block[r["block_id"]] = r
+            row = dict(r)
+            row.setdefault("subcategory", subcat)
+            row_by_block[r["block_id"]] = row
 
     eligible: list[tuple[str, Any, dict[str, Any]]] = sorted(
         ((bid, scf, row_by_block[bid]) for bid, scf in scaffolds.items() if bid in row_by_block),
