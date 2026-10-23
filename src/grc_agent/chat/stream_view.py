@@ -208,8 +208,14 @@ class StreamViewMixin:
                             # Read the settled outcome, same as the history
                             # render path, so streaming and re-render agree.
                             ok = getattr(event.part, "outcome", "success") != "failed"
-                            self._set_tool_result(exp, event.part.content, ok=ok)
-                            res_str = str(event.part.content)
+                            self._set_tool_result(
+                                exp,
+                                event.part.content,
+                                ok=ok,
+                                tool_content=event.content,
+                                metadata=event.part.metadata,
+                            )
+                            res_str = self._tool_result_text(event.part.content)
                         self._record_tool_result_transcript(ctx, tcid, res_str)
                         self._update_copy_text(ctx.box, ctx.full_raw_text)
 
@@ -278,7 +284,7 @@ class StreamViewMixin:
             tcid = part.tool_call_id or ""
             exp = ctx.tools.get(tcid)
             if exp is not None:
-                res_str = str(part.content)
+                res_str = self._tool_result_text(part.content)
                 self._set_tool_result(exp, part.content, ok=part.outcome != "failed")
                 self._record_tool_result_transcript(ctx, tcid, res_str)
                 self._update_copy_text(ctx.box, ctx.full_raw_text)

@@ -431,12 +431,11 @@ def _build_model(cfg: dict, http_client: httpx.AsyncClient | httpx2.AsyncClient)
             or "http://localhost:11434"
         ).rstrip("/")
         base_url = raw_url if raw_url.endswith("/v1") else f"{raw_url}/v1"
-    key = (
-        get_env_value("OLLAMA_API_KEY")
-        or get_env_value("OLLAMA_CLOUD_API_KEY")
-        or os.environ.get("OLLAMA_API_KEY")
-        or os.environ.get("OLLAMA_CLOUD_API_KEY")
+    key_names = (
+        ("OLLAMA_CLOUD_API_KEY", "OLLAMA_API_KEY")
+        if provider == "ollama_cloud" else ("OLLAMA_API_KEY", "OLLAMA_CLOUD_API_KEY")
     )
+    key = next((value for name in key_names if (value := resolve_key(name))), None)
     if provider == "ollama_cloud" and not key:
         raise ValueError(
             "An API key is required for Ollama Cloud (https://ollama.com). "
@@ -545,7 +544,7 @@ def _ollama_context_length(model: str) -> int | None:
     cfg = load_settings()
     if cfg.get("provider") == "ollama_cloud":
         base_url = "https://ollama.com"
-        api_key = resolve_key("OLLAMA_API_KEY") or resolve_key("OLLAMA_CLOUD_API_KEY") or ""
+        api_key = resolve_key("OLLAMA_CLOUD_API_KEY") or resolve_key("OLLAMA_API_KEY") or ""
     else:
         base_url = (cfg.get("ollama_base_url") or "http://localhost:11434").rstrip("/")
         api_key = ""
@@ -976,7 +975,7 @@ def build_agents_from_cfg(cfg: dict) -> AgentBundle:
         output_type=str,
         name="grc_desktop_planner_agent",
         instructions=build_planner_prompt("pai-desktop-planner"),
-        tools=grc_tools(),
+        tools=grc_tools(read_only=True),
         capabilities=[
             json_repair_cap,
             StopGracefully(),

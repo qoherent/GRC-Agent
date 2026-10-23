@@ -125,6 +125,7 @@ def test_generate_error_triggers_error_without_exec_start():
     monitor.handle_message("Generate Error: invalid block parameter\n>>> Failure\n")
     assert len(errors) == 1
     assert "Generate Error" in errors[0][1]
+    assert monitor.get_last_run_log()["process_exited"] is False
 
 
 def test_buffer_resets_between_runs():
@@ -244,7 +245,7 @@ def test_get_run_log_tool_no_run_yet():
 def test_grc_tools_includes_get_run_log():
     from grc_agent.agent import grc_tools
 
-    names = {t.name for t in grc_tools()}
+    names = {t.name for t in grc_tools(read_only=True)}
     assert "get_run_log" in names
 
 
@@ -589,6 +590,16 @@ class _FakeRunProcess:
     """Sentinel standing in for the Popen GRC's Executor assigns to page.process."""
 
 
+class _PollingRunProcess:
+    """Popen-like process with a test-controlled exit code."""
+
+    def __init__(self, return_code=None):
+        self.return_code = return_code
+
+    def poll(self):
+        return self.return_code
+
+
 class _ProcessProvider:
     """Fake (page_key, process) provider over the current GRC page."""
 
@@ -625,6 +636,7 @@ def test_spawn_failure_unchanged_identity_reports_failure():
     assert res["ran_successfully"] is False
     assert res["return_code"] == 0
     assert "spawn" in res["spawn_note"].lower()
+    assert res["process_exited"] is False
 
 
 def test_real_run_changed_identity_is_success():
@@ -715,6 +727,88 @@ def test_no_provider_codeless_done_stays_legacy_success():
     assert res is not None
     assert res["ran_successfully"] is True
     assert "spawn_failed" not in res
+    assert res["process_exited"] is False
+
+
+def test_bound_live_process_ignores_unrelated_done_until_exit():
+    import asyncio
+
+    monitor = ExecutionErrorMonitor(on_error=_noop)
+    process = _PollingRunProcess()
+    monitor.handle_message("\nExecuting: /tmp/flow.py\n")
+    assert monitor.bind_run_process(process) is True
+
+    monitor.handle_message("\n>>> Done (return code 0)\n")
+
+    assert monitor.is_tracking is True
+
+    async def wait_then_exit():
+        assert await monitor.wait_for_run_end(0.001, epoch=0) == "still_running"
+        process.return_code = 0
+        monitor.handle_message("\n>>> Done (return code 0)\n")
+        return await monitor.wait_for_run_end(0.001, epoch=0)
+
+    assert asyncio.run(wait_then_exit()) == "completed"
+    result = monitor.get_last_run_log()
+    assert result["return_code"] == 0
+    assert result["process_exited"] is True
+    assert result["ran_successfully"] is True
+
+
+def test_bound_process_return_code_overrides_done_text():
+    monitor = ExecutionErrorMonitor(on_error=_noop)
+    process = _PollingRunProcess(return_code=1)
+    monitor.handle_message("\nExecuting: /tmp/flow.py\n")
+    assert monitor.bind_run_process(process) is True
+
+    monitor.handle_message("\n>>> Done (return code 0)\n")
+
+    result = monitor.get_last_run_log()
+    assert result["return_code"] == 1
+    assert result["process_exited"] is True
+    assert result["ran_successfully"] is False
+
+
+def test_bound_process_is_authoritative_after_tab_provider_changes():
+    provider = _ProcessProvider()
+    provider.page_key = "page1"
+    provider.process = None
+    process = _PollingRunProcess(return_code=1)
+    other_page_process = _PollingRunProcess()
+    monitor = ExecutionErrorMonitor(on_error=_noop, process_provider=provider)
+    monitor.handle_message("\nExecuting: /tmp/flow.py\n")
+    assert monitor.bind_run_process(process) is True
+
+    provider.page_key = "page2"
+    provider.process = other_page_process
+    monitor.handle_message("\n>>> Done (return code 0)\n")
+
+    result = monitor.get_last_run_log()
+    assert result["return_code"] == 1
+    assert result["process_exited"] is True
+    assert result["ran_successfully"] is False
+    assert "spawn_failed" not in result
+
+
+def test_process_binding_is_first_wins_and_resets_for_next_epoch():
+    monitor = ExecutionErrorMonitor(on_error=_noop)
+    first = _PollingRunProcess(return_code=0)
+    second = _PollingRunProcess(return_code=7)
+
+    assert monitor.bind_run_process(first) is False
+    monitor.handle_message("\nExecuting: /tmp/first.py\n")
+    assert monitor.bind_run_process(first) is True
+    assert monitor.bind_run_process(second) is False
+    monitor.handle_message("\n>>> Done\n")
+    assert monitor.get_last_run_log()["return_code"] == 0
+
+    monitor.handle_message("\nExecuting: /tmp/second.py\n")
+    assert monitor.bind_run_process(second) is True
+    monitor.handle_message("\n>>> Done (return code 0)\n")
+    result = monitor.get_last_run_log()
+    assert result["run_id"] == 2
+    assert result["return_code"] == 7
+    assert result["process_exited"] is True
 
 
 def test_tab_switch_mid_run_keeps_legacy_classification():
@@ -747,6 +841,16 @@ def _result_monitor(spawn_failed: bool):
         is_tracking = False
         last_run_spawn_failed = spawn_failed
 
+        def get_last_run_log(self):
+            return {
+                "return_code": 0,
+                "run_id": 1,
+                "log_text": "",
+                "ran_successfully": not spawn_failed,
+                "run_in_progress": False,
+                **({"spawn_failed": True, "spawn_note": "spawn failed"} if spawn_failed else {}),
+            }
+
         def mark_run_agent_initiated(self):
             pass
 
@@ -769,7 +873,7 @@ def test_run_result_reports_spawn_failure():
     cm = NativeCanvasManager.__new__(NativeCanvasManager)
     cm.window = SimpleNamespace(current_page=None)
     proxy = NativeFlowgraphProxy(cm, exec_monitor=monitor)
-    res = asyncio.run(proxy._build_run_result(monitor, "completed", 10.0, None))
+    res = asyncio.run(proxy._build_run_result(monitor, "completed", 10.0, None, expected_run_id=1))
 
     assert res["status"] == "completed"
     assert res["return_code"] == 0
@@ -786,10 +890,56 @@ def test_run_result_success_has_no_spawn_flag():
     cm = NativeCanvasManager.__new__(NativeCanvasManager)
     cm.window = SimpleNamespace(current_page=None)
     proxy = NativeFlowgraphProxy(cm, exec_monitor=monitor)
-    res = asyncio.run(proxy._build_run_result(monitor, "completed", 10.0, None))
+    res = asyncio.run(proxy._build_run_result(monitor, "completed", 10.0, None, expected_run_id=1))
 
     assert res["ran_successfully"] is True
     assert "spawn_failed" not in res
+
+
+def test_run_result_uses_monitor_runtime_error_verdict():
+    """A code-zero GNU Radio runtime error remains a failed native run."""
+    import asyncio
+    from types import SimpleNamespace
+
+    monitor = ExecutionErrorMonitor(on_error=_noop)
+    monitor.handle_message("\nExecuting: /tmp/flow.py\n")
+    monitor.handle_message("ofdm :error: Buffer too small\n")
+    monitor.handle_message("\n>>> Done\n")
+    cm = NativeCanvasManager.__new__(NativeCanvasManager)
+    cm.window = SimpleNamespace(current_page=None)
+    proxy = NativeFlowgraphProxy(cm, exec_monitor=monitor)
+
+    result = asyncio.run(
+        proxy._build_run_result(monitor, "completed", 10.0, None, expected_run_id=1)
+    )
+
+    assert result["return_code"] == 0
+    assert result["ran_successfully"] is False
+    assert monitor.get_last_run_log()["run_id"] == 1
+
+
+def test_run_result_does_not_reuse_previous_run_record():
+    """An in-flight run's prior retained log cannot satisfy its identity."""
+    import asyncio
+    from types import SimpleNamespace
+
+    monitor = ExecutionErrorMonitor(on_error=_noop)
+    _feed_run(monitor, "/tmp/first.py", "previous success\n", code=0)
+    monitor.handle_message("\nExecuting: /tmp/second.py\n")
+    cm = NativeCanvasManager.__new__(NativeCanvasManager)
+    cm.window = SimpleNamespace(current_page=None)
+    proxy = NativeFlowgraphProxy(cm, exec_monitor=monitor)
+
+    result = asyncio.run(
+        proxy._build_run_result(monitor, "completed", 10.0, None, expected_run_id=2)
+    )
+
+    assert result["status"] == "completed"
+    assert result["return_code"] is None
+    assert result["ran_successfully"] is False
+    assert "run_id" in result["note"]
+    assert monitor.get_last_run_log()["run_id"] == 1
+    assert monitor.get_last_run_log()["run_in_progress"] is True
 
 
 def test_bounded_run_finish_reports_spawn_failure():
@@ -801,13 +951,13 @@ def test_bounded_run_finish_reports_spawn_failure():
     cm.window = SimpleNamespace(current_page=None)
     proxy = NativeFlowgraphProxy(cm, exec_monitor=monitor)
 
-    async def _not_running():
+    async def _not_running(*, page=None):  # noqa: ARG001
         return {"status": "not_running"}
 
     # The proxy routes attribute sets through the live flowgraph; store the
     # stub directly, the same way __init__ stores its own fields.
     object.__setattr__(proxy, "stop_flowgraph", _not_running)
-    res = asyncio.run(proxy._finish_bounded_run(monitor, 5))
+    res = asyncio.run(proxy._finish_bounded_run(monitor, 5, expected_run_id=1))
 
     assert res["status"] == "completed"
     assert res["ran_successfully"] is False
@@ -974,3 +1124,36 @@ def test_run_id_advances_per_run():
     assert monitor.get_last_run_log()["run_id"] == 1
     _feed_run(monitor, "/tmp/flow.py", "second\n", code=0)
     assert monitor.get_last_run_log()["run_id"] == 2
+
+
+def test_capture_completion_facts_distinguish_sigterm_error_and_synthesis():
+    monitor = ExecutionErrorMonitor(on_error=_noop)
+    _feed_run(monitor, "/tmp/flow.py", "samples produced\n", code=-15)
+    log = monitor.get_last_run_log()
+    assert log["terminal_observed"] is True
+    assert log["runtime_error"] is False
+    assert log["ran_successfully"] is False
+
+    _feed_run(monitor, "/tmp/flow.py", "block:error: broken\n", code=-15)
+    assert monitor.get_last_run_log()["runtime_error"] is True
+
+    monitor.handle_message("\nExecuting: /tmp/flow.py\n")
+    monitor.synthesize_terminal_state(signal=None)
+    assert monitor.get_last_run_log()["terminal_observed"] is False
+    assert monitor.get_last_run_log()["process_exited"] is False
+
+
+def test_runtime_error_survives_console_eviction_for_capture_evidence():
+    from grc_agent.exec_monitor import _MAX_LOG_BYTES
+
+    monitor = ExecutionErrorMonitor(on_error=_noop)
+    monitor.handle_message("\nExecuting: /tmp/flow.py\n")
+    for char in "block:error: overflow\n":
+        monitor.handle_message(char)
+    monitor.handle_message("x" * _MAX_LOG_BYTES)
+    monitor.handle_message("tail\n")
+    monitor.handle_message("\n>>> Done (return code -15)\n")
+    evidence = monitor.get_last_run_log()
+    assert evidence["log_truncated"] is True
+    assert ":error:" not in evidence["log_text"]
+    assert evidence["runtime_error"] is True

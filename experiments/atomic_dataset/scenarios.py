@@ -116,9 +116,9 @@ BENCHMARK_SCENARIOS: tuple[ScenarioSpec, ...] = (
             "`analog_sig_source_x_0:0` to port `3` of `blocks_add_xx` (`blocks_add_xx:3`). "
             "When the guardrail reports why that port connection failed, inspect the graph, "
             "update `blocks_add_xx` so port `3` exists and wire `analog_sig_source_x_0:0` to it, "
-            "and then try starting the flowgraph with `run_flowgraph`."
+            "and then try starting the flowgraph with `grc_interaction` using mode `start`."
         ),
-        expected_tools=("change_graph", "inspect_graph", "run_flowgraph"),
+        expected_tools=("change_graph", "inspect_graph", "grc_interaction"),
         expects_guardrail=True,
     ),
     ScenarioSpec(

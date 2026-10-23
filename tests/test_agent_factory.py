@@ -494,3 +494,20 @@ class TestRetryingTransport:
         )
         assert outcome == 200
         assert sleeps == [4, 10]
+
+
+@pytest.mark.parametrize("provider,expected_key", [("ollama_cloud", "cloud-specific"), ("ollama_local", "local-specific")])
+def test_ollama_provider_uses_its_own_key(provider, expected_key, isolated_env):
+    import httpx
+
+    from grc_agent.adapter.graph import _atomic_write_text
+    from grc_agent.agent_factory import _build_model
+
+    _atomic_write_text("OLLAMA_API_KEY=local-specific\nOLLAMA_CLOUD_API_KEY=cloud-specific\n", isolated_env)
+
+    async def inspect_client():
+        async with httpx.AsyncClient() as client:
+            model = _build_model({"provider": provider, "model": "test-model"}, client)
+            assert model.client.api_key == expected_key
+
+    asyncio.run(inspect_client())

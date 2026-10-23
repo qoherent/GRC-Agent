@@ -65,17 +65,17 @@ def test_harness_driver_captures_intermediate_calls_and_guardrails() -> None:
                 ]
             )
         if step == 3:
-            # Trigger a ToolFailed terminal error by calling get_run_log in headless mode
+            # Trigger a ToolFailed terminal error by calling grc_interaction log mode in headless mode
             return ModelResponse(
                 parts=[
                     ThinkingPart(
-                        content="The block name was wrong; let me also check get_run_log and fix freq_350.",
+                        content="The block name was wrong; let me also check the run log and fix freq_350.",
                         id="reasoning_content",
                         provider_name="openai",
                     ),
                     ToolCallPart(
-                        tool_name="get_run_log",
-                        args={},
+                        tool_name="grc_interaction",
+                        args={"mode": "log"},
                         tool_call_id="call_run_log_fail",
                     ),
                     ToolCallPart(
@@ -130,7 +130,7 @@ def test_harness_driver_captures_intermediate_calls_and_guardrails() -> None:
 
     # Verify wire messages include the retry error and ToolFailed error as role='tool'
     tool_msgs = [m for m in record["messages"] if m.get("role") == "tool"]
-    assert len(tool_msgs) == 4  # inspect_graph, change_graph(retry), get_run_log(failed), change_graph(ok)
+    assert len(tool_msgs) == 4  # inspect_graph, change_graph(retry), grc_interaction(failed), change_graph(ok)
     assert any("non_existent_block" in m["content"] for m in tool_msgs)
     assert any("Run-log capture is not wired up" in m["content"] for m in tool_msgs)
 

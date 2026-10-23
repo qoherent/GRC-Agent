@@ -3748,10 +3748,13 @@ def test_always_allow_command_resolves_matching_pending_futures():
     assert get_approval_mode() in ("manual", "auto", "yolo")  # unchanged by this click
 
 
-def test_block_badge_prose_text_aligns_with_baseline():
-    """Prose block badges rendered with native TextTags are perfectly aligned
-    with the surrounding sentence baseline (0px vertical offset). Table cells
-    use BlockBadge pills for interactive box containers."""
+def test_block_badge_prose_stays_on_native_text_line_without_rise():
+    """Prose badges stay on the native text line without a rise offset.
+
+    GTK's character rectangles can have different top edges for bold monospace
+    and prose fonts even when their native text line is shared. Table cells use
+    BlockBadge pills for interactive box containers.
+    """
     from unittest.mock import MagicMock
 
     from gi.repository import Gtk
@@ -3796,15 +3799,15 @@ def test_block_badge_prose_text_aligns_with_baseline():
     for _ in range(20):
         Gtk.main_iteration_do(False)
 
-    rect_the = tv.get_iter_location(buf.get_iter_at_offset(0))
-    rect_badge = tv.get_iter_location(buf.get_iter_at_offset(5))
-    rect_block = tv.get_iter_location(buf.get_iter_at_offset(18))
+    iters = [buf.get_iter_at_offset(offset) for offset in (0, 5, 18)]
+    line_ranges = [tv.get_line_yrange(it) for it in iters]
+    effective_tags = [tag for it in iters for tag in it.get_tags()]
 
     win.destroy()
 
-    assert rect_the.y == rect_badge.y == rect_block.y, (
-        f"Badge text y={rect_badge.y} not on sentence y={rect_the.y}"
-    )
+    assert line_ranges[0] == line_ranges[1] == line_ranges[2]
+    assert effective_tags
+    assert all(tag.get_property("rise") == 0 for tag in effective_tags)
 
     # Verify BlockBadge widget for table cells
     pill = BlockBadge("data_source", lambda: mock_cm)

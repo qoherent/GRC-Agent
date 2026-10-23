@@ -17,6 +17,7 @@ import logging
 import re
 from collections import deque
 from collections.abc import Callable
+from typing import Any
 
 _log = logging.getLogger(__name__)
 
@@ -53,13 +54,9 @@ class ExecutionErrorMonitor:
         process_provider: Callable[[], tuple[object, object]] | None = None,
     ) -> None:
         self._on_error = on_error
-        # Optional (page_key, process) provider over the currently displayed
-        # GRC page, wired by desktop_app once the canvas manager exists (see
-        # set_process_provider). Executor assigns ``page.process`` only on a
-        # successful spawn and clears it in done() strictly AFTER
-        # send_end_exec — so at a code-less Done marker a live new process
-        # proves a real run, while an absent or unchanged identity proves a
-        # spawn crash. None disables spawn-failure detection entirely.
+        # Optional legacy (page_key, process) provider over the displayed GRC
+        # page. An explicitly bound run process takes precedence; this provider
+        # remains the spawn-failure fallback when no process was bound.
         self._process_provider = process_provider
         # (page_key, process) captured at the start marker, compared at the
         # Done marker. Reset to None outside an active run.
@@ -71,6 +68,9 @@ class ExecutionErrorMonitor:
         self._evicted = False
         self._last_run_evicted = False
         self._tracking = False
+        # Exact native Popen bound synchronously after GRC assigns
+        # page.process. Console messages alone are not execution IDs.
+        self._bound_run_process: Any | None = None
         # Completion signaling for run_flowgraph: cleared on the start marker,
         # set on every terminal marker (Done / Generate Error). Safe to set
         # from handle_message because every Messages.send_* caller in GRC's
@@ -99,12 +99,14 @@ class ExecutionErrorMonitor:
         # GNU Radio's scheduler handles buffer/rate errors gracefully, so
         # non-zero return codes don't catch all failures.
         self._has_runtime_error = False
+        self._runtime_error_tail = ""
         self._last_run_log: str | None = None
         self._last_run_code: int | None = None
         # Saved copy of _has_runtime_error at Done time — _fail() calls
         # _reset() which clears _has_runtime_error, but get_last_run_log
         # must still reflect whether errors occurred.
         self._last_run_had_runtime_error = False
+        self._last_run_process_exited = False
         # Retained spawn-failure verdict of the last completed run — set at
         # every Done evaluation (the live snapshot is cleared there), so
         # _reset() must not clear it (same pattern as _last_run_had_runtime_error).
@@ -137,6 +139,18 @@ class ExecutionErrorMonitor:
         Passing None disables spawn-failure detection (legacy behavior)."""
         self._process_provider = process_provider
 
+    def bind_run_process(self, process: Any) -> bool:
+        """Bind the native process to the currently tracked execution epoch.
+
+        Called synchronously after GRC's Execute action assigns
+        ``page.process``. The first process wins for an epoch; late or
+        duplicate bindings cannot redirect terminal evidence.
+        """
+        if not self._tracking or process is None or self._bound_run_process is not None:
+            return False
+        self._bound_run_process = process
+        return True
+
     def notify_graph_modified(self) -> None:
         """Called when change_graph modifies the flowgraph state."""
         self._graph_modified_since_last_run = True
@@ -145,8 +159,12 @@ class ExecutionErrorMonitor:
         """Return the last completed run's log as a dict, or None if no run
         has completed yet.
 
-        Shape: ``{"return_code": int | None, "run_id": int, "log_text": str,
-        "ran_successfully": bool}``, plus ``log_truncated: True`` when the
+        Shape includes ``process_exited``: true only when the exact process
+        bound to that run was observed with an integer exit status; false when
+        no process was bound or the terminal state was synthesized/generated.
+        It also includes ``{"return_code": int | None, "run_id": int,
+        "log_text": str, "ran_successfully": bool}``, plus
+        ``log_truncated: True`` when the
         ``_MAX_LOG_BYTES`` cap dropped the run's oldest output,
         ``spawn_failed``/``spawn_note`` when the run died at subprocess spawn,
         ``terminated_by_kill``/``termination_note`` when no natural terminal
@@ -170,6 +188,9 @@ class ExecutionErrorMonitor:
             "return_code": self._last_run_code,
             "run_id": self._last_run_id,
             "log_text": self._last_run_log,
+            "runtime_error": self._last_run_had_runtime_error,
+            "process_exited": self._last_run_process_exited,
+            "terminal_observed": not self._last_run_synthesized,
             "ran_successfully": (
                 self._last_run_code == 0
                 and not self._last_run_had_runtime_error
@@ -308,6 +329,7 @@ class ExecutionErrorMonitor:
                 _log.debug("exec_monitor: ignoring start (already tracking): %r", text[:80])
                 return
             self._tracking = True
+            self._bound_run_process = None
             self._graph_modified_since_last_run = False
             self._reset()
             self._run_end.clear()
@@ -326,22 +348,30 @@ class ExecutionErrorMonitor:
             if not self._tracking:
                 _log.debug("exec_monitor: ignoring done (not tracking): %r", text[:80])
                 return
-            self._tracking = False
             match = _RETURN_CODE_RE.search(text)
             code = int(match.group(1)) if match else 0
-            # Spawn-failure rule: a code-less Done marker is ambiguous
+            bound_process = self._bound_run_process
+            process_exited = False
+            if bound_process is not None:
+                actual_code = bound_process.poll()
+                if actual_code is None:
+                    _log.debug(
+                        "exec_monitor: ignoring unrelated Done while bound process is alive: %r",
+                        text[:80],
+                    )
+                    return
+                code = actual_code
+                process_exited = True
+            self._tracking = False
+            # Without a bound process, a code-less Done marker is ambiguous
             # between a real clean exit and GRC's spawn-crash path (both emit
-            # send_end_exec() with the default code 0). Only a wired provider
-            # can break the tie — by identity, never by message prose. GRC's
-            # done() clears page.process strictly after send_end_exec, so a
-            # live new process at marker time proves a real run; an absent or
-            # unchanged identity proves nothing was ever spawned. A snapshot
-            # from a page that is no longer current (mid-run tab switch) or a
-            # missing provider falls back to the legacy clean-success
-            # behavior rather than guessing.
+            # send_end_exec() with default code 0). Keep the page provider's
+            # identity check as that legacy fallback; a tab switch or missing
+            # provider remains inconclusive rather than guessing.
             spawn_failed = False
             if (
-                match is None
+                bound_process is None
+                and match is None
                 and self._process_provider is not None
                 and self._spawn_snapshot is not None
             ):
@@ -370,6 +400,7 @@ class ExecutionErrorMonitor:
             if _RUNTIME_ERROR_MARKER in self._last_run_log:
                 self._has_runtime_error = True
             self._last_run_had_runtime_error = self._has_runtime_error
+            self._last_run_process_exited = process_exited
             self._last_run_spawn_failed = spawn_failed
             self._last_run_terminated_by_kill = False
             self._last_run_termination_signal = None
@@ -391,10 +422,12 @@ class ExecutionErrorMonitor:
             self._last_run_log = "".join(self._chunks)
             self._last_run_code = 1
             self._last_run_evicted = self._evicted
+            self._last_run_process_exited = False
             self._last_run_spawn_failed = False  # a generate error is not a spawn crash
             self._last_run_terminated_by_kill = False
             self._last_run_termination_signal = None
             self._last_run_synthesized = False
+            self._bound_run_process = None
             self._last_run_id = self._run_epoch
             self._spawn_snapshot = None
             self._fail(1)
@@ -423,6 +456,7 @@ class ExecutionErrorMonitor:
         self._last_run_code = None
         self._last_run_evicted = self._evicted
         self._last_run_had_runtime_error = self._has_runtime_error
+        self._last_run_process_exited = False
         self._last_run_spawn_failed = False
         self._last_run_terminated_by_kill = signal is not None
         self._last_run_termination_signal = signal
@@ -430,11 +464,18 @@ class ExecutionErrorMonitor:
         self._last_run_id = self._run_epoch
         self._reset()
         self._tracking = False
+        self._bound_run_process = None
         self._agent_initiated = False
         self._run_end.set()
         return True
 
     def _append(self, text: str) -> None:
+        # Detect the native marker across arbitrary console chunk boundaries
+        # before eviction. This suffix is parser state, not model-facing output.
+        scan = self._runtime_error_tail + text
+        if _RUNTIME_ERROR_MARKER in scan:
+            self._has_runtime_error = True
+        self._runtime_error_tail = scan[-(len(_RUNTIME_ERROR_MARKER) - 1):]
         self._chunks.append(text)
         # Count encoded bytes, not characters, so the 512KB cap is a byte cap
         # even for multibyte UTF-8 output.
@@ -448,6 +489,7 @@ class ExecutionErrorMonitor:
         self._chunk_bytes = 0
         self._evicted = False
         self._has_runtime_error = False
+        self._runtime_error_tail = ""
 
     def _fail(self, code: int) -> None:
         log_text = self._last_run_log or ""

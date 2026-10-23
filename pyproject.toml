@@ -43,6 +43,8 @@ dependencies = [
     "pydantic-graph>=2.7.0,<3",
     "python-dotenv>=1.0",
     "grandalf>=0.8",
+    "numpy>=1.26",
+    "matplotlib>=3.8",
     # asyncio+GLib unification. PyGObject >= 3.50 provides this in-tree as
     # `gi.events`, so gbulb is only needed on older PyGObject (Ubuntu 24.04
     # ships 3.48). Marked by Python version because gbulb pins PyGObject

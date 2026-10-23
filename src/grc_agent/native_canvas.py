@@ -156,21 +156,28 @@ def _lock_path_for(path: Path) -> Path:
     return path.parent / ".grc_agent" / (path.name + ".lock")
 
 
-def _spawn_failed(monitor) -> bool:
-    """The monitor's spawn-crash verdict; False on monitors without it."""
-    return bool(getattr(monitor, "last_run_spawn_failed", False))
+def _completed_run_evidence(monitor, expected_run_id: int) -> dict | None:
+    """Return this attempt's completed monitor record, never a previous run's."""
+    evidence = monitor.get_last_run_log()
+    if (
+        evidence is None
+        or evidence.get("run_id") != expected_run_id
+        or evidence.get("run_in_progress") is not False
+    ):
+        return None
+    return evidence
 
 
-def _apply_spawn_state(res: dict, monitor) -> None:
-    """Flag a spawn-crashed run and replace the note with the spawn guidance."""
-    if _spawn_failed(monitor):
+def _apply_spawn_state(res: dict, evidence: dict | None) -> None:
+    """Flag a spawn-crashed run using only its matching retained record."""
+    if evidence is not None and evidence.get("spawn_failed"):
         res["spawn_failed"] = True
         res["ran_successfully"] = False
-        res["note"] = (
+        res["note"] = evidence.get("spawn_note", (
             "The flowgraph process failed to spawn — nothing was executed. Read the "
-            "full console output with the get_run_log tool (its spawn_note and the "
+            "full console output with grc_interaction(mode='log') (its spawn_note and the "
             "retained exception text name the cause), fix the environment, and run again."
-        )
+        ))
 
 
 class NativeFlowgraphProxy:
@@ -186,6 +193,7 @@ class NativeFlowgraphProxy:
     def __init__(self, canvas_manager: "NativeCanvasManager", exec_monitor: Any = None) -> None:
         object.__setattr__(self, "_canvas_manager", canvas_manager)
         object.__setattr__(self, "_exec_monitor", exec_monitor)
+        object.__setattr__(self, "_observation", None)
 
     def _get_target(self) -> Any:
         cm = object.__getattribute__(self, "_canvas_manager")
@@ -227,6 +235,104 @@ class NativeFlowgraphProxy:
                     )
         return data
 
+    async def run_observed_flowgraph(self, sink: str, **kwargs: Any) -> dict:
+        """Bind a fresh File Sink output to the graph and native execution epoch."""
+        from grc_agent.observations import prepare_observation
+
+        cm = object.__getattribute__(self, "_canvas_manager")
+        monitor = object.__getattribute__(self, "_exec_monitor")
+        if monitor is None:
+            raise ToolFailed("Run monitoring is not wired up.")
+        page = cm.current_page
+        if page is None or not page.file_path:
+            raise ValueError("Save the active graph before capturing a run.")
+        if monitor.is_tracking or page.process is not None:
+            raise ValueError("Stop the running graph before starting another capture.")
+        if not kwargs.get("wait", True):
+            raise ValueError("A captured run requires wait=True to seal its completed output.")
+        record = prepare_observation(page.flow_graph, sink, page.file_path)
+        epoch = monitor.run_epoch
+        object.__setattr__(self, "_observation", None)
+        result = await self.run_flowgraph(action="start", **kwargs)
+        if monitor.run_epoch == epoch + 1:
+            record.run_id = monitor.run_epoch
+            object.__setattr__(self, "_observation", record)
+            result = self._seal_run_observation(
+                result, stopped=result.get("status") == "stopped_after_timeout"
+            )
+        return result
+
+    def _seal_run_observation(self, result: dict, *, stopped: bool) -> dict:
+        """Publish file identity only after this capture's observed terminal state."""
+        from grc_agent.observations import seal_observation
+
+        record = object.__getattribute__(self, "_observation")
+        monitor = object.__getattribute__(self, "_exec_monitor")
+        if record is None or monitor is None or record.run_id != monitor.run_epoch:
+            return result
+        result = {**result, "run_id": record.run_id, "observation_sink": record.sink_name}
+        try:
+            seal_observation(record, monitor.get_last_run_log() or {}, stopped=stopped)
+        except ValueError as exc:
+            result["observation_status"] = "unavailable"
+            result["observation_error"] = str(exc)
+        else:
+            result["observation_status"] = "sealed"
+        return result
+
+    def measure_run(
+        self, run_id: int, offset: int, count: int, sample_rate: float, *, include_image: bool = False
+    ) -> Any:
+        """Return measurements and an image of the same selected captured samples."""
+        from pydantic_ai import BinaryContent, ToolReturn
+
+        from grc_agent.measurements import analyze_samples, render_samples
+        from grc_agent.observations import read_observation
+
+        record = object.__getattribute__(self, "_observation")
+        monitor = object.__getattribute__(self, "_exec_monitor")
+        if record is None or monitor is None:
+            raise ValueError("No capture is associated with this session; start a run with a File Sink selected.")
+        if monitor.is_tracking:
+            raise ValueError("The native run is still in progress; wait for it to finish.")
+        cm = object.__getattribute__(self, "_canvas_manager")
+        page = cm.current_page
+        if page is None or Path(page.file_path).resolve() != Path(record.graph_path):
+            raise ValueError("The active graph is not the graph captured by this run.")
+        samples, provenance = read_observation(
+            record, page.flow_graph, monitor.get_last_run_log() or {}, run_id, offset, count
+        )
+        rate = sample_rate or None
+        metrics = analyze_samples(samples, rate)
+        png = render_samples(samples, rate)
+        plot = BinaryContent(data=png, media_type="image/png")
+        return ToolReturn(
+            return_value={
+                "provenance": provenance, "measurements": metrics,
+                "sample_rate_source": "caller_supplied" if rate else "unknown",
+                "verification": "Measurements only; compare with the task's independent expected values and tolerances.",
+            },
+            content=[plot] if include_image else None,
+            metadata=None if include_image else {"display_images": [plot.data_uri]},
+        )
+
+    def capture_canvas(self) -> Any:
+        """Use GRC's own renderer; this image is topology evidence only."""
+        from gnuradio.grc.gui.Utils import make_screenshot
+        from pydantic_ai import BinaryContent, ToolReturn
+
+        from grc_agent.adapter.graph import flow_graph_content_hash
+
+        graph = self._get_target()
+        with tempfile.TemporaryDirectory(prefix="grc-canvas-") as directory:
+            path = Path(directory) / "canvas.png"
+            make_screenshot(graph, str(path))
+            png = path.read_bytes()
+        return ToolReturn(
+            return_value={"graph_hash": flow_graph_content_hash(graph), "evidence": "Canvas topology, not signal measurements."},
+            content=[BinaryContent(data=png, media_type="image/png")],
+        )
+
     async def run_flowgraph(
         self,
         action: Literal["start", "stop"] = "start",
@@ -254,7 +360,8 @@ class NativeFlowgraphProxy:
         route GRC into a modal Save-As dialog that blocks the unified loop.
         """
         if action == "stop":
-            return await self.stop_flowgraph()
+            result = await self.stop_flowgraph()
+            return self._seal_run_observation(result, stopped=result.get("status") == "stopped")
         if action != "start":
             raise ValueError(f"Invalid action {action!r}: must be 'start' or 'stop'")
         self._validate_bounded_run(wait, stop_after_seconds)
@@ -277,7 +384,7 @@ class NativeFlowgraphProxy:
             )
         if getattr(page, "process", None) is not None:
             raise ValueError(
-                "A flowgraph execution is already in progress. Stop it with run_flowgraph(action='stop') "
+                "A flowgraph execution is already in progress. Stop it with grc_interaction(mode='stop') "
                 "first, or wait for it to finish."
             )
         if not getattr(page, "file_path", None):
@@ -285,7 +392,7 @@ class NativeFlowgraphProxy:
                 "The flowgraph has never been saved. GRC generates into the saved "
                 "graph's directory and executes from there, so save it first: call "
                 "save_graph to write this flowgraph into the project directory, "
-                "then retry run_flowgraph."
+                "then retry grc_interaction(mode='start')."
             )
         fg = page.flow_graph
         # is_valid()/iter_error_messages() only read _error_messages, which is
@@ -308,14 +415,17 @@ class NativeFlowgraphProxy:
         # exactly the enabled condition, so enabling here is truthful.
         actions.FLOW_GRAPH_EXEC.set_enabled(True)
         epoch = self._trigger_execute(monitor, actions)
+        if page.process is not None:
+            monitor.bind_run_process(page.process)
 
         if not wait:
             return {
                 "status": "started",
+                "run_id": monitor.run_epoch,
                 "note": (
                     "The flowgraph is running; output streams to GRC's console where the "
                     "user can watch it. GUI flowgraphs run until stopped — call "
-                    "run_flowgraph(action='stop') when it should end. Read output with get_run_log "
+                    "grc_interaction(mode='stop') when it should end. Read output with grc_interaction(mode='log') "
                     "(its run_in_progress field tells you when the run has finished)."
                 ),
             }
@@ -325,7 +435,7 @@ class NativeFlowgraphProxy:
         deadline = stop_after_seconds if stop_after_seconds is not None else timeout_seconds
         outcome = await monitor.wait_for_run_end(deadline, epoch=epoch)
         return await self._build_run_result(
-            monitor, outcome, timeout_seconds, stop_after_seconds
+            monitor, outcome, timeout_seconds, stop_after_seconds, expected_run_id=epoch + 1, page=page
         )
 
     async def _build_run_result(
@@ -334,51 +444,59 @@ class NativeFlowgraphProxy:
         outcome: str,
         timeout_seconds: float,
         stop_after_seconds: float | None,
+        *,
+        expected_run_id: int,
+        page: Any = None,
     ) -> dict:
         """Map the monitor's run outcome to the tool result payload."""
         gen_opts = None
         cm = object.__getattribute__(self, "_canvas_manager")
-        page = getattr(cm, "current_page", None)
+        page = page if page is not None else cm.current_page
         if page is not None and getattr(page, "flow_graph", None) is not None:
             with contextlib.suppress(Exception):
                 gen_opts = page.flow_graph.get_option("generate_options")
 
         if outcome == "completed":
-            code = monitor.last_run_code
-            # A code-less Done marker with an unchanged process identity is
-            # a spawn crash — GRC's own Executor emits send_end_exec() with the
-            # default code 0 when subprocess.Popen raises. The monitor's flag
-            # carries the verdict; surface it without fabricating a code.
+            evidence = _completed_run_evidence(monitor, expected_run_id)
+            code = evidence["return_code"] if evidence is not None else None
             res = {
                 "status": "completed",
+                "run_id": expected_run_id,
                 "return_code": code,
-                "ran_successfully": code == 0
-                and not _spawn_failed(monitor),
+                "ran_successfully": bool(evidence and evidence["ran_successfully"]),
                 "note": (
-                    "Read the full console output with the get_run_log tool. An empty log "
+                    "Read the full console output with grc_interaction(mode='log'). An empty log "
                     "with an immediate completion can mean the graph ran in an external "
                     "terminal (no_gui graphs) or failed to spawn — check the log and ask "
                     "the user if in doubt."
                 ),
             }
+            if evidence is None:
+                res["note"] = (
+                    "The monitor has no completed record for this execution attempt, so its "
+                    "result cannot be confirmed. Read grc_interaction(mode='log') and check its run_id."
+                )
             if gen_opts == "no_gui":
                 res["generate_options"] = "no_gui"
-                res["note"] = (
-                    "This flowgraph was generated with generate_options='no_gui'. GNU Radio runs "
-                    "no_gui flowgraphs in an external terminal wrapper; read get_run_log for output details."
-                )
-            _apply_spawn_state(res, monitor)
+                if evidence is not None:
+                    res["note"] = (
+                        "This flowgraph was generated with generate_options='no_gui'. GNU Radio runs "
+                        "no_gui flowgraphs in an external terminal wrapper; read grc_interaction(mode='log') for output details."
+                    )
+            _apply_spawn_state(res, evidence)
             return res
         if outcome == "still_running":
             if stop_after_seconds is not None:
                 # Bounded run exhausted its budget: stop it through the same
                 # native Stop path the toolbar button takes — no extra machinery.
-                return await self._finish_bounded_run(monitor, stop_after_seconds)
+                return await self._finish_bounded_run(
+                    monitor, stop_after_seconds, expected_run_id=expected_run_id, page=page
+                )
             res = {
                 "status": "still_running",
                 "note": (
                     f"The run did not finish within {timeout_seconds}s. GUI flowgraphs run "
-                    "until stopped — call run_flowgraph(action='stop') when done, then read get_run_log."
+                    "until stopped — call grc_interaction(mode='stop') when done, then read grc_interaction(mode='log')."
                 ),
             }
             if gen_opts == "no_gui":
@@ -411,25 +529,32 @@ class NativeFlowgraphProxy:
             )
 
     async def _finish_bounded_run(
-        self, monitor, stop_after_seconds: float
+        self, monitor, stop_after_seconds: float, *, expected_run_id: int, page: Any = None
     ) -> dict:
         """Stop a bounded run whose budget is exhausted, via the same native
         Stop path the toolbar button takes (SIGTERM). If the run finished on
         its own right at the deadline (nothing left to stop), report the real
         outcome instead of a stop that never happened."""
-        stop_res = await self.stop_flowgraph()
+        stop_res = await self.stop_flowgraph(page=page)
         if stop_res.get("status") == "not_running":
-            code = monitor.last_run_code
+            evidence = _completed_run_evidence(monitor, expected_run_id)
+            code = evidence["return_code"] if evidence is not None else None
             res = {
                 "status": "completed",
+                "run_id": expected_run_id,
                 "return_code": code,
-                "ran_successfully": code == 0 and not _spawn_failed(monitor),
+                "ran_successfully": bool(evidence and evidence["ran_successfully"]),
                 "note": (
                     f"The run finished on its own right at the {stop_after_seconds}s "
-                    "auto-stop deadline. Read the full output with get_run_log."
+                    "auto-stop deadline. Read the full output with grc_interaction(mode='log')."
                 ),
             }
-            _apply_spawn_state(res, monitor)
+            if evidence is None:
+                res["note"] = (
+                    "The monitor has no completed record for this execution attempt, so its "
+                    "result cannot be confirmed. Read grc_interaction(mode='log') and check its run_id."
+                )
+            _apply_spawn_state(res, evidence)
             return res
         return {
             "status": "stopped_after_timeout",
@@ -437,7 +562,7 @@ class NativeFlowgraphProxy:
             "note": (
                 f"Auto-stopped after {stop_after_seconds}s of runtime (stop escalation: "
                 "SIGTERM, then SIGKILL if the shutdown stalls — a deliberate stop, not a "
-                "failure). Read the full output with get_run_log."
+                "failure). Read the full output with grc_interaction(mode='log')."
             ),
         }
 
@@ -519,15 +644,15 @@ class NativeFlowgraphProxy:
             page.process = None
         return True
 
-    async def stop_flowgraph(self) -> dict:
+    async def stop_flowgraph(self, *, page: Any = None) -> dict:
         """Stop the active flowgraph's run through GRC's native Stop action.
 
         Sends SIGTERM (the same thing the toolbar Stop button does); when the
         shutdown stalls past the native wait, escalates to SIGKILL after a
         grace window rather than leaving a wedged run behind. Buffered output
-        is retained either way — read it with get_run_log."""
+        is retained either way — read it with grc_interaction(mode='log')."""
         cm = object.__getattribute__(self, "_canvas_manager")
-        page = cm.current_page
+        page = page if page is not None else cm.current_page
         if page is None:
             raise ValueError("No flowgraph is open, so nothing is running.")
         monitor = object.__getattribute__(self, "_exec_monitor")
@@ -547,7 +672,12 @@ class NativeFlowgraphProxy:
         actions = gui_actions()
         # Truthful enable: page.process is set, exactly GRC's own condition.
         actions.FLOW_GRAPH_KILL.set_enabled(True)
-        actions.FLOW_GRAPH_KILL()
+        selected_page = cm.window.current_page
+        try:
+            cm.window.current_page = page
+            actions.FLOW_GRAPH_KILL()
+        finally:
+            cm.window.current_page = selected_page
 
         if monitor is None:
             return {"status": "stop_requested"}
@@ -557,7 +687,7 @@ class NativeFlowgraphProxy:
                 "status": "stopped",
                 "note": (
                     "The run was stopped (SIGTERM — a user-requested stop, not a failure). "
-                    "Buffered output is still captured: read it with get_run_log."
+                    "Buffered output is still captured: read it with grc_interaction(mode='log')."
                 ),
             }
         fg = getattr(page, "flow_graph", None)
@@ -573,7 +703,7 @@ class NativeFlowgraphProxy:
                 "status": "stopped",
                 "note": (
                     "The run was stopped (SIGTERM — a user-requested stop, not a failure). "
-                    "Buffered output is still captured: read it with get_run_log."
+                    "Buffered output is still captured: read it with grc_interaction(mode='log')."
                 ),
             }
             return stopped
@@ -582,7 +712,7 @@ class NativeFlowgraphProxy:
             "note": (
                 "The run was stopped, but its SIGTERM shutdown stalled, so the stop "
                 "escalated to SIGKILL after a grace window (a deliberate stop, not a "
-                "failure). The run DID execute — get_run_log carries everything "
+                "failure). The run DID execute — grc_interaction(mode='log') carries everything "
                 "captured before termination, with the kill disclosed."
             ),
         }

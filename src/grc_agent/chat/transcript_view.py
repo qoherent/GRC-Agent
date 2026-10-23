@@ -13,7 +13,7 @@ test against.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 import gi
@@ -82,14 +82,33 @@ class TranscriptViewMixin:
             self._update_context_label()
             return
 
+        _, tool_prompt_parts = self._function_tool_user_content()
         for msg in self._message_history:
             if isinstance(msg, ModelRequest):
                 for part in msg.parts:
-                    if isinstance(part, UserPromptPart):
+                    if isinstance(part, UserPromptPart) and id(part) not in tool_prompt_parts:
                         self._append_user_message(user_prompt_text(part), prompt_images(part))
             elif isinstance(msg, ModelResponse):
                 box = self._start_agent_message()
                 self._render_last_message_rich(box, msg)
+        response_call_ids = {
+            frozenset(
+                part.tool_call_id
+                for part in msg.parts
+                if isinstance(part, ToolCallPart | NativeToolCallPart) and part.tool_call_id
+            )
+            for msg in self._message_history
+            if isinstance(msg, ModelResponse)
+        }
+        tool_content_groups, _synthetic_parts = self._function_tool_user_content()
+        for call_ids, prompts in tool_content_groups.items():
+            if any(call_ids & response_ids for response_ids in response_call_ids):
+                continue
+            content_box = self._tool_content_box([prompt.content for prompt in prompts])
+            if content_box is not None:
+                box = self._start_agent_message()
+                box.pack_start(content_box, False, False, 0)
+                box.show_all()
         self._scroll_to_bottom(force=True)
         self._update_context_label()
 
@@ -237,6 +256,37 @@ class TranscriptViewMixin:
                     by_id.setdefault(part.tool_call_id, part)
         return by_id
 
+    def _function_tool_user_content(
+        self,
+    ) -> tuple[dict[frozenset[str], list[UserPromptPart]], set[int]]:
+        """Group tool-added prompts with the set of returns in their request.
+
+        PydanticAI records ``ToolReturn.content`` as a UserPromptPart in the
+        same ModelRequest as its ToolReturnPart. These are model context, not
+        user-authored chat messages. Message history has no call id on the
+        UserPromptPart, so keep content at the response level instead of
+        guessing a per-tool pairing.
+        """
+        content_by_call_ids: dict[frozenset[str], list[UserPromptPart]] = {}
+        synthetic_parts: set[int] = set()
+        for msg in self._message_history:
+            if not isinstance(msg, ModelRequest):
+                continue
+            prompts: list[UserPromptPart] = []
+            call_ids: set[str] = set()
+            after_tool_return = False
+            for part in msg.parts:
+                if isinstance(part, ToolReturnPart):
+                    call_ids.add(part.tool_call_id)
+                    after_tool_return = True
+                elif isinstance(part, UserPromptPart) and after_tool_return:
+                    prompts.append(part)
+                    synthetic_parts.add(id(part))
+
+            if call_ids and prompts:
+                content_by_call_ids.setdefault(frozenset(call_ids), []).extend(prompts)
+        return content_by_call_ids, synthetic_parts
+
     def _render_last_message_rich(self, box: Gtk.Box, msg: ModelMessage) -> None:  # noqa: C901
         # The copy-button action row is not content: _start_agent_message
         # packed it once, and the button it carries is the box's copy-text
@@ -266,6 +316,7 @@ class TranscriptViewMixin:
             p.tool_call_id: p for p in msg.parts if isinstance(p, NativeToolReturnPart)
         }
         function_returns = self._function_returns_by_call_id()
+        tool_content_groups, _synthetic_parts = self._function_tool_user_content()
         for part in msg.parts:
             if isinstance(part, NativeToolReturnPart):
                 continue
@@ -302,21 +353,31 @@ class TranscriptViewMixin:
                 args_str = _tool_args_text(part)
                 self._set_tool_body(exp, args_str)
 
+                result_metadata = None
                 if isinstance(ret_part, RetryPromptPart):
                     ret_content, ok, retry = ret_part.model_response(), True, True
                     label_payload: Any = ret_content
                 elif ret_part is not None:
-                    ret_content = str(ret_part.content)
+                    ret_content = self._tool_result_text(ret_part.content)
                     ok, retry = ret_part.outcome != "failed", False
                     # The label rule reads the structured payload the tool
                     # returned; the repr string stays display/copy-only.
                     label_payload = ret_part.content
+                    if isinstance(ret_part, ToolReturnPart):
+                        result_metadata = ret_part.metadata
                 else:
                     ret_content, ok, retry = "", True, False
 
                 if ret_content:
-                    self._set_tool_body(exp, ret_content)
-                    exp.set_label(_tool_label(tool_name, ok=ok, retry=retry, result=label_payload))
+                    self._set_tool_result(
+                        exp,
+                        label_payload,
+                        ok=ok,
+                        metadata=result_metadata,
+                    )
+                    exp.set_label(
+                        _tool_label(tool_name, ok=ok, retry=retry, result=label_payload)
+                    )
                     full_text += _transcript_tool_call(tool_name, args_str, ret_content)
                 else:
                     exp.set_label(_tool_label(tool_name))
@@ -324,6 +385,19 @@ class TranscriptViewMixin:
 
                 box.pack_start(exp, False, False, 0)
                 exp.show_all()
+
+        response_call_ids = frozenset(
+            part.tool_call_id
+            for part in msg.parts
+            if isinstance(part, ToolCallPart | NativeToolCallPart) and part.tool_call_id
+        )
+        for call_ids, prompts in tool_content_groups.items():
+            if call_ids & response_call_ids:
+                content_box = self._tool_content_box(
+                    [prompt.content for prompt in prompts]
+                )
+                if content_box is not None:
+                    box.pack_start(content_box, False, False, 0)
 
         if hasattr(box, "_grc_copy_btn") and box._grc_copy_btn is not None:
             box._grc_copy_btn._grc_copy_text = full_text
@@ -435,13 +509,144 @@ class TranscriptViewMixin:
         name = getattr(exp, "_grc_tool_name", "?")
         exp.set_label(_tool_label_running(name))
 
-    def _set_tool_result(self, exp: Gtk.Expander, result: Any, *, ok: bool = True) -> None:
-        display = result if isinstance(result, str) else str(result)
+    @staticmethod
+    def _tool_content_box(
+        contents: Sequence[Any], extra_images: Sequence[BinaryContent] = ()
+    ) -> Gtk.Box | None:
+        content_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        content_box.get_style_context().add_class("chat-tool-result-content")
+        thumbs = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        thumbs.get_style_context().add_class("chat-tool-result-images")
+
+        for content in contents:
+            if content is None:
+                continue
+            items = (
+                [content]
+                if isinstance(content, str | BinaryContent)
+                else content
+            )
+            for item in items:
+                if isinstance(item, str):
+                    label = Gtk.Label(label=item)
+                    label.set_line_wrap(True)
+                    label.set_line_wrap_mode(Pango.WrapMode.WORD_CHAR)
+                    label.set_xalign(0.0)
+                    label.set_halign(Gtk.Align.FILL)
+                    label.set_selectable(True)
+                    content_box.pack_start(label, False, False, 0)
+                elif isinstance(item, BinaryContent):
+                    if item.is_image:
+                        thumb = _thumbnail(item.data, 240)
+                        if thumb is not None:
+                            thumbs.pack_start(thumb, False, False, 0)
+                    else:
+                        label = Gtk.Label(label=f"[binary content: {item.media_type}]")
+                        label.set_xalign(0.0)
+                        label.set_selectable(True)
+                        content_box.pack_start(label, False, False, 0)
+
+        for image in extra_images:
+            thumb = _thumbnail(image.data, 240)
+            if thumb is not None:
+                thumbs.pack_start(thumb, False, False, 0)
+        if thumbs.get_children():
+            content_box.pack_start(thumbs, False, False, 0)
+        return content_box if content_box.get_children() else None
+
+    def _set_tool_result(
+        self,
+        exp: Gtk.Expander,
+        result: Any,
+        *,
+        ok: bool = True,
+        tool_content: Any = None,
+        metadata: Any = None,
+    ) -> None:
+        """Update a tool result and show attached BinaryContent images inline."""
+        display = self._tool_result_text(result)
         self._set_tool_body(exp, display)
+        body = getattr(exp, "_grc_tool_body", None)
+        old_wrapper = getattr(exp, "_grc_tool_result_wrapper", None)
+        if old_wrapper is not None:
+            exp.remove(old_wrapper)
+            exp.add(body)
+            exp._grc_tool_result_wrapper = None
+        content_box = self._tool_content_box(
+            [tool_content] if tool_content is not None else [],
+            extra_images=(
+                self._tool_result_images(result)
+                + self._tool_metadata_images(metadata)
+            ),
+        )
+        if body is not None and content_box is not None:
+            wrapper = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+            exp.remove(body)
+            wrapper.pack_start(body, False, False, 0)
+            wrapper.pack_start(content_box, False, False, 0)
+            exp.add(wrapper)
+            exp._grc_tool_result_wrapper = wrapper
+            wrapper.show_all()
         name = getattr(exp, "_grc_tool_name", "?")
         # The label rule reads the structured field when the payload is a
         # mapping; the display string stays repr-stable for copy text.
         exp.set_label(_tool_label(name, ok=ok, result=result))
+
+    @classmethod
+    def _tool_result_images(cls, value: Any) -> list[BinaryContent]:
+        if isinstance(value, BinaryContent):
+            return [value] if value.is_image else []
+        if isinstance(value, Mapping):
+            return [image for item in value.values() for image in cls._tool_result_images(item)]
+        if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
+            return [image for item in value for image in cls._tool_result_images(item)]
+        return []
+
+    @staticmethod
+    def _tool_metadata_images(metadata: Any) -> list[BinaryContent]:
+        if not isinstance(metadata, Mapping):
+            return []
+        display_images = metadata.get("display_images", ())
+        if isinstance(display_images, str):
+            display_images = (display_images,)
+        if not isinstance(display_images, Sequence) or isinstance(
+            display_images, bytes | bytearray
+        ):
+            return []
+
+        images = []
+        for data_uri in display_images:
+            if not isinstance(data_uri, str):
+                continue
+            try:
+                image = BinaryContent.from_data_uri(data_uri)
+            except (TypeError, ValueError):
+                continue
+            if image.is_image:
+                images.append(image)
+        return images
+
+    @classmethod
+    def _tool_result_text(cls, value: Any) -> str:
+        """Stringify a result without expanding BinaryContent bytes."""
+        if isinstance(value, BinaryContent):
+            return cls._safe_tool_result_value(value)
+        if isinstance(value, Mapping):
+            value = {key: cls._safe_tool_result_value(item) for key, item in value.items()}
+        elif isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
+            value = [cls._safe_tool_result_value(item) for item in value]
+        return str(value)
+
+    @classmethod
+    def _safe_tool_result_value(cls, value: Any) -> Any:
+        if isinstance(value, BinaryContent):
+            kind = "image" if value.is_image else "binary content"
+            return f"[{kind}: {value.media_type}]"
+        if isinstance(value, Mapping):
+            return {key: cls._safe_tool_result_value(item) for key, item in value.items()}
+        if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
+            return [cls._safe_tool_result_value(item) for item in value]
+        return value
 
     def _append_error(self, message: str, style: str = "error") -> None:
         """Append an inline status label to the chat log.

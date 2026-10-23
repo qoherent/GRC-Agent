@@ -22,7 +22,7 @@ from pydantic_ai.capabilities import (
 )
 from pydantic_ai.common_tools.duckduckgo import duckduckgo_search_tool
 from pydantic_ai.exceptions import UsageLimitExceeded
-from pydantic_ai.messages import ToolCallPart, UserPromptPart
+from pydantic_ai.messages import ToolCallPart, ToolReturnPart, UserPromptPart
 from pydantic_ai.tools import ToolDefinition
 from pydantic_ai_harness import PromptInjectionDefender
 
@@ -39,6 +39,7 @@ from grc_agent.deps import (
     FlowgraphDeps,
     SupportsGetRunLog,
     SupportsNotifyEdit,
+    SupportsObservation,
     SupportsRunFlowgraph,
     SupportsSaveBlock,
     SupportsSaveGraph,
@@ -544,22 +545,6 @@ async def save_block_func(
     return json.dumps(res)
 
 
-def _validate_run_flowgraph(ctx: RunContext[FlowgraphDeps], action: str = "start", **_: Any) -> None:
-    """Decide approval before the tool body runs.
-
-    Starting a flowgraph is a physical-world side effect (RF transmission) and
-    is approval-gated; stopping one is the remedy, not the risk, and executes
-    immediately. Raising ApprovalRequired here rather than inside the tool is
-    the framework's documented placement: invalid arguments are rejected
-    before a human is asked to approve them, the deferral costs no retry
-    budget, and the validator re-runs with tool_call_approved set once the
-    user approves. The action value itself needs no check — the Literal in the
-    signature already rejects anything but 'start' or 'stop'.
-    """
-    if action == "start" and not ctx.tool_call_approved:
-        raise ApprovalRequired()
-
-
 async def run_flowgraph_func(
     ctx: RunContext[FlowgraphDeps],
     action: Literal["start", "stop"] = "start",
@@ -604,7 +589,7 @@ async def save_graph_func(ctx: RunContext[FlowgraphDeps]) -> str:
 
     An unsaved page lands in the project directory under a derived name; a
     saved one is rewritten in place. GRC generates into the saved graph's
-    directory and runs from there, so save before run_flowgraph when the
+    directory and runs from there, so save before native execution when the
     flowgraph is untitled.
     """
     if not isinstance(ctx.deps, SupportsSaveGraph):
@@ -619,6 +604,70 @@ async def save_graph_func(ctx: RunContext[FlowgraphDeps]) -> str:
     return json.dumps(res)
 
 
+def _validate_interaction(
+    ctx: RunContext[FlowgraphDeps], mode: str, sink: str = "", run_id: int = 0,
+    offset: int = 0, count: int = 65536, sample_rate: float = 0,
+    wait: bool = True, timeout_seconds: float = 60, stop_after_seconds: float | None = None,
+) -> None:
+    if mode != "start" and (sink or not wait or timeout_seconds != 60 or stop_after_seconds is not None):
+        raise ModelRetry("sink, wait, timeout_seconds and stop_after_seconds apply only to start.")
+    if mode not in ("measure", "plot") and (run_id or offset or count != 65536 or sample_rate):
+        raise ModelRetry("run_id, offset, count and sample_rate apply only to measure/plot.")
+    if mode in ("measure", "plot") and run_id < 1:
+        raise ModelRetry("measure/plot require the run_id returned by start.")
+    if stop_after_seconds is not None and not wait:
+        raise ModelRetry("stop_after_seconds requires wait=True.")
+    if sink and not wait:
+        raise ModelRetry("A captured run requires wait=True so its completed output can be sealed.")
+    if mode == "start" and not ctx.tool_call_approved:
+        raise ApprovalRequired()
+
+
+async def grc_interaction_func(
+    ctx: RunContext[FlowgraphDeps],
+    mode: Literal["start", "stop", "log", "measure", "plot", "canvas"],
+    sink: str = "",
+    run_id: Annotated[int, Field(ge=0)] = 0,
+    offset: Annotated[int, Field(ge=0)] = 0,
+    count: Annotated[int, Field(gt=0)] = 65536,
+    sample_rate: Annotated[float, Field(ge=0, allow_inf_nan=False)] = 0,
+    wait: bool = True,
+    timeout_seconds: Annotated[float, Field(gt=0, allow_inf_nan=False)] = 60,
+    stop_after_seconds: Annotated[float | None, Field(gt=0, allow_inf_nan=False)] = None,
+) -> Any:
+    """Execute natively and inspect evidence. Measurements do not assert task correctness.
+
+    Args:
+        mode: measure=numbers; plot=numbers+image; canvas=image; image-capable model for plot/canvas; start/stop/log.
+        sink: File Sink ID for start capture (wait=True; new path, overwrite).
+        run_id: Run to measure.
+        offset: First scalar sample.
+        count: Max scalar samples; report omissions.
+        sample_rate: Hz; 0=unknown.
+        wait: Wait for completion.
+        timeout_seconds: Start timeout; graph remains running.
+        stop_after_seconds: Start auto-stop; capture ends incomplete.
+    """
+    if mode == "log":
+        return await get_run_log_func(ctx)
+    if mode == "stop" or (mode == "start" and not sink):
+        return await run_flowgraph_func(ctx, mode, wait, timeout_seconds, stop_after_seconds)
+    if not isinstance(ctx.deps, SupportsObservation):
+        raise ToolFailed("Native observation is not wired up in this environment.")
+    try:
+        if mode == "start":
+            return await ctx.deps.run_observed_flowgraph(
+                sink, wait=wait, timeout_seconds=timeout_seconds, stop_after_seconds=stop_after_seconds
+            )
+        if mode in ("measure", "plot"):
+            return ctx.deps.measure_run(
+                run_id, offset, count, sample_rate, include_image=(mode == "plot")
+            )
+        return ctx.deps.capture_canvas()
+    except (ValueError, OSError) as exc:
+        raise ModelRetry(str(exc)) from exc
+
+
 # Every domain tool derives its description and its per-argument schema text
 # from its own google-style docstring, so the model-visible contract cannot
 # drift from the real signature, and every one gets the same retry budget.
@@ -629,8 +678,8 @@ _TOOL_DEFAULTS: dict[str, Any] = {
 }
 
 
-def grc_tools() -> list[Tool[Any]]:
-    """The eight GRC domain tools, in the order the model sees them."""
+def grc_tools(*, read_only: bool = False) -> list[Tool[Any]]:
+    """Domain tools; the planner keeps a read-only console accessor."""
     return [
         Tool(inspect_graph_func, name="inspect_graph", **_TOOL_DEFAULTS),
         Tool(query_knowledge_func, name="query_knowledge", **_TOOL_DEFAULTS),
@@ -644,15 +693,10 @@ def grc_tools() -> list[Tool[Any]]:
             requires_approval=True,
             **_TOOL_DEFAULTS,
         ),
-        Tool(get_run_log_func, name="get_run_log", **_TOOL_DEFAULTS),
-        Tool(
-            run_flowgraph_func,
-            name="run_flowgraph",
-            # Approval is conditional on the action, so it is decided in the
-            # validator rather than by a blanket requires_approval flag.
-            args_validator=_validate_run_flowgraph,
-            **_TOOL_DEFAULTS,
-        ),
+        *( [Tool(get_run_log_func, name="get_run_log", **_TOOL_DEFAULTS)] if read_only else [
+            Tool(grc_interaction_func, name="grc_interaction", args_validator=_validate_interaction,
+                 sequential=True, **_TOOL_DEFAULTS)
+        ] ),
         # Agent-side save (Ctrl+S parity): the unsaved-run gate sends the model
         # here before a first run. No approval — a save is local and atomic,
         # and its guards fail before anything is touched.
@@ -697,7 +741,11 @@ async def validate_flowgraph_state(ctx: RunContext[FlowgraphDeps], output: Any) 
     messages = list(ctx.messages)
     start_idx = 0
     for idx, msg in enumerate(reversed(messages)):
-        if hasattr(msg, "parts") and any(
+        # ToolReturn.content produces a synthetic UserPromptPart alongside
+        # the tool return. It does not start a new human turn.
+        if hasattr(msg, "parts") and not any(
+            isinstance(part, ToolReturnPart) for part in msg.parts
+        ) and any(
             getattr(part, "part_kind", None) == "user-prompt"
             or part.__class__.__name__ == "UserPromptPart"
             for part in msg.parts

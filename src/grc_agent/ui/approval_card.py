@@ -171,11 +171,13 @@ def format_tool_summary(tool_name: str, args: dict[str, Any]) -> str:
         return _literal(args)
     if tool_name == "change_graph":
         return format_change_summary(args)
-    if tool_name == "run_flowgraph":
-        action = args.get("action", "start")
+    if tool_name in ("run_flowgraph", "grc_interaction"):
+        action = args.get("mode", args.get("action", "start"))
         if action == "stop":
             return "- Stop the active flowgraph execution (SIGTERM)."
         lines = ["- Run the active flowgraph with GRC's native Execute action."]
+        if args.get("sink"):
+            lines.append(f"- Capture File Sink `{args['sink']}` for measurement after completion.")
         if args.get("stop_after_seconds"):
             lines.append(f"- Bounded run: automatically stop after `{args['stop_after_seconds']}s`.")
         elif args.get("wait", True):
@@ -200,6 +202,7 @@ def format_tool_summary(tool_name: str, args: dict[str, Any]) -> str:
 
 
 _TOOL_CARD_TITLES = {
+    "grc_interaction": "Proposed flowgraph run — requires approval",
     "change_graph": "Proposed change — requires approval",
     "run_flowgraph": "Proposed flowgraph run — requires approval",
     "run_command": "Proposed command — requires approval",

@@ -71,7 +71,7 @@ Rules and architectural commandments for AI coding agents working on this codeba
   - Use Embedded Python Blocks (`epy_block`) only for custom logic/state machines where no catalog block exists.
   - When writing custom logic in an `epy_block`, mandate vectorized NumPy/SciPy array slice operations in `work()` to maintain streaming throughput.
 - **Flowgraph Execution via Native GRC**:
-  - Flowgraphs are started and stopped exclusively through `run_flowgraph`, which triggers GRC's native Execute/Stop actions (`Actions.FLOW_GRAPH_EXEC`/`KILL`).
+  - Flowgraphs are started and stopped exclusively through `grc_interaction` start/stop modes and `NativeFlowgraphProxy.run_flowgraph()`, which triggers GRC's native Execute/Stop actions (`Actions.FLOW_GRAPH_EXEC`/`KILL`).
   - Never execute generated flowgraph scripts or top-block Python files via shell tools.
 - **Sandboxed Project Directory & Human-in-the-Loop Consent**:
   - Filesystem (`fs_tools.py`) and shell (`shell_tools.py`) tools operate strictly within the resolved project directory sandbox.
@@ -91,8 +91,9 @@ Argument bounds and formats live in the JSON schema, not in prose: `k` carries `
 | `query_knowledge` | Read | `adapter.query_catalog()` / `query_docs()` — Hybrid Reciprocal Rank Fusion (RRF $k=60$) vector + FTS5 search with embedded C++ SWIG docstrings. |
 | `generate_python` | Read | `adapter.preview_flowgraph_py()` — In-memory preview of generated Python source via GRC's `Generator`. |
 | `change_graph` | Write | `adapter.change_graph()` — 7-phase transactional mutation engine with automatic rollback, Sugiyama relayout, and native validation. Approval-gated. Connection strings are pattern-validated in the schema. |
-| `run_flowgraph` | Write (Side Effect) | `NativeFlowgraphProxy.run_flowgraph()` — Native GRC Execute/Stop with optional bounded runtime (`stop_after_seconds`). Start is approval-gated via the tool's `args_validator`. |
-| `get_run_log` | Read | `exec_monitor.get_last_run_log()` — Retains console stdout/stderr from the last completed run. |
+| `grc_interaction` (`start` / `stop`) | Write (Side Effect) | `NativeFlowgraphProxy.run_flowgraph()` — Native GRC Execute/Stop with optional bounded runtime (`stop_after_seconds`). Start is approval-gated via the tool's `args_validator`. |
+| `grc_interaction` (`log`); planner `get_run_log` | Read | `exec_monitor.get_last_run_log()` — Retains console stdout/stderr from the last completed run. |
+| `grc_interaction` (`measure` / `plot` / `canvas`) | Read | Run-associated File Sink measurements and plots; native canvas rendering. Captures require a fresh output path, matching graph/run identity, observed exit of the bound process, and an unchanged sealed file. Natural completion and deliberate stops are distinguished; stopped samples may be partial. `measure` sends numbers to the model and displays its plot to the user; `plot` also sends the image to a vision-capable model. Canvas images show topology only. |
 | `save_graph` | Write (Side Effect) | `NativeFlowgraphProxy.save_graph()` — Saves the active flowgraph to disk (agent-side Ctrl+S): an unsaved page lands in the project directory under a derived name, a saved one is rewritten in place. No approval — the save is local and atomic. |
 | `save_block` | Write | `adapter.block_library.save_block_to_library()` — Exports `epy_block` source into GNU Radio's hier-block library (`~/.grc_gnuradio`). |
 | `read_file` · `write_file` · `edit_file` · `list_directory` · `search_files` · `find_files` · `create_directory` · `file_info` | Read / Write | `GrcFileSystemToolset` — Sandboxed to the project directory; `.grc` reads route to inspection (a structural view has no lines, so a supplied `offset`/`limit` is disclosed as inapplicable in the result header rather than dropped in silence); `.grc` writes denied. |

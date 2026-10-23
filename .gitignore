@@ -13,6 +13,9 @@ dist/
 
 # ---- Environment / secrets ----
 .env
+.env.*
+!.env.example
+.envrc
 
 # ---- Editor / OS ----
 *.swp
@@ -65,9 +68,35 @@ docs/blog.md
 # pi harness local state (goals pool, loops, session ledgers)
 .pi/
 # Local-only dataset-collection harness and every trace it produces
-# (plan: docs/plans/2026-09-08-1627-feat-finetuning-dataset-collection-harness-plan.md).
 # The harness drives the real app unattended with shell access; it stays out
 # of the repository by design. Code, fixtures, campaign DBs, manifests and
 # exports are all local-only.
 experiments/dataset_collection/
 *.campaign/
+
+# ---- Local investigation, planning, and machine-specific evidence ----
+/docs/plans/
+/docs/investigation/
+/docs/handoffs/
+/docs/jobs/
+/docs/evidence/
+/docs/harness_findings.md
+
+# ---- Local databases, test reports, and profiling output ----
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite3-wal
+*.sqlite3-shm
+*.log
+.coverage
+.coverage.*
+htmlcov/
+.mypy_cache/
+.tox/
+*.prof
+*.pstats

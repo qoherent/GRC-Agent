@@ -619,7 +619,7 @@ def test_tool_save_graph_requires_wired_deps():
 
 
 def test_grc_tools_save_graph_registration():
-    """save_graph is registered next to run_flowgraph with the house style:
+    """save_graph is registered next to grc_interaction with the house style:
     approval-free (a save is local, atomic, never destructive) and
     max_retries=3 like its sibling flowgraph tools."""
     from grc_agent.agent import grc_tools
@@ -629,4 +629,4 @@ def test_grc_tools_save_graph_registration():
     assert tool.max_retries == 3
     assert tool.requires_approval is False
     names = [t.name for t in tools]
-    assert names.index("save_graph") > names.index("run_flowgraph")
+    assert names.index("save_graph") > names.index("grc_interaction")

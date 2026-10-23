@@ -19,6 +19,7 @@ from gi.repository import Gdk, GLib, Gtk
 from grc_agent.adapter import (
     get_blocks_panel_visibility,
     get_gui_platform,
+    gui_actions,
     gui_application_cls,
     install_untitled_save_folder_provider,
     register_execution_messenger,
@@ -255,6 +256,13 @@ def build_app() -> tuple[Gtk.Window, NativeCanvasManager, ChatSidebar, NativeFlo
         return id(page), getattr(page, "process", None)
 
     exec_monitor.set_process_provider(_current_page_process)
+
+    def _bind_native_process(_action, _parameter):
+        page = canvas.current_page
+        if page is not None and page.process is not None:
+            exec_monitor.bind_run_process(page.process)
+
+    gui_actions().FLOW_GRAPH_EXEC.connect_after("activate", _bind_native_process)
     sidebar.set_blocks_expanded(canvas._blocks_visible)
     canvas.on_graphs_changed = lambda: _sync_sidebar(canvas, sidebar)
     canvas.on_sync_failed = lambda msg: sidebar.set_status(msg, error=True)

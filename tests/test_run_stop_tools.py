@@ -33,6 +33,9 @@ class _FakeExecMonitor:
         self._tracking_reads = 0
         self.synthesized = []
 
+    def bind_run_process(self, process):
+        self.bound_process = process
+
     def mark_run_agent_initiated(self):
         self.marked_agent_initiated += 1
 
@@ -54,6 +57,15 @@ class _FakeExecMonitor:
             return False
         self._tracking = False
         return True
+
+    def get_last_run_log(self):
+        return {
+            "return_code": self.last_run_code,
+            "run_id": self.run_epoch + 1,
+            "log_text": "",
+            "ran_successfully": self.last_run_code == 0,
+            "run_in_progress": False,
+        }
 
     async def wait_for_run_end(self, timeout, *, epoch=None):  # noqa: ARG002
         return self._outcome
@@ -157,7 +169,7 @@ def test_run_gates_unsaved_page(fake_actions):
     msg = str(excinfo.value)
     assert "never been saved" in msg
     assert "save_graph" in msg
-    assert "retry run_flowgraph" in msg
+    assert "retry grc_interaction(mode='start')" in msg
     assert "directory" in msg
     assert "generates from the saved file" not in msg
     fake_actions.exec_action.assert_not_called()
@@ -191,7 +203,7 @@ def test_run_no_wait_returns_started_and_marks_agent_initiated(fake_actions):
     res = asyncio.run(proxy.run_flowgraph(action="start", wait=False))
 
     assert res["status"] == "started"
-    assert "get_run_log" in res["note"]
+    assert "grc_interaction(mode='log')" in res["note"]
     assert monitor.marked_agent_initiated == 1
     fake_actions.exec_action.set_enabled.assert_called_once_with(True)
     fake_actions.exec_action.assert_called_once_with()
@@ -206,9 +218,10 @@ def test_run_wait_completed():
     res = asyncio.run(proxy.run_flowgraph(action="start", wait=True, timeout_seconds=5))
 
     assert res["status"] == "completed"
+    assert res["run_id"] == 1
     assert res["return_code"] == 0
     assert res["ran_successfully"] is True
-    assert "get_run_log" in res["note"]
+    assert "grc_interaction(mode='log')" in res["note"]
 
 
 @pytest.mark.usefixtures("fake_actions")
@@ -220,7 +233,7 @@ def test_run_wait_still_running():
     res = asyncio.run(proxy.run_flowgraph(action="start", wait=True, timeout_seconds=1))
 
     assert res["status"] == "still_running"
-    assert "run_flowgraph" in res["note"]
+    assert "grc_interaction(mode='stop')" in res["note"]
 
 
 class _BoundedRunMonitor(_FakeExecMonitor):
@@ -293,6 +306,7 @@ def test_run_bounded_run_finished_at_deadline_reports_completed(fake_actions):
     res = asyncio.run(proxy.run_flowgraph(action="start", wait=True, stop_after_seconds=5))
 
     assert res["status"] == "completed"
+    assert res["run_id"] == 1
     assert res["return_code"] == 0
     assert res["ran_successfully"] is True
     fake_actions.kill_action.assert_not_called()
@@ -441,21 +455,15 @@ def _ctx(deps, tool_call_approved=True):
     return SimpleNamespace(deps=deps, tool_call_approved=tool_call_approved)
 
 
-def test_tool_run_flowgraph_requires_approval_on_start():
-    """Approval is decided by the args_validator, before the tool body runs.
-
-    That placement is the point: an invalid argument is rejected without a
-    human being asked to approve it, and the deferral costs no retry budget.
-    """
-    from grc_agent.agent import _validate_run_flowgraph
+def test_tool_grc_interaction_requires_approval_on_start():
+    """Only the start mode asks for approval; stop remains available to the user."""
+    from grc_agent.agent import _validate_interaction
 
     with pytest.raises(ApprovalRequired):
-        _validate_run_flowgraph(_ctx(SimpleNamespace(), tool_call_approved=False), action="start")
+        _validate_interaction(_ctx(SimpleNamespace(), tool_call_approved=False), mode="start")
 
-    # 'stop' is the remedy, not the risk — it never asks.
-    _validate_run_flowgraph(_ctx(SimpleNamespace(), tool_call_approved=False), action="stop")
-    # ...and once approved, start passes too.
-    _validate_run_flowgraph(_ctx(SimpleNamespace(), tool_call_approved=True), action="start")
+    _validate_interaction(_ctx(SimpleNamespace(), tool_call_approved=False), mode="stop")
+    _validate_interaction(_ctx(SimpleNamespace(), tool_call_approved=True), mode="start")
 
 
 def test_tool_run_flowgraph_requires_wired_deps():
@@ -468,20 +476,17 @@ def test_tool_run_flowgraph_requires_wired_deps():
         )
 
 
-def test_tool_run_flowgraph_invalid_action():
-    """The Literal in the signature rejects a bad action at validation time.
-
-    There is no hand-written check in the body any more: the schema carries
-    the enum, so an invalid value never reaches the tool.
-    """
+def test_tool_grc_interaction_invalid_mode():
+    """The wrapper's Literal mode schema rejects a bad operation before dispatch."""
     import pydantic
 
     from grc_agent.agent import grc_tools
 
-    tool = [t for t in grc_tools() if t.name == "run_flowgraph"][0]
-    assert tool.function_schema.json_schema["properties"]["action"]["enum"] == ["start", "stop"]
+    tool = [t for t in grc_tools() if t.name == "grc_interaction"][0]
+    modes = tool.function_schema.json_schema["properties"]["mode"]["enum"]
+    assert modes == ["start", "stop", "log", "measure", "plot", "canvas"]
     with pytest.raises(pydantic.ValidationError):
-        tool.function_schema.validator.validate_python({"action": "invalid"})
+        tool.function_schema.validator.validate_python({"mode": "invalid"})
 
 
 @pytest.mark.usefixtures("fake_actions")
@@ -499,7 +504,7 @@ def test_tool_run_flowgraph_wraps_gate_errors_as_modelretry():
     # The gate's self-serve wording crosses the tool boundary intact.
     assert "never been saved" in msg
     assert "save_graph" in msg
-    assert "retry run_flowgraph" in msg
+    assert "retry grc_interaction(mode='start')" in msg
 
 
 @pytest.mark.usefixtures("fake_actions")
@@ -575,6 +580,7 @@ def test_run_flowgraph_annotates_no_gui():
     proxy, _ = _make_proxy(page, outcome="completed", code=0)
     res = asyncio.run(proxy.run_flowgraph(action="start", wait=True))
     assert res["status"] == "completed"
+    assert res["run_id"] == 1
     assert res["generate_options"] == "no_gui"
     assert "external terminal wrapper" in res["note"]
 
@@ -755,3 +761,18 @@ def test_tool_status_vocabulary_conformance(fake_actions):  # noqa: ARG001
     assert observed, "conformance battery produced no statuses"
     outside = [s for s in observed if s not in _RUN_STATUS_VOCABULARY]
     assert outside == [], f"statuses outside the frozen vocabulary: {outside}"
+
+
+def test_bounded_stop_targets_originating_page_after_tab_switch(fake_actions):
+    import asyncio
+
+    original = _valid_page(process=object())
+    selected = _valid_page(process=object())
+    proxy, monitor = _make_proxy(selected, outcome="completed", tracking=False)
+    targets = []
+    cm = object.__getattribute__(proxy, "_canvas_manager")
+    fake_actions.kill_action.side_effect = lambda: targets.append(cm.window.current_page)
+    result = asyncio.run(proxy._finish_bounded_run(monitor, 5, expected_run_id=1, page=original))
+    assert result["status"] == "stopped_after_timeout"
+    assert targets == [original]
+    assert cm.window.current_page is selected

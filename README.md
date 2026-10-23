@@ -276,15 +276,25 @@ active tab automatically.
 ## Tests
 
 ```bash
-uv run pytest tests/ --ignore=tests/test_integration.py --ignore=tests/test_button_integration.py  # fast, no LLM
-uv run pytest tests/test_button_integration.py  # tool integration, needs Ollama Cloud key
-uv run pytest tests/test_integration.py         # live model scenarios, ~15-20 min
+uv run --python .venv/bin/python pytest tests/ --ignore=tests/test_integration.py --ignore=tests/test_button_integration.py  # fast, no LLM
+uv run --python .venv/bin/python pytest -m integration tests/test_button_integration.py  # tool integration, needs Ollama Cloud key
+uv run --python .venv/bin/python pytest -m integration tests/test_integration.py         # live model scenarios, ~15-20 min
 uv run ruff check                               # lint
 ```
-Sidebar/canvas tests need a display: `xvfb-run -a uv run pytest …`.
+Sidebar/canvas tests need a display. For isolated headless tests, use:
+
+```bash
+dbus-run-session -- xvfb-run -a env -u WAYLAND_DISPLAY -u WAYLAND_SOCKET \
+  GDK_BACKEND=x11 QT_QPA_PLATFORM=xcb uv run --python .venv/bin/python pytest tests/test_chat_sidebar.py
+```
+
+Verify `gi` and `gnuradio.gr` imports with the system-bridged interpreter before running native tests.
 
 ## More docs
 
 - [`AGENTS.md`](AGENTS.md) — architecture, engineering rules, and live-verified design decisions.
-- [`docs/technical_overview.md`](docs/technical_overview.md) — deeper architecture writeup with diagrams and benchmarks.
+- [`docs/technical_overview.md`](docs/technical_overview.md) — current architecture and tool responsibilities.
+- [`docs/grc-interaction.md`](docs/grc-interaction.md) — native execution, measurements, and plots.
+- [`docs/backlog.md`](docs/backlog.md) — unfinished work only.
+- [`CHANGELOG.md`](CHANGELOG.md) — shipped features and fixes.
 - [`LICENSE`](LICENSE) / [`NOTICE.md`](NOTICE.md) — AGPL-3.0; the bundled GNU Radio docs corpus is CC BY-SA 3.0.

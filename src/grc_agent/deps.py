@@ -66,6 +66,19 @@ class SupportsSaveBlock(Protocol):
     async def save_block(self, instance_name: str, **kwargs: Any) -> dict[str, Any]: ...
 
 
+@runtime_checkable
+class SupportsObservation(Protocol):
+    """Native run-associated samples and canvas evidence."""
+
+    async def run_observed_flowgraph(self, sink: str, **kwargs: Any) -> dict: ...
+
+    def measure_run(
+        self, run_id: int, offset: int, count: int, sample_rate: float, *, include_image: bool = False
+    ) -> Any: ...
+
+    def capture_canvas(self) -> Any: ...
+
+
 class FlowgraphDeps(Protocol):
     """What a tool receives as ``ctx.deps``.
 

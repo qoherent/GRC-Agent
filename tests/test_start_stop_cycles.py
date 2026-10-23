@@ -80,12 +80,15 @@ class _CycleHarness:
         self.monitor.handle_message("\nExecuting: /tmp/cycle_flow.py\n")
         self.monitor.handle_message(f"cycle output {self.monitor.run_epoch}\n")
         self._next_pid += 1
-        self.page.process = SimpleNamespace(pid=self._next_pid, poll=lambda: None)
+        process = SimpleNamespace(pid=self._next_pid, returncode=None)
+        process.poll = lambda: process.returncode
+        self.page.process = process
 
     def on_kill(self):
         self.kill_calls.append(self.page.process)
         if self.kill_mode == "stall":
             return
+        self.page.process.returncode = -15
         self.monitor.handle_message("\n>>> Done (return code -15)\n")
         self.page.process = None
 
