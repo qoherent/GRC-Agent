@@ -64,6 +64,8 @@ class SettingsDialog(Gtk.Dialog):
         self._build_embeddings_section(grid)
         grid.attach(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL), 0, 14, 2, 1)
         self._build_theme_section(grid)
+        grid.attach(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL), 0, 17, 2, 1)
+        self._build_update_section(grid)
 
         info = Gtk.Label(label="Changes apply immediately on Save.")
         info.get_style_context().add_class("dim-label")
@@ -264,6 +266,33 @@ class SettingsDialog(Gtk.Dialog):
 
     def _on_install_embed_runtime(self, _btn: Gtk.Button) -> None:
         dlg = EmbedRuntimeDialog(self, on_done=lambda _ok, _err: self._sync_embed_fields())
+        dlg.show()
+
+    def _build_update_section(self, grid: Gtk.Grid) -> None:
+        """Application-update entry point. Opens the update dialog only —
+        it never participates in Save (see _collect/_on_response)."""
+        hdr = Gtk.Label()
+        hdr.set_markup("<b>Application Update</b>")
+        hdr.set_xalign(0.0)
+        grid.attach(hdr, 0, 18, 2, 1)
+
+        desc = Gtk.Label(label="Update the app and its Python dependencies.")
+        desc.set_xalign(0.0)
+        desc.get_style_context().add_class("dim-label")
+        grid.attach(desc, 0, 19, 1, 1)
+
+        btn = Gtk.Button(label="Check for updates…")
+        btn.set_tooltip_text(
+            "Check whether this installation is behind origin/main "
+            "and copy the terminal command that applies the update"
+        )
+        btn.connect("clicked", self._on_check_updates)
+        grid.attach(btn, 1, 19, 1, 1)
+
+    def _on_check_updates(self, _btn: Gtk.Button) -> None:
+        from .update_dialog import UpdateDialog
+
+        dlg = UpdateDialog(self)
         dlg.show()
 
     def _sync_provider_fields(self, combo: Gtk.ComboBoxText) -> None:

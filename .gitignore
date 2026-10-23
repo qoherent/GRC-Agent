@@ -75,6 +75,7 @@ experiments/dataset_collection/
 *.campaign/
 
 # ---- Local investigation, planning, and machine-specific evidence ----
+/handoff.md
 /docs/plans/
 /docs/investigation/
 /docs/handoffs/

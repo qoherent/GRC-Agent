@@ -1,6 +1,8 @@
 # ruff: noqa: E402
 import asyncio
 import contextlib
+import fcntl
+import logging
 import os
 import signal
 import sys
@@ -34,6 +36,42 @@ from grc_agent.native_canvas import NativeCanvasManager, NativeFlowgraphProxy
 from grc_agent.settings import load_settings
 
 GRC_EXTENSIONS = (".grc", ".yml", ".yaml")
+
+_log = logging.getLogger(__name__)
+
+# Shared install-lock fd, held for the whole process lifetime: the terminal
+# updater takes this same file exclusive before backing up settings/sessions,
+# so it refuses while the app is still running instead of racing it. The
+# kernel releases the lock on crash/exit — no stale PID files to reconcile.
+_install_lock_fd: object | None = None
+
+
+def _hold_install_lock() -> None:
+    """Acquire the data-dir install lock shared (non-blocking, best-effort).
+
+    Never blocks startup: if the lock file cannot be opened or locked, a
+    warning is logged and the app runs unguarded (the updater then relies on
+    its own revalidation and the user's close-the-app step).
+    """
+    global _install_lock_fd
+    try:
+        from grc_agent.updates import install_lock_path
+
+        path = install_lock_path()
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        # The fd must stay open for the process lifetime; a context manager
+        # would close (and thereby release) the lock.
+        fh = open(path, "a", encoding="utf-8")  # noqa: SIM115
+        try:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except BlockingIOError:
+            # Another app instance already holds it — sharing the guard with
+            # it is exactly right, so keep running without our own fd.
+            fh.close()
+            return
+        _install_lock_fd = fh
+    except Exception as exc:
+        _log.warning("install lock unavailable (%s); running unguarded", exc)
 
 _GLOBAL_CSS_TEMPLATE = """
 * { font-size: %(base)dpx; }
@@ -398,6 +436,7 @@ async def _startup_preflight(sidebar: ChatSidebar) -> None:
 
 def main() -> None:
     window, _, sidebar, _ = build_app()
+    _hold_install_lock()
 
     loop = event_loop.main_event_loop()
 
