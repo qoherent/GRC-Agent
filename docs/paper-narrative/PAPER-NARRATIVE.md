@@ -1,4 +1,5 @@
 # RIA GRC-Agent — Paper Narrative (science-agent handoff)
+Source repo (clone to read code): `git clone https://github.com/qoherent/GRC-Agent.git`
 No refs or citations here by design. Detail sources: `docs/paper-narrative/00-overview.md` through `04-evolution-pivots.md`.
 
 ## 1. Idea

@@ -1,4 +1,5 @@
 # Paper Narrative — Overview (science-agent entry point)
+Source repo (clone to read code): `git clone https://github.com/qoherent/GRC-Agent.git`
 No refs or citations in this folder by design. The research/scientific agent owns all references, related work, evaluation framing, and academic prose.
 
 ## What this folder is
